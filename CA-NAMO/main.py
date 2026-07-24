@@ -1,8 +1,8 @@
 """
 入口：在指定场景上运行代价感知在线 NAMO 规划器并进行可视化。
 Usage:
-    python main.py                       # two_doors，使用启发式难度（无 API）
-    python main.py --scenario two_doors  # 选择场景
+    python main.py                       # 运行
+    python main.py --scenario two_doors  # 选择案例
     python main.py --lambda_w 5          # 提高操作代价 -> 更倾向绕行
     DEEPSEEK_API_KEY=sk-... python main.py   # 使用 DeepSeek 排列难度
 """
@@ -30,8 +30,8 @@ def _plot_poly(ax, poly, **kw):
             ax.fill(xs, ys, **kw)
 
 
-def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
-    fig, ax = plt.subplots(figsize=(9, 6))
+def _draw_static(ax, sim: OnlineNAMO, original_poses):
+    """绘制每一帧都相同的静态元素：工作空间、墙体、目标区域、障碍物原始位置。"""
     _plot_poly(ax, sim.workspace, color="whitesmoke", zorder=0)
     ax.plot(*sim.workspace.exterior.xy, color="black", lw=1)
 
@@ -43,6 +43,19 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     # 原始障碍物 footprint（虚线轮廓）
     for oid, poly in original_poses.items():
         ax.plot(*poly.exterior.xy, color="crimson", lw=1, ls="--", alpha=0.5, zorder=2)
+
+
+def _finish_ax(ax, sim: OnlineNAMO, title: str):
+    ax.set_aspect("equal")
+    ax.set_xlim(-1, sim.workspace.bounds[2] + 1)
+    ax.set_ylim(-1, sim.workspace.bounds[3] + 1)
+    ax.set_title(title, fontsize=10)
+    ax.legend(loc="upper right", fontsize=8)
+
+
+def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
+    fig, ax = plt.subplots(figsize=(9, 6))
+    _draw_static(ax, sim, original_poses)
 
     # 最终障碍物 footprint
     for w in sim.world:
@@ -57,17 +70,59 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
         ax.plot(xs, ys, color="royalblue", lw=2, marker="o", ms=3, zorder=5)
         ax.plot(xs[0], ys[0], marker="*", color="blue", ms=16, zorder=6, label="start")
 
-    ax.set_aspect("equal")
-    ax.set_xlim(-1, sim.workspace.bounds[2] + 1)
-    ax.set_ylim(-1, sim.workspace.bounds[3] + 1)
     title = (f"{res.message}  |  J={res.J} "
              f"(walk={res.walk_cost}, work={res.work_cost})  |  "
              f"moved={res.removed}  |  LLM={res.llm_mode}")
-    ax.set_title(title, fontsize=10)
-    ax.legend(loc="upper right", fontsize=8)
+    _finish_ax(ax, sim, title)
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
+
+
+def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
+                 idx: int, total: int):
+    """渲染单帧：某一步时刻的障碍物位姿 + 机器人当前位置与已走轨迹。"""
+    fig, ax = plt.subplots(figsize=(9, 6))
+    _draw_static(ax, sim, original_poses)
+
+    perceived = frame["perceived"]
+    for oid, poly, removed in frame["obstacles"]:
+        if oid not in perceived:
+            # 机器人尚未感知到 -> 幽灵灰色轮廓
+            ax.plot(*poly.exterior.xy, color="gray", lw=1, ls=":", alpha=0.5, zorder=3)
+            continue
+        col = "orange" if removed else "crimson"
+        _plot_poly(ax, poly, color=col, alpha=0.6, zorder=3)
+        cx, cy = poly.centroid.x, poly.centroid.y
+        ax.text(cx, cy, str(oid), ha="center", va="center", fontsize=8, zorder=4)
+
+    # 已走轨迹
+    track = frame["track"]
+    if track:
+        xs = [p[0] for p in track]
+        ys = [p[1] for p in track]
+        ax.plot(xs, ys, color="royalblue", lw=2, marker="o", ms=3, zorder=5)
+        ax.plot(xs[0], ys[0], marker="*", color="blue", ms=16, zorder=6, label="start")
+
+    # 机器人当前位置
+    rx, ry = frame["robot"]
+    ax.plot(rx, ry, marker="o", color="red", ms=10, zorder=7, label="robot")
+
+    title = f"step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
+    _finish_ax(ax, sim, title)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
+    """把 res.frames 逐帧渲染为编号 PNG（step_000.png, step_001.png, ...）。"""
+    os.makedirs(frames_dir, exist_ok=True)
+    total = len(res.frames)
+    for i, frame in enumerate(res.frames):
+        out = os.path.join(frames_dir, f"step_{i:03d}.png")
+        render_frame(sim, frame, original_poses, out, i, total)
+    return total
 
 
 def main():
@@ -76,6 +131,8 @@ def main():
     ap.add_argument("--lambda_d", type=float, default=None)
     ap.add_argument("--lambda_w", type=float, default=None)
     ap.add_argument("--no-llm-order", action="store_true")
+    ap.add_argument("--frames", action="store_true",
+                    help="逐步保存机器人每一步运动的帧图片到 img/frames/")
     args = ap.parse_args()
 
     s = scenarios.load(args.scenario)
@@ -86,6 +143,8 @@ def main():
         cfg.lambda_w = args.lambda_w
     if args.no_llm_order:
         cfg.use_llm_ordering = False
+    if args.frames:
+        cfg.save_frames = True
 
     os.makedirs(cfg.out_dir, exist_ok=True)
 
@@ -114,6 +173,12 @@ def main():
     out = os.path.join(cfg.out_dir, f"summary_{s['name']}.png")
     visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
+
+    if cfg.save_frames:
+        frames_dir = os.path.join(cfg.out_dir, "frames")
+        n = render_sequence(sim, res, original_poses, frames_dir)
+        print(f"Saved {n} step frames -> {frames_dir}/step_000.png ... "
+              f"step_{n - 1:03d}.png")
     return res
 
 

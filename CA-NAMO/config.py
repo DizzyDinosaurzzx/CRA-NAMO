@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Config:
+    # -------- 机器人 --------
+    robot_radius: float = 0.4 # 机器人尺寸半径
+
     # -------- 代价函数 J --------
     lambda_d: float = 1.0     # 行驶距离权重（“惜路”）
     lambda_w: float = 1.0     # 操作功权重（“惜力”）
@@ -23,7 +26,6 @@ class Config:
     # -------- 路网 --------
     grid_step: float = 2.0    # 静态自由空间中路网节点的网格间距
     conn_radius: float = 3.0  # 两个节点距离不超过此值且视线无阻时建立连接
-    robot_radius: float = 0.4 # 机器人圆盘半径；边按此值膨胀
 
     # -------- 搜索 --------
     use_llm_ordering: bool = True
@@ -43,6 +45,7 @@ class Config:
     # -------- 其他 --------
     rng_seed: int = 0
     out_dir: str = "img"       # 可视化结果的输出目录
+    save_frames: bool = False  # 是否逐步保存机器人每一步运动的帧图片（img/frames/）
     verbose: bool = True
 
     def log(self, *args):

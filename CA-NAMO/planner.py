@@ -40,6 +40,7 @@ class RunResult:
     removed: List[int] = field(default_factory=list)
     robot_track: List[Tuple[float, float]] = field(default_factory=list)
     history: List[dict] = field(default_factory=list)   # snapshots for visualisation
+    frames: List[dict] = field(default_factory=list)    # per-step frames (逐步动画)
     message: str = ""
 
 
@@ -77,6 +78,7 @@ class OnlineNAMO:
         res.robot_track.append(self.roadmap.nodes[node])
 
         self.belief.perceive(self.world, self.roadmap.nodes[node])
+        self._capture_frame(res, node, "start")
 
         planner = Planner(self.roadmap, self.belief, self.estimator, cfg)
 
@@ -110,6 +112,7 @@ class OnlineNAMO:
                     res.J += cfg.lambda_w * act["work"]
                     if act["oid"] not in res.removed:
                         res.removed.append(act["oid"])
+                    self._capture_frame(res, node, f"push obstacle {act['oid']}")
                 elif act["type"] == "move":
                     res.walk_cost += cfg.lambda_d * act["dist"]
                     res.J += cfg.lambda_d * act["dist"]
@@ -118,6 +121,7 @@ class OnlineNAMO:
                     moves_done += 1
                     # 每次实际移动后感知（揭示被暴露的障碍物）
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
+                    self._capture_frame(res, node, f"move to node {node}")
                     if node == self.goal_node:
                         reached_goal = True
                         break
@@ -146,6 +150,20 @@ class OnlineNAMO:
             if w.oid == oid:
                 w.x, w.y, w.theta, w.removed = x, y, theta, True
                 return
+
+    def _capture_frame(self, res: RunResult, node: int, label: str):
+        """记录一帧当前世界状态（机器人 + 所有障碍物位姿），用于逐步动画。"""
+        if not self.cfg.save_frames:
+            return
+        res.frames.append({
+            "robot": self.roadmap.nodes[node],
+            "track": list(res.robot_track),
+            # 每个障碍物当前的 footprint（polygon 属性每次都新建，可安全快照）
+            "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],
+            "perceived": set(self.belief.perceived.keys()),
+            "J": round(res.J, 4),
+            "label": label,
+        })
 
     def _snapshot(self, res: RunResult, node: int, plan: Plan):
         res.history.append({
