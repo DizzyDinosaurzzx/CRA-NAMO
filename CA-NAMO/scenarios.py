@@ -66,7 +66,65 @@ def two_doors():
                 movable=movable, start=start, goal_region=goal_region, cfg=cfg)
 
 
-SCENARIOS = {"two_doors": two_doors}
+def two_doors_hidden_c():
+    """双门场景：近门有 A，远门有 B，且 C 被 B 遮挡。
+
+        +-----------------------------+ 40
+        |  S                          |
+        |  .                          |
+        |  A==========wall======B     |  <- 近门在 A，远门在 B
+        |  .                   C      |     C 被 B 遮挡
+        |  G                          |
+        +-----------------------------+ 0
+           x=0                     x=28
+
+    障碍物编号与名称的对应关系为 1=A、2=B、3=C。难度数值是仿真世界中的
+    ground truth；在进入感知半径之前，规划器并不知道障碍物的存在与难度。
+    近门由第二难移动的 A 阻挡；远门由第三难移动的 B 阻挡，B 后面隐藏着第一难
+    移动的 C。真实难度满足 C >> A >> B。机器人接近远门时先发现 B，移动 B 后
+    才发现 C，从而触发在线重规划。
+    """
+    workspace = box(0, 0, 28, 40)
+
+    # y 位于 [19.5, 20.5] 的水平墙。
+    # 近门 x[3,7] 与 S/G 对齐；远门 x[21,25] 迫使机器人额外绕行约 36 m。
+    # S 位于上方房间，因此 B 在视线上挡住其下方的 C；B 的首选移除方向则朝上，
+    # 不会穿过 C。
+    walls = [
+        StaticObstacle(box(0.0, 19.5, 3.0, 20.5), "wall_left"),
+        StaticObstacle(box(7.0, 19.5, 21.0, 20.5), "wall_mid"),
+        StaticObstacle(box(25.0, 19.5, 28.0, 20.5), "wall_right"),
+    ]
+
+    movable = [
+        # A：堵住近门，难度排名第二。
+        MovableObstacle(x=5.0, y=20.0, l=3.4, d=1.4, theta=0.0,
+                        material="loaded_pallet", difficulty=20.0, oid=1),
+        # B：堵住远门、位于 C 的上方，难度排名第三。
+        MovableObstacle(x=23.0, y=20.0, l=3.8, d=1.8, theta=0.0,
+                        material="wooden_crate", difficulty=2.0, oid=2),
+        # C：与 B、远门同轴，从上方房间观察时被 B 完全遮挡，难度排名第一。
+        MovableObstacle(x=23.0, y=18.0, l=3.8, d=1.4, theta=0.0,
+                        material="steel_safe", difficulty=200.0, oid=3),
+    ]
+
+    start = (5.0, 35.0)
+    goal_region = box(4.0, 4.0, 6.0, 6.0)
+
+    cfg = Config(
+        lambda_d=1.0, lambda_w=1.0,
+        R_perc=6.0, R_push=4.5,
+        grid_step=1.5, conn_radius=2.4, robot_radius=0.35,
+        step_execute_edges=1, max_replans=240,
+    )
+    return dict(name="two_doors_hidden_c", workspace=workspace, static=walls,
+                movable=movable, start=start, goal_region=goal_region, cfg=cfg)
+
+
+SCENARIOS = {
+    "two_doors": two_doors,
+    "two_doors_hidden_c": two_doors_hidden_c,
+}
 
 
 def load(name: str = "two_doors"):
