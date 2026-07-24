@@ -1,0 +1,4 @@
+shapely>=2.0
+numpy>=1.22
+matplotlib>=3.5
+requests>=2.28
