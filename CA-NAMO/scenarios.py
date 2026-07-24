@@ -1,6 +1,18 @@
 """
-演示场景。
+演示场景
+"""
 
+from __future__ import annotations
+
+from shapely.geometry import box, Polygon
+
+from obstacle import MovableObstacle, StaticObstacle
+from config import Config
+
+
+def two_doors():
+
+    """
 `two_doors` is the canonical illustration of the cost trade-off:
 
     +------------------------------------------+ 20
@@ -19,16 +31,8 @@
 
 机器人只有接近到 R_perc 范围内才会发现 A 和 B；B 最初被 A 遮挡，移动 A 后会揭示 B，
 并触发重规划。
-"""
-from __future__ import annotations
-
-from shapely.geometry import box, Polygon
-
-from obstacle import MovableObstacle, StaticObstacle
-from config import Config
-
-
-def two_doors():
+    """
+    
     workspace = box(0, 0, 30, 20)
 
     # x 位于 [14.5, 15.5] 的竖直墙，包含两个缺口：近处 y[3,6]，远处 y[15,18]
@@ -67,6 +71,7 @@ def two_doors():
 
 
 def two_doors_hidden_c():
+
     """双门场景：近门有 A，远门有 B，且 C 被 B 遮挡。
 
         +-----------------------------+ 40

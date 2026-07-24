@@ -1,0 +1,16 @@
+# ---- macOS ----
+.DS_Store
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 运行结果 / 可视化输出 ----
+img/
+*.gif
+
+# ---- 密钥 ----
+.env

@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 
 import matplotlib
@@ -118,6 +119,9 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
 def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
     """把 res.frames 逐帧渲染为编号 PNG（step_000.png, step_001.png, ...）。"""
     os.makedirs(frames_dir, exist_ok=True)
+    # 渲染前清空旧的帧图片，避免上一次运行帧数更多时残留高编号帧
+    for old in glob.glob(os.path.join(frames_dir, "step_*.png")):
+        os.remove(old)
     total = len(res.frames)
     for i, frame in enumerate(res.frames):
         out = os.path.join(frames_dir, f"step_{i:03d}.png")
