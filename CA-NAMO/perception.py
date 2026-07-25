@@ -12,10 +12,9 @@
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List, Set, Tuple
 
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 
 from obstacle import MovableObstacle
 from roadmap import Roadmap, EdgeKey
@@ -29,6 +28,9 @@ class Belief:
         self.perceived: Dict[int, MovableObstacle] = {}     # oid -> 障碍物（已感知到的真实难度）
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # 边 -> 阻挡该边的障碍物 oid 集合
         self.newly_revealed: List[int] = []
+        # 通过“推动碰撞”发现的匿名占据区域：只知道“这里有东西”，不知其身份/几何/难度。
+        # 仅用作放置/推动的硬约束；无法据此规划“移除”它（不知道怎么移、多难移）。
+        self.contacts: List[Polygon] = []
 
     # -------------------- 感知 ----------------------
     def perceive(self, world_obstacles: List[MovableObstacle],
@@ -41,22 +43,57 @@ class Belief:
                 continue
             if rp.distance(Point(w.center())) > self.cfg.R_perc:
                 continue
-            if self._occluded(robot_pos, w, world_obstacles):
+            if not self._visible(robot_pos, w, world_obstacles):
                 continue
             self.perceived[w.oid] = w
             self.newly_revealed.append(w.oid)
             self._update_edges_for(w)
+            # 该物体现在被完整感知，之前对它的匿名“接触”记录可以清除（由真实 footprint 取代）
+            self._clear_contacts_overlapping(w.polygon)
         return self.newly_revealed
 
-    def _occluded(self, robot_pos, target: MovableObstacle,
-                  world_obstacles: List[MovableObstacle]) -> bool:
-        sight = LineString([robot_pos, target.center()])
-        d_target = math.hypot(robot_pos[0] - target.x, robot_pos[1] - target.y)
+    # -------------------- 可见性（多点采样 + 墙体遮挡） ----------------------
+    def _edge_samples(self, obs: MovableObstacle):
+        """矩形的四条边，每条边用 (角, 边中点, 角) 三个采样点表示。"""
+        coords = list(obs.polygon.exterior.coords)[:-1]   # 4 个角（去掉闭合重复点）
+        n = len(coords)
+        edges = []
+        for i in range(n):
+            a = coords[i]
+            b = coords[(i + 1) % n]
+            mid = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+            edges.append((a, mid, b))
+        return edges
+
+    def _point_visible(self, robot_pos, p,
+                       target: MovableObstacle,
+                       world_obstacles: List[MovableObstacle]) -> bool:
+        """从机器人到采样点 p 的视线是否畅通（不被墙体或其他障碍物遮挡）。
+
+        cfg.sight_width>0 时把视线视为具有该宽度的走廊（缓冲后判断），窄于该宽度的
+        缝隙无法看穿；为 0 时退化为零宽度射线。
+        """
+        seg = LineString([robot_pos, p])
+        width = self.cfg.sight_width
+        sight = seg.buffer(width / 2.0, cap_style=2) if width > 0 else seg
+        # 墙体遮挡：视线一旦离开静态自由空间（= 工作空间挖去墙体）即被墙挡住
+        if not self.roadmap.static_free.contains(sight):
+            return False
+        # 其他可移动障碍物遮挡
         for w in world_obstacles:
             if w.oid == target.oid:
                 continue
-            d_w = math.hypot(robot_pos[0] - w.x, robot_pos[1] - w.y)
-            if d_w < d_target and w.polygon.intersects(sight):
+            if sight.intersects(w.polygon):
+                return False
+        return True
+
+    def _visible(self, robot_pos, target: MovableObstacle,
+                 world_obstacles: List[MovableObstacle]) -> bool:
+        """只有至少一条完整的边（两角 + 边中点 3 点全部可见）时才算感知到该障碍物。"""
+        for a, mid, b in self._edge_samples(target):
+            if (self._point_visible(robot_pos, a, target, world_obstacles)
+                    and self._point_visible(robot_pos, mid, target, world_obstacles)
+                    and self._point_visible(robot_pos, b, target, world_obstacles)):
                 return True
         return False
 
@@ -77,6 +114,31 @@ class Belief:
                 blockers.add(obs.oid)
             else:
                 blockers.discard(obs.oid)
+
+    # -------------------- 碰撞接触（部分信息） ----------------------
+    def register_contact(self, region: Polygon):
+        """记录一块通过推动碰撞发现的匿名占据区域（不含身份/难度信息）。"""
+        if region is None or region.is_empty:
+            return
+        self.contacts.append(region)
+
+    def _clear_contacts_overlapping(self, poly: Polygon):
+        """某障碍物被完整感知后，删除与其重叠的匿名接触记录（已被真实 footprint 取代）。"""
+        if not self.contacts:
+            return
+        self.contacts = [c for c in self.contacts if not c.intersects(poly)]
+
+    def force_reveal(self, obs: MovableObstacle) -> List[int]:
+        """物理接触导致的强制揭示：无视感知半径与遮挡，直接把障碍物纳入信念。
+
+        用于机器人推动某障碍物时撞上一个尚未感知的物体——碰撞本身就暴露了它。
+        """
+        if obs.oid in self.perceived:
+            return []
+        self.perceived[obs.oid] = obs
+        self.newly_revealed.append(obs.oid)
+        self._update_edges_for(obs)
+        return [obs.oid]
 
     def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):
         """Apply an executed push: move the obstacle and refresh its blocked edges."""

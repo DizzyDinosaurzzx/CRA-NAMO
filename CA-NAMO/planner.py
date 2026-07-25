@@ -23,6 +23,7 @@ from roadmap import Roadmap
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
 from search import Planner, Plan
+import geometry
 
 
 @dataclass
@@ -106,6 +107,27 @@ class OnlineNAMO:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
                     dx, dy, dth = act["drop"]
+                    # 物理校验：在真实世界里，这次推动是否会撞到别的障碍物（含尚未
+                    # 感知的）？规划是乐观的、只避开已知障碍物；现实由此处兜底。
+                    hits = self._world_collision(act["oid"], dx, dy, dth)
+                    if hits:
+                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的“知情”取决于配置：
+                        #   full_reveal_on_contact=True : 直接获知被撞障碍物全部信息
+                        #   False(更真实)              : 只记录“此处有物”的匿名接触区域，
+                        #                                身份/几何/难度要等遮挡移开后正常感知
+                        for oid_hit, region in hits:
+                            if cfg.full_reveal_on_contact:
+                                self.belief.force_reveal(self._world_obstacle(oid_hit))
+                            else:
+                                self.belief.register_contact(region)
+                        if cfg.full_reveal_on_contact:
+                            label = (f"push {act['oid']} blocked by "
+                                     f"{sorted(o for o, _ in hits)} -> replan")
+                        else:
+                            label = (f"push {act['oid']} hit unknown obstruction "
+                                     f"-> replan")
+                        self._capture_frame(res, node, label)
+                        break
                     self.belief.relocate(obs, dx, dy, dth)
                     self._relocate_world(act["oid"], dx, dy, dth)
                     res.work_cost += cfg.lambda_w * act["work"]
@@ -145,6 +167,35 @@ class OnlineNAMO:
         return res
 
     # -------------------------------------------------------------- 辅助方法
+    def _world_obstacle(self, oid: int) -> Optional[MovableObstacle]:
+        for w in self.world:
+            if w.oid == oid:
+                return w
+        return None
+
+    def _world_collision(self, oid: int, nx: float, ny: float, theta: float):
+        """真实世界物理校验：把 oid 推到 (nx, ny, theta) 是否与其他障碍物碰撞。
+
+        对*全部*可移动障碍物（含机器人尚未感知的）检查终点位姿与推动扫掠路径。
+        返回被撞到的障碍物列表 [(oid, contact_region), ...]，其中 contact_region 是
+        被推物体扫掠区与该障碍物的重叠区（即“机器人实际感受到阻力”的那块区域）；
+        空列表表示无碰撞。
+        """
+        if not self.cfg.check_obstacle_collision:
+            return []
+        mover = self._world_obstacle(oid)
+        end_poly = mover.polygon_at(nx, ny, theta)
+        swept = geometry._swept_region(mover, nx, ny)
+        hits = []
+        for w in self.world:
+            if w.oid == oid:
+                continue
+            wp = w.polygon
+            if end_poly.intersects(wp) or swept.intersects(wp):
+                contact = swept.intersection(wp)   # 只“摸到”接触重叠区，非整个障碍物
+                hits.append((w.oid, contact))
+        return hits
+
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
         for w in self.world:
             if w.oid == oid:

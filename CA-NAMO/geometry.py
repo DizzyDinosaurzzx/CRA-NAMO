@@ -47,8 +47,9 @@ def push_plan(
     must_clear: Optional[Polygon],     # 放置位姿【必须】腾空的通道（硬约束）
     avoid: Optional[Polygon],          # 应避免重新阻挡的其他畅通通道（软约束）
     cfg: Config,
+    others: Optional[Polygon] = None,  # 其他可移动障碍物当前占据的区域（硬约束：不得碰撞）
 ) -> Tuple[bool, float, Optional[Tuple[float, float, float]]]:
-    
+
     """
     为障碍物找到代价最小的可行重新放置方案
 
@@ -56,6 +57,7 @@ def push_plan(
       * 它完全落在静态自由空间内（不撞墙）
       * 到达该位姿的直线推动过程也始终处于静态自由空间内
       * 它完全腾空 `must_clear`——即该障碍物当前挡住的通道（从而让“付费可解锁”的边真正被打通）
+      * 终点位姿与推动扫掠路径都不与其他可移动障碍物 `others` 相交（物体不能互相穿透/叠放）
 
     在可行位姿中，我们将避免反效果的偏好作为软目标
     优先选择不会重新阻挡其他当前畅通通道（`avoid`）的位姿，并以最短推动距离打破平局。
@@ -78,8 +80,13 @@ def push_plan(
                 continue
             if must_clear is not None and end_poly.intersects(must_clear):
                 continue
-            if not static_free.contains(_swept_region(obs, nx, ny)):
+            if others is not None and end_poly.intersects(others):
+                continue                              # 终点压到了别的障碍物
+            swept = _swept_region(obs, nx, ny)
+            if not static_free.contains(swept):
                 continue
+            if others is not None and swept.intersects(others):
+                continue                              # 推动路径穿过了别的障碍物
 
             penalty = 1 if (avoid is not None and end_poly.intersects(avoid)) else 0
             dist = math.hypot(nx - cx, ny - cy)

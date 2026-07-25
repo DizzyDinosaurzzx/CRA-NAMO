@@ -60,12 +60,8 @@ def two_doors():
     start = (5.0, 4.5)
     goal_region = box(24.0, 3.5, 26.0, 5.5)
 
-    cfg = Config(
-        lambda_d=1.0, lambda_w=1.0,
-        R_perc=8.0, R_push=5.0,
-        grid_step=1.5, conn_radius=2.4, robot_radius=0.35,
-        step_execute_edges=1, max_replans=120,
-    )
+    # 所有可调参数统一在 config.py 中控制，这里不再覆盖
+    cfg = Config()
     return dict(name="two_doors", workspace=workspace, static=walls,
                 movable=movable, start=start, goal_region=goal_region, cfg=cfg)
 
@@ -106,22 +102,21 @@ def two_doors_hidden_c():
         MovableObstacle(x=5.0, y=20.0, l=3.4, d=1.4, theta=0.0,
                         material="loaded_pallet", difficulty=20.0, oid=1),
         # B：堵住远门、位于 C 的上方，难度排名第三。
-        MovableObstacle(x=23.0, y=20.0, l=3.8, d=1.8, theta=0.0,
+        # 上移到 y=20.5（底部 19.6），正好压在 C 的顶部之上而不与之重叠。
+        MovableObstacle(x=23.0, y=20.5, l=3.8, d=1.8, theta=0.0,
                         material="wooden_crate", difficulty=2.0, oid=2),
         # C：与 B、远门同轴，从上方房间观察时被 B 完全遮挡，难度排名第一。
-        MovableObstacle(x=23.0, y=18.0, l=3.8, d=1.4, theta=0.0,
+        # 抬高到 y=18.8（顶部 19.5）与墙体底面严丝合缝，封死原来 C 顶与墙底之间
+        # 那条 0.8 宽的竖直缝——移开 B 后机器人无法再从缝中横向绕过 C。
+        MovableObstacle(x=23.0, y=18.8, l=3.8, d=1.4, theta=0.0,
                         material="steel_safe", difficulty=200.0, oid=3),
     ]
 
     start = (5.0, 35.0)
     goal_region = box(4.0, 4.0, 6.0, 6.0)
 
-    cfg = Config(
-        lambda_d=1.0, lambda_w=1.0,
-        R_perc=6.0, R_push=4.5,
-        grid_step=1.5, conn_radius=2.4, robot_radius=0.35,
-        step_execute_edges=1, max_replans=240,
-    )
+    # 所有可调参数统一在 config.py 中控制，这里不再覆盖
+    cfg = Config()
     return dict(name="two_doors_hidden_c", workspace=workspace, static=walls,
                 movable=movable, start=start, goal_region=goal_region, cfg=cfg)
 

@@ -158,8 +158,18 @@ class Planner:
         must_clear = unary_union(own) if own else None
         # 软约束：避免重新阻挡其他当前畅通的通道（避免反效果）
         avoid = self.free_union
+        # 硬约束：不得与其他已知占据区域碰撞（终点与推动路径都要避开）：
+        #   1) 其他已感知的可移动障碍物 footprint
+        #   2) 通过推动碰撞发现的匿名接触区域（只知“有东西”，同样不能压上去）
+        others = None
+        if self.cfg.check_obstacle_collision:
+            polys = [ob.polygon for oid2, ob in self.belief.perceived.items()
+                     if oid2 != oid]
+            polys += self.belief.contacts
+            others = unary_union(polys) if polys else None
         feasible, dist, drop = geometry.push_plan(
-            obs, self.roadmap.static_free, must_clear, avoid, self.cfg)
+            obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
+            others=others)
         work = geometry.push_work(obs, dist) if feasible else math.inf
         res = (feasible, work, drop)
         self._removal_cache[oid] = res
