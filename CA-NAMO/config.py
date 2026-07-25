@@ -42,14 +42,14 @@ class Config:
     # -------- LLM（DeepSeek）--------
     deepseek_api_key: str = ""             # 为空时使用启发式回退方案
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
-    deepseek_model: str = "deepseek-chat"  # DeepSeek-V3
+    deepseek_model: str = "deepseek-v4-flash"
     llm_timeout: float = 30.0
     llm_max_retries: int = 2
 
     # -------- 其他 --------
     rng_seed: int = 0
     out_dir: str = "img"       # 可视化结果的输出目录
-    save_frames: bool = True   # 是否逐步保存机器人每一步运动的帧图片（img/frames/）
+    save_frames: bool = True   # 是否保存过程帧（img/frames_<地图名>/）
     verbose: bool = True
 
     def log(self, *args):

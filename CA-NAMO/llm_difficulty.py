@@ -1,6 +1,6 @@
 """
 使用 LLM（DeepSeek）估计操作难度，并提供离线启发式回退方案。
-* 如果有可用的 DeepSeek API 密钥（Config.deepseek_api_key 或 DEEPSEEK_API_KEY 环境变量），则使用 DeepSeek-V3 进行估计。
+* 如果有可用的 DeepSeek API 密钥（Config.deepseek_api_key 或 DEEPSEEK_API_KEY 环境变量），则使用 DeepSeek-V4-Flash 进行估计。
 * 否则使用确定性的启发式方法（材质密度代理值 x 面积）
 """
 
@@ -92,6 +92,7 @@ class DifficultyEstimator:
             "max_tokens": 12,
             "temperature": 0.0,
             "stream": False,
+            "thinking": {"type": "disabled"},
         }
         for attempt in range(self.cfg.llm_max_retries + 1):
             try:
@@ -99,9 +100,20 @@ class DifficultyEstimator:
                 r = requests.post(self.cfg.deepseek_base_url, headers=headers,
                                   json=body, timeout=self.cfg.llm_timeout)
                 data = r.json()
+                if r.status_code >= 400:
+                    error = data.get("error", data) if isinstance(data, dict) else data
+                    self.cfg.log(f"[LLM] HTTP {r.status_code}: {error}")
+                    # 参数、鉴权等 4xx 错误重复请求不会自行恢复；限流和超时除外。
+                    retryable = r.status_code >= 500 or r.status_code in {408, 409, 429}
+                    if not retryable:
+                        return None
+                    if attempt < self.cfg.llm_max_retries:
+                        time.sleep(2.0)
+                    continue
                 if "choices" not in data:
                     self.cfg.log(f"[LLM] unexpected response: {data}")
-                    time.sleep(2.0)
+                    if attempt < self.cfg.llm_max_retries:
+                        time.sleep(2.0)
                     continue
                 text = data["choices"][0]["message"]["content"]
                 m = re.search(r"[-+]?\d*\.?\d+", text)
@@ -109,5 +121,6 @@ class DifficultyEstimator:
                     return float(m.group())
             except Exception as e:            # noqa: BLE001 - 任意失败都回退
                 self.cfg.log(f"[LLM] call failed ({attempt}): {e}")
-                time.sleep(2.0)
+                if attempt < self.cfg.llm_max_retries:
+                    time.sleep(2.0)
         return None
