@@ -60,10 +60,7 @@ class Planner:
         free_corridors = [rm.edge_corridor[k] for k in rm.edge_len
                           if not self.belief.blockers_of(k)]
         self.free_union = unary_union(free_corridors) if free_corridors else None
-        self._removal_cache: Dict[
-            Tuple[int, EdgeKey],
-            Tuple[bool, float, Optional[tuple]],
-        ] = {}
+        self._removal_cache: Dict[int, Tuple[bool, float, Optional[tuple]]] = {}
 
         def h(node):
             x, y = rm.nodes[node]
@@ -143,24 +140,22 @@ class Planner:
         removals = []
         extra = 0.0
         for oid in blockers:
-            feasible, work, drop = self._removal(oid, key)
+            feasible, work, drop = self._removal(oid)
             if not feasible:
                 return math.inf, []
             extra += cfg.lambda_w * work
             removals.append((oid, drop, work))
         return base + extra, removals
 
-    def _removal(self, oid: int, edge_key: EdgeKey):
-        """计算把障碍物移出当前待通过通道所需的真实代价。"""
-        cache_key = (oid, edge_key)
-        if cache_key in self._removal_cache:
-            return self._removal_cache[cache_key]
+    def _removal(self, oid: int):
+        """Real cost of relocating obstacle `oid` clear of every edge it blocks."""
+        if oid in self._removal_cache:
+            return self._removal_cache[oid]
         obs = self.belief.obstacle(oid)
-        # 硬约束：清空机器人当前准备通过的这条边。大障碍物通常同时覆盖几十条
-        # 稠密路网边；要求一次推动清空全部边会错误地把可移动物体判为不可移动。
-        # 执行器通过该边后会立即重新感知和规划，因此新位置造成的其他阻挡会在
-        # 下一轮准确纳入信念。
-        must_clear = self.roadmap.edge_corridor[edge_key]
+        # 硬约束：清空该障碍物当前阻挡的所有通道
+        own = [self.roadmap.edge_corridor[k]
+               for k, bs in self.belief.edge_blockers.items() if oid in bs]
+        must_clear = unary_union(own) if own else None
         # 软约束：避免重新阻挡其他当前畅通的通道（避免反效果）
         avoid = self.free_union
         # 硬约束：不得与其他已知占据区域碰撞（终点与推动路径都要避开）：
@@ -177,7 +172,7 @@ class Planner:
             others=others)
         work = geometry.push_work(obs, dist) if feasible else math.inf
         res = (feasible, work, drop)
-        self._removal_cache[cache_key] = res
+        self._removal_cache[oid] = res
         return res
 
     def _llm_bias(self, removals) -> float:

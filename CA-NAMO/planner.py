@@ -93,7 +93,7 @@ class OnlineNAMO:
             if plan is None:
                 res.message = "No feasible plan under current belief."
                 res.cycles = cycle + 1
-                return self._finalize_result(res, node)
+                return res
             res.total_expansions += plan.expansions
             self._snapshot(res, node, plan)
 
@@ -103,7 +103,6 @@ class OnlineNAMO:
             # ---- 执行规划的前置边（包括对应的障碍物移除）----
             moves_done = 0
             reached_goal = False
-            pushed_this_cycle = False
             for act in plan.actions:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
@@ -135,7 +134,6 @@ class OnlineNAMO:
                     res.J += cfg.lambda_w * act["work"]
                     if act["oid"] not in res.removed:
                         res.removed.append(act["oid"])
-                    pushed_this_cycle = True
                     self._capture_frame(res, node, f"push obstacle {act['oid']}")
                 elif act["type"] == "move":
                     res.walk_cost += cfg.lambda_d * act["dist"]
@@ -149,19 +147,13 @@ class OnlineNAMO:
                     if node == self.goal_node:
                         reached_goal = True
                         break
-                    # 推障规划只保证清空当前通过的路网边。通过后立即重规划，
-                    # 让障碍物的新位置及其新阻挡关系进入下一轮信念。
-                    if pushed_this_cycle or moves_done >= cfg.step_execute_edges:
+                    if moves_done >= cfg.step_execute_edges:
                         break
 
             res.cycles = cycle + 1
             if reached_goal or node == self.goal_node:
                 break
 
-        return self._finalize_result(res, node)
-
-    def _finalize_result(self, res: RunResult, node: int) -> RunResult:
-        """统一汇总成功和提前失败两种退出路径的指标。"""
         res.success = (node == self.goal_node)
         res.J = round(res.J, 4)
         res.walk_cost = round(res.walk_cost, 4)
