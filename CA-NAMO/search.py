@@ -3,13 +3,14 @@
     f = g + h，g = 当前累积代价，h = 到目标的可采纳下界。
 
 A 搜索状态是 (node, frozenset(本次规划中已移除的障碍物))。
-经过当前被阻挡的边时需要"付费解锁"：假设移开阻挡障碍物，并将 lambda_w * real_work 加入 g，其中 real_work
-由几何计算器（push_plan）根据真实几何信息计算。
+经过当前被阻挡的边时需要“付费解锁”：几何计算器给出障碍物平移距离 d，
+LLM 根据物体标签估计 eta = mu * m，并按 J1 = eta * g * d、J2 = 0、
+W = J1 + J2 将预计做功加入 g。
 
 正确性保证：
-  * h = lambda_d * 到目标的欧氏距离，是可采纳的（剩余行驶距离 >= 直线距离，且操作功项非负），因此第一个被弹出的目标状态即为代价最优解。
+  * h = lambda_move * 到目标的欧氏距离，是可采纳的（剩余行驶距离 >= 直线距离，且操作功项非负），因此第一个被弹出的目标状态即为估计代价最优解。
   * 分支限界会剪掉任何 f >= 当前已找到的最优目标代价的状态。
-LLM 难度估计仅排列后继节点的扩展顺序（用于打破平局/聚焦搜索），因此错误估计只会改变搜索顺序，不会改变返回的代价。
+LLM 难度估计直接进入 W，因此返回方案对当前标签估计出的代价最优。
 
 """
 
@@ -18,7 +19,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from shapely.ops import unary_union
@@ -60,16 +61,19 @@ class Planner:
         free_corridors = [rm.edge_corridor[k] for k in rm.edge_len
                           if not self.belief.blockers_of(k)]
         self.free_union = unary_union(free_corridors) if free_corridors else None
-        self._removal_cache: Dict[int, Tuple[bool, float, Optional[tuple]]] = {}
+        self._removal_cache: Dict[
+            Tuple[int, EdgeKey],
+            Optional[dict],
+        ] = {}
 
         def h(node):
             x, y = rm.nodes[node]
-            return cfg.lambda_d * math.hypot(x - gx, y - gy)
+            return cfg.lambda_move * math.hypot(x - gx, y - gy)
 
         counter = itertools.count()
         start_state = (start_node, frozenset())
-        # 优先级：(f, llm_bias, tie)；父节点映射：state -> (prev_state, actions, gcost)
-        open_heap = [(h(start_node), 0.0, next(counter), start_state)]
+        # 优先级：(f, tie)；父节点映射：state -> (prev_state, actions, gcost)
+        open_heap = [(h(start_node), next(counter), start_state)]
         g_best: Dict[Tuple[int, frozenset], float] = {start_state: 0.0}
         parent: Dict[Tuple[int, frozenset], Tuple] = {start_state: (None, [], 0.0)}
         incumbent = math.inf
@@ -77,7 +81,7 @@ class Planner:
         expansions = 0
 
         while open_heap:
-            f, bias, _, state = heapq.heappop(open_heap)
+            f, _, state = heapq.heappop(open_heap)
             node, removed = state
             g = g_best.get(state, math.inf)
             if f > incumbent + 1e-9:            # 分支限界剪枝
@@ -96,8 +100,8 @@ class Planner:
                     continue
                 ng = g + step_cost
                 new_removed = removed
-                for (oid, _drop, _dist) in removals:
-                    new_removed = new_removed | {oid}
+                for removal in removals:
+                    new_removed = new_removed | {removal["oid"]}
                 nstate = (v, new_removed)
                 if ng >= g_best.get(nstate, math.inf) - 1e-12:
                     continue
@@ -105,13 +109,11 @@ class Planner:
                 if nf >= incumbent - 1e-9:
                     continue
                 g_best[nstate] = ng
-                acts = [{"type": "remove", "oid": oid, "drop": drop, "dist": push_dist}
-                        for (oid, drop, push_dist) in removals]
+                acts = [dict(removal) for removal in removals]
                 acts.append({"type": "move", "u": node, "v": v,
                              "dist": length, "cost": step_cost})
                 parent[nstate] = (state, acts, ng)
-                nbias = bias + self._llm_bias(removals)
-                heapq.heappush(open_heap, (nf, nbias, next(counter), nstate))
+                heapq.heappush(open_heap, (nf, next(counter), nstate))
 
         if goal_state is None:
             return None
@@ -133,30 +135,36 @@ class Planner:
     # ------------------------------------------------------------- 边代价
     def _edge_cost(self, key: EdgeKey, removed_in_plan) -> Tuple[float, list]:
         cfg = self.cfg
-        base = cfg.lambda_d * self.roadmap.edge_len[key]
+        base = cfg.lambda_move * self.roadmap.edge_len[key]
         blockers = self.belief.blockers_of(key) - set(removed_in_plan)
         if not blockers:
             return base, []
         removals = []
         extra = 0.0
         for oid in blockers:
-            feasible, work_est, drop, push_dist = self._removal(oid)
-            if not feasible:
+            removal = self._removal(oid, key)
+            if removal is None:
                 return math.inf, []
-            extra += cfg.lambda_w * work_est
-            removals.append((oid, drop, push_dist))
+            extra += removal["work"]
+            removals.append(removal)
         return base + extra, removals
 
-    def _removal(self, oid: int):
-        """Cost of relocating obstacle oid clear of every edge it blocks.
-        Search uses estimated difficulty (LLM or touch-revealed)."""
-        if oid in self._removal_cache:
-            return self._removal_cache[oid]
+    def _removal(self, oid: int, edge_key: EdgeKey):
+        """计算把障碍物移出当前通道所需的标签估计做功。"""
+        cache_key = (oid, edge_key)
+        if cache_key in self._removal_cache:
+            return self._removal_cache[cache_key]
         obs = self.belief.obstacle(oid)
-        own = [self.roadmap.edge_corridor[k]
-               for k, bs in self.belief.edge_blockers.items() if oid in bs]
-        must_clear = unary_union(own) if own else None
+        # 硬约束：清空机器人当前准备通过的这条边。大障碍物通常同时覆盖几十条
+        # 稠密路网边；要求一次推动清空全部边会错误地把可移动物体判为不可移动。
+        # 执行器通过该边后会立即重新感知和规划，因此新位置造成的其他阻挡会在
+        # 下一轮准确纳入信念。
+        must_clear = self.roadmap.edge_corridor[edge_key]
+        # 软约束：避免重新阻挡其他当前畅通的通道（避免反效果）
         avoid = self.free_union
+        # 硬约束：不得与其他已知占据区域碰撞（终点与推动路径都要避开）：
+        #   1) 其他已感知的可移动障碍物 footprint
+        #   2) 通过推动碰撞发现的匿名接触区域（只知“有东西”，同样不能压上去）
         others = None
         if self.cfg.check_obstacle_collision:
             polys = [ob.polygon for oid2, ob in self.belief.perceived.items()
@@ -166,18 +174,22 @@ class Planner:
         feasible, dist, drop = geometry.push_plan(
             obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
             others=others)
-        # 需求4: 搜索阶段用估计难度
-        estimated_diff = self.belief.get_difficulty(oid, self.est)
-        work_est = estimated_diff * dist if feasible else math.inf
-        res = (feasible, work_est, drop, dist)
-        self._removal_cache[oid] = res
+        if not feasible:
+            res = None
+        else:
+            eta = self.est.estimate(obs.oid, obs.material)
+            j1, j2, work = geometry.manipulation_work(
+                eta, dist, 0.0, self.cfg.gravity)
+            res = {
+                "type": "remove",
+                "oid": oid,
+                "drop": drop,
+                "translation": dist,
+                "rotation": 0.0,
+                "eta": eta,
+                "J1": j1,
+                "J2": j2,
+                "work": work,
+            }
+        self._removal_cache[cache_key] = res
         return res
-
-    def _llm_bias(self, removals) -> float:
-        """Ordering-only term: sum of LLM-estimated difficulty of removed obstacles."""
-        if not self.cfg.use_llm_ordering or not removals:
-            return 0.0
-        s = 0.0
-        for (oid, _drop, _dist) in removals:
-            s += self.est.estimate(self.belief.obstacle(oid).observation())
-        return s

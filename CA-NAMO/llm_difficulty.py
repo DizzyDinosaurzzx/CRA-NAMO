@@ -1,7 +1,7 @@
 """
-使用 LLM（DeepSeek）估计操作难度，并提供离线启发式回退方案。
+使用 LLM（DeepSeek）根据物体标签估计移动难度 eta = mu * m，并提供离线回退方案。
 * 如果有可用的 DeepSeek API 密钥（Config.deepseek_api_key 或 DEEPSEEK_API_KEY 环境变量），则使用 DeepSeek-V4-Flash 进行估计。
-* 否则使用确定性的启发式方法（材质密度代理值 x 面积）
+* 否则使用确定性的“物体标签 -> eta”映射。
 """
 
 from __future__ import annotations
@@ -16,27 +16,30 @@ import requests
 from config import Config
 
 """
-离线回退方案中“单位面积质量/摩擦力”的粗略代理值。数值仅用于相对比较；
-由于估计值只用于排序，具体尺度并不重要。
+离线回退方案直接按物体标签给出 eta = mu * m 的粗略估计。
+这些数值会进入 W = eta * g * d，因此与 LLM 提示词使用同一尺度。
 """
 
-MATERIAL_DENSITY: Dict[str, float] = {
-    "empty_cart": 0.08,
-    "cardboard_box": 0.12,
-    "plastic_chair": 0.15,
-    "chair": 0.20,
-    "trash_bin": 0.20,
-    "stool": 0.18,
-    "cart": 0.35,
-    "wooden_table": 0.50,
-    "table": 0.50,
-    "shelf": 0.70,
-    "cabinet": 0.90,
-    "sofa": 0.85,
-    "pallet_loaded": 1.10,
-    "pallet": 1.00,
-    "crate": 0.75,
-    "unknown": 0.50,
+MATERIAL_ETA: Dict[str, float] = {
+    "empty_cart": 0.3,
+    "cardboard_box": 0.2,
+    "plastic_chair": 0.4,
+    "chair": 0.4,
+    "trash_bin": 0.5,
+    "stool": 0.3,
+    "cart": 1.0,
+    "wooden_table": 1.2,
+    "table": 1.2,
+    "shelf": 5.0,
+    "cabinet": 6.0,
+    "sofa": 10.0,
+    "loaded_pallet": 20.0,
+    "pallet_loaded": 20.0,
+    "pallet": 8.0,
+    "wooden_crate": 2.0,
+    "crate": 2.0,
+    "steel_safe": 200.0,
+    "unknown": 1.0,
 }
 
 
@@ -49,37 +52,34 @@ class DifficultyEstimator:
         self.mode = "deepseek" if self.api_key else "heuristic"
 
     # ------------------------------------------------------------------ 公共接口
-    def estimate(self, obs_obs: dict) -> float:
-        """Return an estimated difficulty for a *perceived* obstacle observation."""
-        oid = obs_obs["oid"]
+    def estimate(self, oid: int, label: str) -> float:
+        """仅根据物体标签返回 eta = mu * m 的估计值。"""
         if oid in self.cache:
             return self.cache[oid]
         if self.api_key:
-            val = self._deepseek(obs_obs)
+            val = self._deepseek(label)
             if val is None:                       # 失败回退
-                val = self._heuristic(obs_obs)
+                val = self._heuristic(label)
         else:
-            val = self._heuristic(obs_obs)
+            val = self._heuristic(label)
         val = max(0.01, round(float(val), 3))
         self.cache[oid] = val
         return val
 
     # -------------------------------------------------------------- 启发式方法
-    def _heuristic(self, o: dict) -> float:
-        density = MATERIAL_DENSITY.get(str(o.get("material", "unknown")).lower(),
-                                       MATERIAL_DENSITY["unknown"])
-        return density * float(o.get("area", o["l"] * o["d"]))
+    def _heuristic(self, label: str) -> float:
+        return MATERIAL_ETA.get(str(label).lower(), MATERIAL_ETA["unknown"])
 
     # --------------------------------------------------------------- DeepSeek
-    def _deepseek(self, o: dict):
+    def _deepseek(self, label: str):
         prompt = (
-            "You estimate how hard a mobile robot must work to push an obstacle aside.\n"
-            "Return a SINGLE positive number: the manipulation difficulty coefficient, "
-            "i.e. the work required per unit of push distance (higher = heavier / "
-            "harder to move). Typical scale: an empty cart ~0.1, a wooden chair ~0.5, "
-            "a table ~3, a loaded pallet or heavy sofa ~10.\n\n"
-            f"Obstacle: material='{o.get('material')}', "
-            f"footprint={o['l']}x{o['d']} (area={o.get('area')}).\n"
+            "Estimate the manipulation difficulty eta = mu * m for the object label "
+            "below, where mu is the friction coefficient and m is the object mass. "
+            "Use only the supplied label. Return a SINGLE positive number. "
+            "Reference scale: empty_cart ~0.3, cardboard_box ~0.2, chair ~0.4, "
+            "wooden_table ~1.2, wooden_crate ~2, loaded_pallet ~20, "
+            "steel_safe ~200.\n\n"
+            f"Object label: '{label}'.\n"
             "Output ONLY the number, no words or units."
         )
         headers = {

@@ -7,7 +7,7 @@ Augmented roadmap (增广路网)
 
     nodes            (x, y) 列表
     adjacency        节点 -> 相邻节点
-    edge_len[key]    边的欧氏长度（其基础距离代价 / lambda_d）
+    edge_len[key]    边的欧氏长度（其基础移动做功 / lambda_move）
     edge_corridor    按机器人半径膨胀后的边扫掠多边形，用于判断阻挡它的障碍物。
 
 `key` is always tuple(sorted((u, v))).
