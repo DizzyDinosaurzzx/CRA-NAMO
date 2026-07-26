@@ -173,7 +173,7 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scenario", default="maze_three_movable")
+    ap.add_argument("--scenario", default="maze_three_movable2")
     ap.add_argument("--lambda_d", type=float, default=None)
     ap.add_argument("--lambda_w", type=float, default=None)
     ap.add_argument("--no-llm-order", action="store_true")
