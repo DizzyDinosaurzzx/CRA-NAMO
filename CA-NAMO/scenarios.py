@@ -175,15 +175,18 @@ def maze_three_movable():
         MovableObstacle(x=23.0, y=15.0, l=3.0, d=4.0, theta=0.0,
                         material="chair", difficulty=0.8, oid=2),
         # C：靠近左上目标区的岔路口。
-        MovableObstacle(x=12.0, y=21.8, l=4.0, d=3.0, theta=0.0,
+        MovableObstacle(x=12.0, y=21.8, l=4.0, d=1.8, theta=0.0,
                         material="wooden_crate", difficulty=1.5, oid=3),
     ]
 
     start = (12.5, 1.5)                     # 底部入口（图片红色箭头）
     goal_region = box(1.5, 27.0, 3.5, 29.0)  # 左上目标区（图片红旗）
 
-    # 所有可调参数统一在 config.py 中控制，这里不再覆盖
-    cfg = Config()
+    cfg = Config(
+        grid_step=0.55,
+        conn_radius=1.2,
+        max_expansions=800000,
+    )
     return dict(name="maze_three_movable", workspace=workspace, static=walls,
                 movable=movable, start=start, goal_region=goal_region, cfg=cfg)
 

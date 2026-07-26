@@ -1,5 +1,5 @@
 """
-在线“规划-执行-感知-重规划”循环（§感知与在线重规划）。
+在线"规划-执行-感知-重规划"循环（§感知与在线重规划）。
 
     plan  ：在当前信念状态下的最小代价规划（search.Planner）
     execute：执行该规划的第一条路网边（以及所需的障碍物移除），将真实代价累加到 J
@@ -107,13 +107,19 @@ class OnlineNAMO:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
                     dx, dy, dth = act["drop"]
+                    # 需求4: 推动前触摸感知获知真实难度
+                    touched = self.belief.touch_check(
+                        self.roadmap.nodes[node], self.world, cfg)
+                    if touched:
+                        self._capture_frame(res, node,
+                            f"touch revealed difficulty of {touched}")
                     # 物理校验：在真实世界里，这次推动是否会撞到别的障碍物（含尚未
                     # 感知的）？规划是乐观的、只避开已知障碍物；现实由此处兜底。
                     hits = self._world_collision(act["oid"], dx, dy, dth)
                     if hits:
-                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的“知情”取决于配置：
+                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的"知情"取决于配置：
                         #   full_reveal_on_contact=True : 直接获知被撞障碍物全部信息
-                        #   False(更真实)              : 只记录“此处有物”的匿名接触区域，
+                        #   False(更真实)              : 只记录"此处有物"的匿名接触区域，
                         #                                身份/几何/难度要等遮挡移开后正常感知
                         for oid_hit, region in hits:
                             if cfg.full_reveal_on_contact:
@@ -130,17 +136,34 @@ class OnlineNAMO:
                         break
                     self.belief.relocate(obs, dx, dy, dth)
                     self._relocate_world(act["oid"], dx, dy, dth)
-                    res.work_cost += cfg.lambda_w * act["work"]
-                    res.J += cfg.lambda_w * act["work"]
+                    # 需求4: 执行时用真实 difficulty 重算 work
+                    real_work = geometry.push_work(obs, act["dist"])
+                    res.work_cost += cfg.lambda_w * real_work
+                    res.J += cfg.lambda_w * real_work
                     if act["oid"] not in res.removed:
                         res.removed.append(act["oid"])
                     self._capture_frame(res, node, f"push obstacle {act['oid']}")
                 elif act["type"] == "move":
+                    prev_node = node    # 需求3: 记录移动前位置
                     res.walk_cost += cfg.lambda_d * act["dist"]
                     res.J += cfg.lambda_d * act["dist"]
                     node = act["v"]
                     res.robot_track.append(self.roadmap.nodes[node])
                     moves_done += 1
+                    # 需求3: 碰撞感知
+                    hit_oids = self.belief.check_robot_collision(
+                        self.roadmap.nodes[prev_node],
+                        self.roadmap.nodes[node],
+                        self.world, cfg)
+                    if hit_oids:
+                        self._capture_frame(res, node,
+                            f"collision revealed {hit_oids}")
+                    # 需求4: 触摸感知
+                    touched = self.belief.touch_check(
+                        self.roadmap.nodes[node], self.world, cfg)
+                    if touched:
+                        self._capture_frame(res, node,
+                            f"touch revealed difficulty of {touched}")
                     # 每次实际移动后感知（揭示被暴露的障碍物）
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
                     self._capture_frame(res, node, f"move to node {node}")
@@ -178,7 +201,7 @@ class OnlineNAMO:
 
         对*全部*可移动障碍物（含机器人尚未感知的）检查终点位姿与推动扫掠路径。
         返回被撞到的障碍物列表 [(oid, contact_region), ...]，其中 contact_region 是
-        被推物体扫掠区与该障碍物的重叠区（即“机器人实际感受到阻力”的那块区域）；
+        被推物体扫掠区与该障碍物的重叠区（即"机器人实际感受到阻力"的那块区域）；
         空列表表示无碰撞。
         """
         if not self.cfg.check_obstacle_collision:
@@ -192,7 +215,7 @@ class OnlineNAMO:
                 continue
             wp = w.polygon
             if end_poly.intersects(wp) or swept.intersects(wp):
-                contact = swept.intersection(wp)   # 只“摸到”接触重叠区，非整个障碍物
+                contact = swept.intersection(wp)   # 只"摸到"接触重叠区，非整个障碍物
                 hits.append((w.oid, contact))
         return hits
 
@@ -207,9 +230,9 @@ class OnlineNAMO:
         if not self.cfg.save_frames:
             return
         res.frames.append({
+            "node": node,
             "robot": self.roadmap.nodes[node],
             "track": list(res.robot_track),
-            # 每个障碍物当前的 footprint（polygon 属性每次都新建，可安全快照）
             "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],
             "perceived": set(self.belief.perceived.keys()),
             "J": round(res.J, 4),

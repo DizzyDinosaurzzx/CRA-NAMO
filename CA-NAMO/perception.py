@@ -4,7 +4,7 @@
 机器人只有在可移动障碍物进入半径为R_perc的感知圆且未被更近的障碍物遮挡时，才知道该障碍物的存在。
 因此，重新放置障碍物会揭示其后方隐藏的物体。
 
-信念状态按路网边维护当前已知的阻挡障碍物集合（即“付费解锁”边）。
+信念状态按路网边维护当前已知的阻挡障碍物集合（即"付费解锁"边）。
 未知或未探索的边不携带阻挡信息，搜索会乐观地将其视为畅通。
 更新是增量式的：只重新评估通道与新发现或刚移动的障碍物相交的边。
 
@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Set, Tuple
 
 from shapely.geometry import LineString, Point, Polygon
@@ -28,9 +29,12 @@ class Belief:
         self.perceived: Dict[int, MovableObstacle] = {}     # oid -> 障碍物（已感知到的真实难度）
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # 边 -> 阻挡该边的障碍物 oid 集合
         self.newly_revealed: List[int] = []
-        # 通过“推动碰撞”发现的匿名占据区域：只知道“这里有东西”，不知其身份/几何/难度。
-        # 仅用作放置/推动的硬约束；无法据此规划“移除”它（不知道怎么移、多难移）。
+        # 通过"推动碰撞"发现的匿名占据区域：只知道"这里有东西"，不知其身份/几何/难度。
+        # 仅用作放置/推动的硬约束；无法据此规划"移除"它（不知道怎么移、多难移）。
         self.contacts: List[Polygon] = []
+        # 需求4: 已触摸获知真实难度的障碍物
+        self.touched: Set[int] = set()
+        self.touched_difficulty: Dict[int, float] = {}
 
     # -------------------- 感知 ----------------------
     def perceive(self, world_obstacles: List[MovableObstacle],
@@ -48,11 +52,22 @@ class Belief:
             self.perceived[w.oid] = w
             self.newly_revealed.append(w.oid)
             self._update_edges_for(w)
-            # 该物体现在被完整感知，之前对它的匿名“接触”记录可以清除（由真实 footprint 取代）
+            # 该物体现在被完整感知，之前对它的匿名"接触"记录可以清除（由真实 footprint 取代）
             self._clear_contacts_overlapping(w.polygon)
         return self.newly_revealed
 
     # -------------------- 可见性（多点采样 + 墙体遮挡） ----------------------
+    def _angular_width(self, robot_pos, obs: MovableObstacle) -> float:
+        """需求1: 障碍物矩形在 robot_pos 处的角宽度（弧度）。"""
+        rx, ry = robot_pos
+        coords = list(obs.polygon.exterior.coords)[:-1]
+        angles = sorted(math.atan2(y - ry, x - rx) for x, y in coords)
+        max_gap = 0.0
+        for i in range(len(angles) - 1):
+            max_gap = max(max_gap, angles[i + 1] - angles[i])
+        max_gap = max(max_gap, angles[0] + 2 * math.pi - angles[-1])
+        return 2 * math.pi - max_gap
+
     def _edge_samples(self, obs: MovableObstacle):
         """矩形的四条边，每条边用 (角, 边中点, 角) 三个采样点表示。"""
         coords = list(obs.polygon.exterior.coords)[:-1]   # 4 个角（去掉闭合重复点）
@@ -89,7 +104,9 @@ class Belief:
 
     def _visible(self, robot_pos, target: MovableObstacle,
                  world_obstacles: List[MovableObstacle]) -> bool:
-        """只有至少一条完整的边（两角 + 边中点 3 点全部可见）时才算感知到该障碍物。"""
+        """需求1+2: 视角 > phi_0 且至少一条完整边可见时才感知到障碍物。"""
+        if self._angular_width(robot_pos, target) < self.cfg.phi_0:
+            return False
         for a, mid, b in self._edge_samples(target):
             if (self._point_visible(robot_pos, a, target, world_obstacles)
                     and self._point_visible(robot_pos, mid, target, world_obstacles)
@@ -148,6 +165,50 @@ class Belief:
         obs.x, obs.y, obs.theta = x, y, theta
         obs.removed = True
         self._update_edges_for(obs)     # 无反效果 => 新的阻挡集是原阻挡集的子集
+
+    # -------------------- 需求3: 机器人自身碰撞感知 ----------------------
+    def check_robot_collision(
+        self, from_pos, to_pos,
+        world_obstacles: List[MovableObstacle],
+        cfg: Config,
+    ) -> List[int]:
+        """检查机器人移动是否撞到未感知障碍物，撞到则 force_reveal。"""
+        corridor = LineString([from_pos, to_pos]).buffer(cfg.robot_radius, cap_style=1)
+        revealed: List[int] = []
+        for w in world_obstacles:
+            if w.oid in self.perceived:
+                continue
+            if corridor.intersects(w.polygon):
+                self.force_reveal(w)
+                revealed.append(w.oid)
+        return revealed
+
+    # -------------------- 需求4: 触摸感知难度 ----------------------
+    def touch_check(
+        self, robot_pos,
+        world_obstacles: List[MovableObstacle],
+        cfg: Config,
+    ) -> List[int]:
+        """触摸圆接触障碍物则揭示真实 difficulty。"""
+        touch_radius = cfg.robot_radius + cfg.touch_margin
+        rp = Point(robot_pos)
+        revealed: List[int] = []
+        for w in world_obstacles:
+            if w.oid in self.touched:
+                continue
+            if rp.distance(Point(w.center())) > touch_radius + max(w.l, w.d):
+                continue
+            if rp.buffer(touch_radius).intersects(w.polygon):
+                self.touched.add(w.oid)
+                self.touched_difficulty[w.oid] = w.difficulty
+                revealed.append(w.oid)
+        return revealed
+
+    def get_difficulty(self, oid: int, estimator) -> float:
+        """搜索阶段获取难度: 触摸过用真实值，否则用 LLM/启发式估计。"""
+        if oid in self.touched_difficulty:
+            return self.touched_difficulty[oid]
+        return estimator.estimate(self.perceived[oid].observation())
 
     # -------------------- 查询 ----------------------
     def blockers_of(self, key: EdgeKey) -> Set[int]:

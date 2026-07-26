@@ -3,7 +3,7 @@
     f = g + h，g = 当前累积代价，h = 到目标的可采纳下界。
 
 A 搜索状态是 (node, frozenset(本次规划中已移除的障碍物))。
-经过当前被阻挡的边时需要“付费解锁”：假设移开阻挡障碍物，并将 lambda_w * real_work 加入 g，其中 real_work
+经过当前被阻挡的边时需要"付费解锁"：假设移开阻挡障碍物，并将 lambda_w * real_work 加入 g，其中 real_work
 由几何计算器（push_plan）根据真实几何信息计算。
 
 正确性保证：
@@ -96,7 +96,7 @@ class Planner:
                     continue
                 ng = g + step_cost
                 new_removed = removed
-                for (oid, _drop, _w) in removals:
+                for (oid, _drop, _dist) in removals:
                     new_removed = new_removed | {oid}
                 nstate = (v, new_removed)
                 if ng >= g_best.get(nstate, math.inf) - 1e-12:
@@ -105,8 +105,8 @@ class Planner:
                 if nf >= incumbent - 1e-9:
                     continue
                 g_best[nstate] = ng
-                acts = [{"type": "remove", "oid": oid, "drop": drop, "work": w}
-                        for (oid, drop, w) in removals]
+                acts = [{"type": "remove", "oid": oid, "drop": drop, "dist": push_dist}
+                        for (oid, drop, push_dist) in removals]
                 acts.append({"type": "move", "u": node, "v": v,
                              "dist": length, "cost": step_cost})
                 parent[nstate] = (state, acts, ng)
@@ -140,27 +140,23 @@ class Planner:
         removals = []
         extra = 0.0
         for oid in blockers:
-            feasible, work, drop = self._removal(oid)
+            feasible, work_est, drop, push_dist = self._removal(oid)
             if not feasible:
                 return math.inf, []
-            extra += cfg.lambda_w * work
-            removals.append((oid, drop, work))
+            extra += cfg.lambda_w * work_est
+            removals.append((oid, drop, push_dist))
         return base + extra, removals
 
     def _removal(self, oid: int):
-        """Real cost of relocating obstacle `oid` clear of every edge it blocks."""
+        """Cost of relocating obstacle oid clear of every edge it blocks.
+        Search uses estimated difficulty (LLM or touch-revealed)."""
         if oid in self._removal_cache:
             return self._removal_cache[oid]
         obs = self.belief.obstacle(oid)
-        # 硬约束：清空该障碍物当前阻挡的所有通道
         own = [self.roadmap.edge_corridor[k]
                for k, bs in self.belief.edge_blockers.items() if oid in bs]
         must_clear = unary_union(own) if own else None
-        # 软约束：避免重新阻挡其他当前畅通的通道（避免反效果）
         avoid = self.free_union
-        # 硬约束：不得与其他已知占据区域碰撞（终点与推动路径都要避开）：
-        #   1) 其他已感知的可移动障碍物 footprint
-        #   2) 通过推动碰撞发现的匿名接触区域（只知“有东西”，同样不能压上去）
         others = None
         if self.cfg.check_obstacle_collision:
             polys = [ob.polygon for oid2, ob in self.belief.perceived.items()
@@ -170,8 +166,10 @@ class Planner:
         feasible, dist, drop = geometry.push_plan(
             obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
             others=others)
-        work = geometry.push_work(obs, dist) if feasible else math.inf
-        res = (feasible, work, drop)
+        # 需求4: 搜索阶段用估计难度
+        estimated_diff = self.belief.get_difficulty(oid, self.est)
+        work_est = estimated_diff * dist if feasible else math.inf
+        res = (feasible, work_est, drop, dist)
         self._removal_cache[oid] = res
         return res
 
@@ -180,6 +178,6 @@ class Planner:
         if not self.cfg.use_llm_ordering or not removals:
             return 0.0
         s = 0.0
-        for (oid, _drop, _w) in removals:
+        for (oid, _drop, _dist) in removals:
             s += self.est.estimate(self.belief.obstacle(oid).observation())
         return s
