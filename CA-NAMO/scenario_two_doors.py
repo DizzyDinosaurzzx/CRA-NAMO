@@ -76,6 +76,6 @@ def create():
         "static": walls,
         "movable": movable,
         "start": (5.0, 4.5),
-        "goal_region": box(24.0, 3.5, 26.0, 5.5),
+        "goal": (25.0, 4.5),
         "cfg": Config(),
     }

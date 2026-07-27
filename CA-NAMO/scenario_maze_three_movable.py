@@ -106,19 +106,8 @@ def create():
     # 图片底部红色箭头对应入口。
     start = (12.5, 1.5)
 
-    # 图片左上红旗对应目标区域。
-    goal_region = box(1.5, 27.0, 3.5, 29.0)
-
-    cfg = Config(
-        lambda_d=1.0,
-        R_perc=7.0,
-        R_push=5.0,
-        grid_step=1.0,
-        conn_radius=1.8,
-        robot_radius=0.35,
-        step_execute_edges=1,
-        max_replans=300,
-    )
+    # 图片左上红旗对应目标点。
+    goal = (2.5, 28.0)
 
     return {
         "name": "maze_three_movable",
@@ -126,6 +115,6 @@ def create():
         "static": walls,
         "movable": movable,
         "start": start,
-        "goal_region": goal_region,
-        "cfg": cfg,
+        "goal": goal,
+        "cfg": Config(),
     }

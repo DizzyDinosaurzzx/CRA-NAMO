@@ -1,5 +1,5 @@
 """
-代价感知 NAMO 的全局配置
+CA-NAMO的全局配置
 """
 
 from dataclasses import dataclass, field
@@ -8,18 +8,18 @@ from dataclasses import dataclass, field
 class Config:
     # -------- 机器人 --------
     robot_radius: float = 0.35 # 机器人尺寸半径
-    touch_margin: float = 0.15 # 触摸感知余量：触摸圆半径 = robot_radius + touch_margin
+    touch_margin: float = 0.15 # 触摸感知余量，真实触摸圆半径 = robot_radius + touch_margin
 
-    # -------- 代价函数 J = lambda_d * D + W --------
-    lambda_d: float = 1.0     # 机器人单位移动距离的做功系数 lambda
-    work_source: str = "direct"  # direct=感知后直接读取 W；estimated=保留原难度估计路径
+    # -------- 代价函数 J = lambda_distance * D + W --------
+    lambda_distance: float = 1.0     # 机器人单位移动距离的做功系数 lambda
+    work_source: str = "direct"      # direct=感知后直接读取 W；estimated=保留原难度估计路径
 
     # -------- 感知 --------
     R_perc: float = 8.0       # 感知半径（以机器人为中心的感知圆半径）
     sight_width: float = 0.2  # 视线宽度：>0 时视线是有该宽度的”走廊”，需完整穿过自由空间
                               # 且不碰障碍物才算看得见；0=零宽度射线（再窄的缝也能看穿）。
                               # 调大可禁止”细缝偷窥”（缝宽 < sight_width 就看不穿）。
-    phi_0: float = 0.05       # 传感器最小可分辨角（弧度），约 2.86deg。
+    phi_0: float = 0.05       # 传感器最小可分辨角（弧度）
                               # 障碍物在机器人视角中的张角小于此值时无法被视觉感知。
 
     # -------- 操作 --------
@@ -31,8 +31,8 @@ class Config:
                                            # False(更真实)=只知“此处有物”，移开遮挡后才完整感知
 
     # -------- 路网 --------
-    grid_step: float = 1    # 静态自由空间中路网节点的网格间距
-    conn_radius: float = 2   # 两个节点距离不超过此值且视线无阻时建立连接
+    grid_step: float = 0.5    # 静态自由空间中路网节点的网格间距
+    conn_radius: float = 1   # 两个节点距离不超过此值且视线无阻时建立连接
 
     # -------- 搜索 --------
     use_llm_ordering: bool = True
@@ -52,12 +52,12 @@ class Config:
     # -------- 其他 --------
     rng_seed: int = 0
     out_dir: str = "img"       # 可视化结果的输出目录
-    save_frames: bool = True   
+    save_frames: bool = True   # 是否保存过程帧（img/frames_<地图名>/）
     verbose: bool = True
 
     def __post_init__(self):
-        if self.lambda_d < 0:
-            raise ValueError("lambda_d 必须为非负数")
+        if self.lambda_distance < 0:
+            raise ValueError("lambda_distance 必须为非负数")
         if self.work_source not in {"direct", "estimated"}:
             raise ValueError("work_source 必须是 'direct' 或 'estimated'")
 

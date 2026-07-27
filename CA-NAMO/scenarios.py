@@ -16,7 +16,7 @@ from typing import Any
 
 
 # 默认测试地图：平时切换地图只需要修改这一行。
-DEFAULT_SCENARIO = "maze_two_movable"
+DEFAULT_SCENARIO = "two_doors"
 
 # 地图名 -> 包含 create() 函数的 Python 模块。
 # 新增地图时只需要在这里增加一行注册。
@@ -33,7 +33,7 @@ REQUIRED_FIELDS = {
     "static",
     "movable",
     "start",
-    "goal_region",
+    "goal",
     "cfg",
 }
 
@@ -65,10 +65,12 @@ def load(name: str | None = None) -> dict[str, Any]:
         fields = ", ".join(sorted(missing))
         raise ValueError(f"地图 {selected!r} 缺少字段：{fields}")
 
-    # 地图文件统一声明目标区域；当前规划器使用目标点，因此在注册层完成适配。
-    goal_region = scenario["goal_region"]
-    centroid = goal_region.centroid
-    scenario["goal"] = (float(centroid.x), float(centroid.y))
+    # 起点与终点都是 (x, y) 单点，这里统一校验并归一化成 float 元组。
+    for field in ("start", "goal"):
+        point = scenario[field]
+        if len(point) != 2:
+            raise ValueError(f"地图 {selected!r} 的 {field} 必须是 (x, y) 单点")
+        scenario[field] = (float(point[0]), float(point[1]))
 
     if scenario["name"] != selected:
         raise ValueError(

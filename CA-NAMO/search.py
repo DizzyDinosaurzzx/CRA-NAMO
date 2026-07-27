@@ -4,11 +4,11 @@
 
 A 搜索状态是 (node, frozenset(本次规划中已移除的障碍物))。
 经过当前被阻挡的边时需要"付费解锁"。默认 direct 模式在感知到障碍物后直接读取
-其给定做功 W，并按 J = lambda_d * D + W 加入 g。几何计算器 push_plan 只负责
+其给定做功 W，并按 J = lambda_distance * D + W 加入 g。几何计算器 push_plan 只负责
 判断移动是否可行以及寻找放置位姿。
 
 正确性保证：
-  * h = lambda_d * 到目标的欧氏距离，是可采纳的（剩余行驶距离 >= 直线距离，且操作功项非负），因此第一个被弹出的目标状态即为代价最优解。
+  * h = lambda_distance * 到目标的欧氏距离，是可采纳的（剩余行驶距离 >= 直线距离，且操作功项非负），因此第一个被弹出的目标状态即为代价最优解。
   * 分支限界会剪掉任何 f >= 当前已找到的最优目标代价的状态。
 原 LLM 难度估计代码保留给 estimated 模式；direct 模式不调用 LLM。
 
@@ -67,7 +67,7 @@ class Planner:
 
         def h(node):
             x, y = rm.nodes[node]
-            return cfg.lambda_d * math.hypot(x - gx, y - gy)
+            return cfg.lambda_distance * math.hypot(x - gx, y - gy)
 
         counter = itertools.count()
         start_state = (start_node, frozenset())
@@ -137,7 +137,7 @@ class Planner:
     # ------------------------------------------------------------- 边代价
     def _edge_cost(self, key: EdgeKey, removed_in_plan) -> Tuple[float, list]:
         cfg = self.cfg
-        base = cfg.lambda_d * self.roadmap.edge_len[key]
+        base = cfg.lambda_distance * self.roadmap.edge_len[key]
         blockers = self.belief.blockers_of(key) - set(removed_in_plan)
         if not blockers:
             return base, []

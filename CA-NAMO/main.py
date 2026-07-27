@@ -86,7 +86,7 @@ def _draw_static(ax, sim: OnlineNAMO, original_poses):
     for so in sim.static_obstacles:
         _plot_poly(ax, so.polygon, color="dimgray", zorder=1)
 
-    _draw_flag(ax, sim, sim.roadmap.nodes[sim.start_node], "royalblue", "start")
+    _draw_flag(ax, sim, sim.start_point, "royalblue", "start")
     _draw_flag(ax, sim, sim.goal_point, "red", "goal")
 
     # 原始障碍物 footprint（虚线轮廓）
@@ -99,7 +99,9 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
     ax.set_xlim(-1, sim.workspace.bounds[2] + 1)
     ax.set_ylim(-1, sim.workspace.bounds[3] + 1)
     ax.set_title(title, fontsize=10)
-    ax.legend(loc="upper right", fontsize=8)
+    # 图例放到地图右侧的画布空白处，避免遮挡地图内容
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8,
+              borderaxespad=0.0, framealpha=0.9)
 
 
 def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
@@ -125,7 +127,9 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
              f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
              f"moved={res.removed}  |  source={res.work_source}")
     _finish_ax(ax, sim, title)
-    fig.tight_layout()
+    # 右侧留出图例的位置；固定 rect 而不用 bbox_inches="tight"，
+    # 保证每一帧输出图片尺寸一致（便于合成动画）
+    fig.tight_layout(rect=(0, 0, 0.85, 1))
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
 
@@ -162,7 +166,9 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
 
     title = f"step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
     _finish_ax(ax, sim, title)
-    fig.tight_layout()
+    # 右侧留出图例的位置；固定 rect 而不用 bbox_inches="tight"，
+    # 保证每一帧输出图片尺寸一致（便于合成动画）
+    fig.tight_layout(rect=(0, 0, 0.85, 1))
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
 
@@ -185,22 +191,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default=scenarios.DEFAULT_SCENARIO,
                     choices=scenarios.names())
-    ap.add_argument("--lambda", "--lambda_d", dest="lambda_d",
+    ap.add_argument("--lambda", "--lambda_distance", dest="lambda_distance",
                     type=float, default=None)
     ap.add_argument("--work-source", choices=("direct", "estimated"),
                     default=None,
                     help="direct=感知后直接读取 W；estimated=保留的旧难度估计路径")
     ap.add_argument("--no-llm-order", action="store_true")
     ap.add_argument("--frames", action="store_true",
-                    help="逐步保存机器人每一步运动的帧图片到 img/frames/")
+                    help="逐步保存机器人每一步运动的帧图片到 img/frames_<地图名>/")
     args = ap.parse_args()
 
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
-    if args.lambda_d is not None:
-        if args.lambda_d < 0:
+    if args.lambda_distance is not None:
+        if args.lambda_distance < 0:
             ap.error("--lambda 必须为非负数")
-        cfg.lambda_d = args.lambda_d
+        cfg.lambda_distance = args.lambda_distance
     if args.work_source is not None:
         cfg.work_source = args.work_source
     if args.no_llm_order:
@@ -239,7 +245,8 @@ def main():
     print(f"\nSaved visualisation -> {out}")
 
     if cfg.save_frames:
-        frames_dir = os.path.join(cfg.out_dir, "frames")
+        # 每张地图一个独立的帧目录，换地图重跑不会互相覆盖
+        frames_dir = os.path.join(cfg.out_dir, f"frames_{s['name']}")
         n = render_sequence(sim, res, original_poses, frames_dir)
         print(f"Saved {n} step frames -> {frames_dir}/step_000.png ... "
               f"step_{n - 1:03d}.png")

@@ -2,7 +2,7 @@
 在线"规划-执行-感知-重规划"循环（§感知与在线重规划）。
 
     plan  ：在当前信念状态下的最小代价规划（search.Planner）
-    execute：执行该规划的第一条路网边（以及所需的障碍物移除），按 J=lambda_d*D+W
+    execute：执行该规划的第一条路网边（以及所需的障碍物移除），按 J=lambda_distance*D+W
              累加代价
     perceive：揭示新可见的障碍物（包括刚移动障碍物所暴露的物体），并增量更新路网信念
     replan ：重复上述过程，直到到达目标节点或不存在可行规划
@@ -58,20 +58,27 @@ class OnlineNAMO:
         self.workspace = workspace
         self.static_obstacles = static_obstacles
         self.world = movable_obstacles          # ground truth (true difficulty)
-        self.start = start
+        self.start = (float(start[0]), float(start[1]))
         self.goal = (float(goal[0]), float(goal[1]))
 
         self.roadmap = Roadmap(workspace, static_obstacles, cfg)
-        self.start_node = self.roadmap.add_terminal(start)
-        gpt = self.goal
-        if not self.roadmap.static_free.contains(Point(gpt).buffer(cfg.robot_radius)):
-            # 目标点处机器人圆盘放不下（贴墙/在墙内）-> 退化到最近的合法路网节点
-            gpt = self.roadmap.nodes[self.roadmap.nearest_node(gpt)]
-        self.goal_node = self.roadmap.add_terminal(gpt)
-        self.goal_point = self.roadmap.nodes[self.goal_node]   # 实际到达点（用于绘图）
+        # 起点与终点都是单点，插入路网的方式完全对称
+        self.start_node = self._add_terminal(self.start)
+        self.goal_node = self._add_terminal(self.goal)
+        # 实际所在/到达的点（可能因退化而与声明值不同，绘图用）
+        self.start_point = self.roadmap.nodes[self.start_node]
+        self.goal_point = self.roadmap.nodes[self.goal_node]
 
         self.estimator = DifficultyEstimator(cfg)
         self.belief = Belief(self.roadmap, cfg)
+
+    def _add_terminal(self, p: Tuple[float, float]) -> int:
+        """把起点/终点插入路网；该点放不下机器人圆盘时退化到最近的合法节点。"""
+        cfg = self.cfg
+        if not self.roadmap.static_free.contains(Point(p).buffer(cfg.robot_radius)):
+            # 点在墙内或贴墙太近 -> 退化到最近的合法路网节点
+            p = self.roadmap.nodes[self.roadmap.nearest_node(p)]
+        return self.roadmap.add_terminal(p)
 
     # -------------------------------------------------------------------- 运行
     def run(self) -> RunResult:
@@ -158,8 +165,8 @@ class OnlineNAMO:
                     self._capture_frame(res, node, f"push obstacle {act['oid']}")
                 elif act["type"] == "move":
                     prev_node = node    # 需求3: 记录移动前位置
-                    res.walk_cost += cfg.lambda_d * act["dist"]
-                    res.J += cfg.lambda_d * act["dist"]
+                    res.walk_cost += cfg.lambda_distance * act["dist"]
+                    res.J += cfg.lambda_distance * act["dist"]
                     node = act["v"]
                     res.robot_track.append(self.roadmap.nodes[node])
                     moves_done += 1
