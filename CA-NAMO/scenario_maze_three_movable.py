@@ -1,21 +1,13 @@
-"""根据用户提供的迷宫图片近似复刻的场景，含 3 个岔路口可移动障碍物。"""
 from __future__ import annotations
-
 from shapely.geometry import box
-
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
-
 
 def create():
     """创建 maze_three_movable 场景。"""
     workspace = box(0, 0, 30, 30)
 
-    # 墙厚统一设为 0.45。
-    # 坐标系：左下角为 (0, 0)，右上角为 (30, 30)。
-    # 起点位于底部中央开口，目标位于左上区域。
     t = 0.45
-
     walls = [
         # ===== 外框 =====
         StaticObstacle(box(0.0, 0.0, 10.0, t), "outer_bottom_left"),
@@ -70,9 +62,8 @@ def create():
             l=2,
             d=2,
             theta=0.0,
-            material="cardboard_box",
+            material="concrete_block",  # 25.0 x 4.00 = 100.0
             difficulty=100,
-            work=100,
             oid=1,
         ),
 
@@ -83,9 +74,8 @@ def create():
             l=3,
             d=3.4,
             theta=0.0,
-            material="chair",
+            material="foam_mat",        # 0.05 x 10.20 = 0.51
             difficulty=0.5,
-            work=0.5,
             oid=2,
         ),
 
@@ -96,19 +86,14 @@ def create():
             l=4,
             d=1.8,
             theta=0.0,
-            material="wooden_crate",
+            material="empty_shelf",     # 0.21 x 7.20 = 1.51
             difficulty=1.5,
-            work=1.5,
             oid=3,
         ),
     ]
 
-    # 图片底部红色箭头对应入口。
     start = (12.5, 1.5)
-
-    # 图片左上红旗对应目标点。
     goal = (2.5, 28.0)
-
     return {
         "name": "maze_three_movable",
         "workspace": workspace,

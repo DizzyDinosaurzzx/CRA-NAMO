@@ -1,28 +1,22 @@
-"""
-CA-NAMO的全局配置
-"""
+"""CA-NAMO的全局配置"""
 
 from dataclasses import dataclass, field
 
 @dataclass
 class Config:
-    # -------- 机器人 --------
+    # -------- 机器人 -------- #
     robot_radius: float = 0.35 # 机器人尺寸半径
     touch_margin: float = 0.15 # 触摸感知余量，真实触摸圆半径 = robot_radius + touch_margin
 
-    # -------- 代价函数 J = lambda_distance * D + W --------
-    lambda_distance: float = 1.0     # 机器人单位移动距离的做功系数 lambda
-    work_source: str = "direct"      # direct=感知后直接读取 W；estimated=保留原难度估计路径
+    # -------- 代价函数 J = lambda * D + W -------- #
+    lambda_distance: float = 1.0     # 机器人单位移动距离的做功系数lambda
 
-    # -------- 感知 --------
+    # -------- 感知 -------- #
     R_perc: float = 8.0       # 感知半径（以机器人为中心的感知圆半径）
-    sight_width: float = 0.2  # 视线宽度：>0 时视线是有该宽度的”走廊”，需完整穿过自由空间
-                              # 且不碰障碍物才算看得见；0=零宽度射线（再窄的缝也能看穿）。
-                              # 调大可禁止”细缝偷窥”（缝宽 < sight_width 就看不穿）。
-    phi_0: float = 0.05       # 传感器最小可分辨角（弧度）
-                              # 障碍物在机器人视角中的张角小于此值时无法被视觉感知。
+    sight_width: float = 0.2  # 视线宽度
+    phi_0: float = 0.05       # 传感器最小可分辨角
 
-    # -------- 操作 --------
+    # -------- 操作 -------- #
     R_push: float = 5.0       # 障碍物只能在当前位姿周围的该半径内重新放置
     drop_ring_samples: int = 24     # 在障碍物周围尝试的候选放置方向数
     drop_radius_steps: int = 6      # 尝试的候选放置距离数（0..R_push）
@@ -30,36 +24,34 @@ class Config:
     full_reveal_on_contact: bool = False   # 推动碰撞后：True=直接获知被撞障碍物全部信息；
                                            # False(更真实)=只知“此处有物”，移开遮挡后才完整感知
 
-    # -------- 路网 --------
-    grid_step: float = 0.5    # 静态自由空间中路网节点的网格间距
-    conn_radius: float = 1   # 两个节点距离不超过此值且视线无阻时建立连接
+    # -------- 路网 -------- #
+    grid_step: float = 1    # 静态自由空间中路网节点的网格间距
+    conn_radius: float = 2   # 两个节点距离不超过此值且视线无阻时建立连接
 
-    # -------- 搜索 --------
+    # -------- 搜索 -------- #
     use_llm_ordering: bool = True
     max_expansions: int = 200000    # A* 扩展次数上限
 
-    # -------- 在线循环 --------
+    # -------- 在线循环 -------- #
     step_execute_edges: int = 1     # 重新感知的刷新频率（走几步就重新更新一遍感知）
     max_replans: int = 2000          # 规划-执行-感知-重规划循环上限
 
-    # -------- LLM（DeepSeek）--------
-    deepseek_api_key: str = ""             # 为空时读取环境变量或使用启发式回退方案
+    # -------- LLM（DeepSeek）-------- #
+    deepseek_api_key: str = ""             # 为空时读环境变量 DEEPSEEK_API_KEY；仍为空则用启发式
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash"
     llm_timeout: float = 30.0
     llm_max_retries: int = 2
 
-    # -------- 其他 --------
+    # -------- 其他 -------- #
     rng_seed: int = 0
     out_dir: str = "img"       # 可视化结果的输出目录
-    save_frames: bool = True   # 是否保存过程帧（img/frames_<地图名>/）
+    save_frames: bool = bool   # 是否保存过程帧（img/frames_<地图名>/）
     verbose: bool = True
 
     def __post_init__(self):
         if self.lambda_distance < 0:
             raise ValueError("lambda_distance 必须为非负数")
-        if self.work_source not in {"direct", "estimated"}:
-            raise ValueError("work_source 必须是 'direct' 或 'estimated'")
 
     def log(self, *args):
         if self.verbose:

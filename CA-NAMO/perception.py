@@ -1,22 +1,9 @@
-"""
-感知与信念状态。
-
-机器人只有在可移动障碍物进入半径为R_perc的感知圆且未被更近的障碍物遮挡时，才知道该障碍物的存在。
-因此，重新放置障碍物会揭示其后方隐藏的物体。
-
-信念状态按路网边维护当前已知的阻挡障碍物集合（即"付费解锁"边）。
-未知或未探索的边不携带阻挡信息，搜索会乐观地将其视为畅通。
-更新是增量式的：只重新评估通道与新发现或刚移动的障碍物相交的边。
-
-"""
+"""感知与信念状态维护与更新"""
 
 from __future__ import annotations
-
 import math
 from typing import Dict, List, Set, Tuple
-
 from shapely.geometry import LineString, Point, Polygon
-
 from obstacle import MovableObstacle
 from roadmap import Roadmap, EdgeKey
 from config import Config
@@ -134,8 +121,19 @@ class Belief:
 
     # -------------------- 碰撞接触（部分信息） ----------------------
     def register_contact(self, region: Polygon):
-        """记录一块通过推动碰撞发现的匿名占据区域（不含身份/难度信息）。"""
+        """记录一块通过推动碰撞发现的匿名占据区域（不含身份/难度信息）。
+
+        先扣掉已感知障碍物的 footprint：那部分不是"新信息"，而且此后不会再被
+        `_clear_contacts_overlapping` 清理（该障碍物不会二次 newly_revealed），
+        会退化成一块永久压在它身上的幽灵区域，把它自己锁成不可推动。
+        """
         if region is None or region.is_empty:
+            return
+        for obs in self.perceived.values():
+            region = region.difference(obs.polygon)
+            if region.is_empty:
+                return
+        if region.area <= 1e-9:      # 只剩浮点碎片
             return
         self.contacts.append(region)
 
@@ -209,10 +207,6 @@ class Belief:
         if oid in self.touched_difficulty:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
-
-    def get_work(self, oid: int) -> float:
-        """直接 W 模式：障碍物被感知后即可读取其给定做功。"""
-        return self.perceived[oid].work
 
     # -------------------- 查询 ----------------------
     def blockers_of(self, key: EdgeKey) -> Set[int]:

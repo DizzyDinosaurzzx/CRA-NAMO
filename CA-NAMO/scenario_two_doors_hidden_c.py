@@ -1,19 +1,10 @@
-"""近门有 A、远门有 B，且 C 被 B 遮挡的双门地图。"""
-
 from __future__ import annotations
-
 from shapely.geometry import box
-
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
-
 def create():
-    """创建 two_doors_hidden_c 地图。"""
     workspace = box(0, 0, 28, 40)
-
-    # y 位于 [19.5, 20.5] 的水平墙。
-    # 近门 x[3, 7] 与起点和终点对齐；远门 x[21, 25]。
     walls = [
         StaticObstacle(box(0.0, 19.5, 3.0, 20.5), "wall_left"),
         StaticObstacle(box(7.0, 19.5, 21.0, 20.5), "wall_mid"),
@@ -28,22 +19,19 @@ def create():
             l=3.4,
             d=1.4,
             theta=0.0,
-            material="loaded_pallet",
+            material="steel_shelf",         # 4.20 x 4.76 = 19.99
             difficulty=20.0,
-            work=20.0,
             oid=1,
         ),
-        # B：堵住远门、位于 C 的上方，难度排名第三。
-        # B 的底部与 C 的顶部相接，但二者不重叠。
+        # B：堵住远门、位于 C 的上方，难度排名第三，B 的底部与 C 的顶部相接，但二者不重叠。
         MovableObstacle(
             x=23.0,
             y=20.5,
             l=3.8,
             d=1.8,
             theta=0.0,
-            material="wooden_crate",
+            material="cart",                # 0.30 x 6.84 = 2.05
             difficulty=2.0,
-            work=2.0,
             oid=2,
         ),
         # C：从上方房间观察时被 B 完全遮挡，难度排名第一。
@@ -54,9 +42,8 @@ def create():
             l=3.8,
             d=1.4,
             theta=0.0,
-            material="steel_safe",
+            material="industrial_machine",  # 37.5 x 5.32 = 199.5
             difficulty=200.0,
-            work=200.0,
             oid=3,
         ),
     ]

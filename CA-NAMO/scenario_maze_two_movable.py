@@ -1,20 +1,12 @@
 from __future__ import annotations
-
 from shapely.geometry import box
-
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
-
 
 def create():
     """创建 maze_two_movable 场景。"""
     workspace = box(0, 0, 30, 30)
-
-    # 墙厚统一设为 0.45。
-    # 坐标系：左下角为 (0, 0)，右上角为 (30, 30)。
-    # 起点位于底部中央开口，目标位于左上区域。
     t = 0.45
-
     walls = [
         # ===== 外框 =====
         StaticObstacle(box(0.0, 0.0, 10.0, t), "outer_bottom_left"),
@@ -74,9 +66,8 @@ def create():
             l=2,
             d=2,
             theta=0.0,
-            material="cardboard_box",
+            material="concrete_block",  # 25.0 x 4.00 = 100.0
             difficulty=100,
-            work=100,
             oid=1,
         ),
 
@@ -87,9 +78,8 @@ def create():
             l=2,
             d=1.8,
             theta=0.0,
-            material="wooden_crate",
+            material="steel_safe",      # 5.50 x 3.60 = 19.8
             difficulty=20,
-            work=20,
             oid=3,
         ),
 
@@ -100,17 +90,13 @@ def create():
                     l=2,
                     d=1.8,
                     theta=0.0,
-                    material="wooden_crate",
+                    material="steel_shelf",     # 4.20 x 3.60 = 15.1
                     difficulty=15,
-                    work=15,
                     oid=4,
                 ),
     ]
-
-    # 图片底部红色箭头对应入口。
+    
     start = (12.5, 1.5)
-
-    # 图片左上红旗对应目标区域。
     goal= (2.5, 28.0)
 
     return {

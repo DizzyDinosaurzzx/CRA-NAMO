@@ -1,27 +1,15 @@
-"""
-入口：在指定场景上运行代价感知在线 NAMO 规划器并进行可视化。
-Usage:
-    python main.py                       # 运行
-    python main.py --scenario two_doors  # 选择案例
-    python main.py --lambda 5            # 提高移动做功 -> 更倾向移动障碍物
-    python main.py --work-source estimated  # 可选：恢复原难度估计路径
-"""
+"""主程序+可视化"""
 
 from __future__ import annotations
-
 import argparse
 import glob
 import os
-
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 from shapely.geometry import LineString, Point
-
 import scenarios
 from planner import OnlineNAMO
-
 
 def _plot_poly(ax, poly, **kw):
     if poly.geom_type == "Polygon":
@@ -32,11 +20,8 @@ def _plot_poly(ax, poly, **kw):
             xs, ys = g.exterior.xy
             ax.fill(xs, ys, **kw)
 
-
 def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):
-    """在给定点处画一面旗子（旗杆 + 三角旗面 + 底座点）。"""
     x, y = point
-    # 旗杆高度随地图尺寸缩放，保证在不同大小的场景里观感一致
     s = 0.06 * max(sim.workspace.bounds[2], sim.workspace.bounds[3])
     top = y + s
 
@@ -50,21 +35,17 @@ def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):
 
 
 def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
-    """Draw roadmap: all nodes/edges as faint backdrop, highlight current node's neighbours."""
     rm = sim.roadmap
 
-    # All edges — very faint grey
     for u, v in rm.edge_len:
         x1, y1 = rm.nodes[u]
         x2, y2 = rm.nodes[v]
         ax.plot([x1, x2], [y1, y2], color="lightgray", lw=0.3, zorder=0.3)
 
-    # All nodes — tiny silver dots
     xs = [p[0] for p in rm.nodes]
     ys = [p[1] for p in rm.nodes]
     ax.scatter(xs, ys, color="silver", s=1, zorder=0.4)
 
-    # Highlight current node's outgoing edges (available next steps)
     if cur_node is not None and cur_node in rm.adj:
         for v in rm.adj[cur_node]:
             x1, y1 = rm.nodes[cur_node]
@@ -79,7 +60,6 @@ def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
 
 
 def _draw_static(ax, sim: OnlineNAMO, original_poses):
-    """绘制每一帧都相同的静态元素：工作空间、墙体、起点/终点旗子、障碍物原始位置。"""
     _plot_poly(ax, sim.workspace, color="whitesmoke", zorder=0)
     ax.plot(*sim.workspace.exterior.xy, color="black", lw=1)
 
@@ -89,7 +69,6 @@ def _draw_static(ax, sim: OnlineNAMO, original_poses):
     _draw_flag(ax, sim, sim.start_point, "royalblue", "start")
     _draw_flag(ax, sim, sim.goal_point, "red", "goal")
 
-    # 原始障碍物 footprint（虚线轮廓）
     for oid, poly in original_poses.items():
         ax.plot(*poly.exterior.xy, color="crimson", lw=1, ls="--", alpha=0.5, zorder=2)
 
@@ -99,7 +78,6 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
     ax.set_xlim(-1, sim.workspace.bounds[2] + 1)
     ax.set_ylim(-1, sim.workspace.bounds[3] + 1)
     ax.set_title(title, fontsize=10)
-    # 图例放到地图右侧的画布空白处，避免遮挡地图内容
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8,
               borderaxespad=0.0, framealpha=0.9)
 
@@ -109,13 +87,11 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim)
 
-    # 最终障碍物 footprint
     for w in sim.world:
         col = "orange" if w.removed else "crimson"
         _plot_poly(ax, w.polygon, color=col, alpha=0.6, zorder=3)
         ax.text(w.x, w.y, str(w.oid), ha="center", va="center", fontsize=8, zorder=4)
 
-    # 机器人轨迹（圆盘扫掠面积）
     if len(res.robot_track) >= 2:
         corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
         _plot_poly(ax, corridor, color="royalblue", alpha=0.3, zorder=5)
@@ -125,10 +101,8 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
 
     title = (f"{res.message}  |  J={res.J} "
              f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
-             f"moved={res.removed}  |  source={res.work_source}")
+             f"moved={res.removed}  |  LLM={res.llm_mode}")
     _finish_ax(ax, sim, title)
-    # 右侧留出图例的位置；固定 rect 而不用 bbox_inches="tight"，
-    # 保证每一帧输出图片尺寸一致（便于合成动画）
     fig.tight_layout(rect=(0, 0, 0.85, 1))
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -136,7 +110,6 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
 
 def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
                  idx: int, total: int, cur_node: int | None = None):
-    """渲染单帧：障碍物位姿 + 机器人位置/轨迹 + 路网。"""
     fig, ax = plt.subplots(figsize=(9, 6))
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim, cur_node=cur_node)
@@ -144,7 +117,6 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
     perceived = frame["perceived"]
     for oid, poly, removed in frame["obstacles"]:
         if oid not in perceived:
-            # 机器人尚未感知到 -> 幽灵灰色轮廓
             ax.plot(*poly.exterior.xy, color="gray", lw=1, ls=":", alpha=0.5, zorder=3)
             continue
         col = "orange" if removed else "crimson"
@@ -152,13 +124,11 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
         cx, cy = poly.centroid.x, poly.centroid.y
         ax.text(cx, cy, str(oid), ha="center", va="center", fontsize=8, zorder=4)
 
-    # 已走轨迹（圆盘扫掠面积）
     track = frame["track"]
     if len(track) >= 2:
         buf = LineString(track).buffer(sim.cfg.robot_radius, cap_style=1)
         _plot_poly(ax, buf, color="royalblue", alpha=0.25, zorder=5)
 
-    # 机器人当前位置（圆盘）
     rx, ry = frame["robot"]
     robot_circle = Point(rx, ry).buffer(sim.cfg.robot_radius)
     _plot_poly(ax, robot_circle, color="red", alpha=0.7, zorder=7)
@@ -166,17 +136,13 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
 
     title = f"step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
     _finish_ax(ax, sim, title)
-    # 右侧留出图例的位置；固定 rect 而不用 bbox_inches="tight"，
-    # 保证每一帧输出图片尺寸一致（便于合成动画）
     fig.tight_layout(rect=(0, 0, 0.85, 1))
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
 
 
 def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
-    """把 res.frames 逐帧渲染为编号 PNG（step_000.png, step_001.png, ...）。"""
     os.makedirs(frames_dir, exist_ok=True)
-    # 渲染前清空旧的帧图片，避免上一次运行帧数更多时残留高编号帧
     for old in glob.glob(os.path.join(frames_dir, "step_*.png")):
         os.remove(old)
     total = len(res.frames)
@@ -193,9 +159,6 @@ def main():
                     choices=scenarios.names())
     ap.add_argument("--lambda", "--lambda_distance", dest="lambda_distance",
                     type=float, default=None)
-    ap.add_argument("--work-source", choices=("direct", "estimated"),
-                    default=None,
-                    help="direct=感知后直接读取 W；estimated=保留的旧难度估计路径")
     ap.add_argument("--no-llm-order", action="store_true")
     ap.add_argument("--frames", action="store_true",
                     help="逐步保存机器人每一步运动的帧图片到 img/frames_<地图名>/")
@@ -207,8 +170,6 @@ def main():
         if args.lambda_distance < 0:
             ap.error("--lambda 必须为非负数")
         cfg.lambda_distance = args.lambda_distance
-    if args.work_source is not None:
-        cfg.work_source = args.work_source
     if args.no_llm_order:
         cfg.use_llm_ordering = False
     if args.frames:
@@ -221,10 +182,8 @@ def main():
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
     print(f"Scenario: {s['name']}   {sim.roadmap}")
-    print(f"Work source       : {cfg.work_source}")
-    if cfg.work_source == "estimated":
-        print(f"Difficulty estimator: {sim.estimator.mode}"
-              + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
+    print(f"Difficulty estimator: {sim.estimator.mode}"
+          + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
     print("-" * 60)
 
     res = sim.run()
@@ -245,7 +204,6 @@ def main():
     print(f"\nSaved visualisation -> {out}")
 
     if cfg.save_frames:
-        # 每张地图一个独立的帧目录，换地图重跑不会互相覆盖
         frames_dir = os.path.join(cfg.out_dir, f"frames_{s['name']}")
         n = render_sequence(sim, res, original_poses, frames_dir)
         print(f"Saved {n} step frames -> {frames_dir}/step_000.png ... "

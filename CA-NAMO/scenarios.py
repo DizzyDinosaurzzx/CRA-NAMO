@@ -1,32 +1,23 @@
 """
-地图注册与加载接口。
-
+地图加载接口
 新增地图：
-1. 新建一个 ``scenario_<地图名>.py`` 文件，并提供无参数的 ``create()`` 函数。
-2. 在 ``SCENARIOS`` 中添加一行：``"<地图名>": "scenario_<地图名>"``。
-
-切换 ``python main.py`` 默认运行的地图时，只需修改 ``DEFAULT_SCENARIO``。
+1. 新建一个 ``scenario_<地图名>.py`` 文件，并提供无参数的 ``create()`` 函数
+2. 在 ``SCENARIOS`` 中添加一行：``"<地图名>": "scenario_<地图名>"``
+切换 ``python main.py`` 默认运行的地图时，只需修改 ``DEFAULT_SCENARIO``
 命令行仍可用 ``--scenario <地图名>`` 临时选择其他已注册地图。
 """
 
 from __future__ import annotations
-
 from importlib import import_module
 from typing import Any
 
-
-# 默认测试地图：平时切换地图只需要修改这一行。
 DEFAULT_SCENARIO = "two_doors"
-
-# 地图名 -> 包含 create() 函数的 Python 模块。
-# 新增地图时只需要在这里增加一行注册。
 SCENARIOS: dict[str, str] = {
     "two_doors": "scenario_two_doors",
     "two_doors_hidden_c": "scenario_two_doors_hidden_c",
     "maze_three_movable": "scenario_maze_three_movable",
     "maze_two_movable": "scenario_maze_two_movable",
 }
-
 REQUIRED_FIELDS = {
     "name",
     "workspace",
@@ -37,11 +28,8 @@ REQUIRED_FIELDS = {
     "cfg",
 }
 
-
 def names() -> tuple[str, ...]:
-    """返回所有已注册地图名，供命令行参数和界面展示使用。"""
     return tuple(SCENARIOS)
-
 
 def load(name: str | None = None) -> dict[str, Any]:
     """按注册名创建一份全新的地图数据。"""
@@ -65,7 +53,6 @@ def load(name: str | None = None) -> dict[str, Any]:
         fields = ", ".join(sorted(missing))
         raise ValueError(f"地图 {selected!r} 缺少字段：{fields}")
 
-    # 起点与终点都是 (x, y) 单点，这里统一校验并归一化成 float 元组。
     for field in ("start", "goal"):
         point = scenario[field]
         if len(point) != 2:

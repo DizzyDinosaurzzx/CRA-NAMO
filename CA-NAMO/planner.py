@@ -1,23 +1,10 @@
-"""
-在线"规划-执行-感知-重规划"循环（§感知与在线重规划）。
+"""在线"规划-执行-感知-重规划"循环"""
 
-    plan  ：在当前信念状态下的最小代价规划（search.Planner）
-    execute：执行该规划的第一条路网边（以及所需的障碍物移除），按 J=lambda_distance*D+W
-             累加代价
-    perceive：揭示新可见的障碍物（包括刚移动障碍物所暴露的物体），并增量更新路网信念
-    replan ：重复上述过程，直到到达目标节点或不存在可行规划
-
-对于未探索空间，一切都采用乐观假设（未知边视为畅通），因此执行过程可能揭示阻挡物，
-使原先的乐观规划失效并触发重规划，这正是预期的闭环过程。
-"""
 from __future__ import annotations
-
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
-
 from shapely.geometry import Polygon, Point
-
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
@@ -25,7 +12,6 @@ from perception import Belief
 from llm_difficulty import DifficultyEstimator
 from search import Planner, Plan
 import geometry
-
 
 @dataclass
 class RunResult:
@@ -39,13 +25,11 @@ class RunResult:
     total_expansions: int = 0
     llm_calls: int = 0
     llm_mode: str = "heuristic"
-    work_source: str = "direct"
     removed: List[int] = field(default_factory=list)
     robot_track: List[Tuple[float, float]] = field(default_factory=list)
-    history: List[dict] = field(default_factory=list)   # snapshots for visualisation
-    frames: List[dict] = field(default_factory=list)    # per-step frames (逐步动画)
+    history: List[dict] = field(default_factory=list)   
+    frames: List[dict] = field(default_factory=list)    
     message: str = ""
-
 
 class OnlineNAMO:
     def __init__(self, workspace: Polygon,
@@ -80,13 +64,10 @@ class OnlineNAMO:
             p = self.roadmap.nodes[self.roadmap.nearest_node(p)]
         return self.roadmap.add_terminal(p)
 
-    # -------------------------------------------------------------------- 运行
+    # ------------ 运行 ------------- #
     def run(self) -> RunResult:
         cfg = self.cfg
-        llm_mode = ("not_used" if cfg.work_source == "direct"
-                    else self.estimator.mode)
-        res = RunResult(success=False, llm_mode=llm_mode,
-                        work_source=cfg.work_source)
+        res = RunResult(success=False, llm_mode=self.estimator.mode)
         node = self.start_node
         res.robot_track.append(self.roadmap.nodes[node])
 
@@ -119,22 +100,17 @@ class OnlineNAMO:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
                     dx, dy, dth = act["drop"]
-                    # 触碰事件保留；direct 模式下不会改写已知的 W。
+                    # 推动前触摸感知: 获知该障碍物的真实 difficulty
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
-                        touch_label = (
-                            f"touch detected {touched}"
-                            if cfg.work_source == "direct"
-                            else f"touch revealed difficulty of {touched}"
-                        )
-                        self._capture_frame(res, node,
-                                            touch_label)
-                    # 物理校验：在真实世界里，这次推动是否会撞到别的障碍物（含尚未
+                        self._capture_frame(
+                            res, node, f"touch revealed difficulty of {touched}")
+                    # 物理校验: 在真实世界里，这次推动是否会撞到别的障碍物（含尚未
                     # 感知的）？规划是乐观的、只避开已知障碍物；现实由此处兜底。
                     hits = self._world_collision(act["oid"], dx, dy, dth)
                     if hits:
-                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的"知情"取决于配置：
+                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的"知情"取决于配置: 
                         #   full_reveal_on_contact=True : 直接获知被撞障碍物全部信息
                         #   False(更真实)              : 只记录"此处有物"的匿名接触区域，
                         #                                身份/几何/难度要等遮挡移开后正常感知
@@ -153,11 +129,8 @@ class OnlineNAMO:
                         break
                     self.belief.relocate(obs, dx, dy, dth)
                     self._relocate_world(act["oid"], dx, dy, dth)
-                    # direct 模式与搜索使用同一个给定 W；estimated 模式保留旧执行语义。
-                    if cfg.work_source == "direct":
-                        executed_work = act["work"]
-                    else:
-                        executed_work = geometry.push_work(obs, act["dist"])
+                    # 执行时按真实 difficulty 结算，可能与规划时的估计值不同
+                    executed_work = geometry.push_work(obs, act["dist"])
                     res.work_cost += executed_work
                     res.J += executed_work
                     if act["oid"] not in res.removed:
@@ -178,17 +151,12 @@ class OnlineNAMO:
                     if hit_oids:
                         self._capture_frame(res, node,
                             f"collision revealed {hit_oids}")
-                    # 触碰感知保留；direct 模式只记录事件。
+                    # 触摸感知: 获知被触碰障碍物的真实 difficulty
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
-                        touch_label = (
-                            f"touch detected {touched}"
-                            if cfg.work_source == "direct"
-                            else f"touch revealed difficulty of {touched}"
-                        )
-                        self._capture_frame(res, node,
-                                            touch_label)
+                        self._capture_frame(
+                            res, node, f"touch revealed difficulty of {touched}")
                     # 每次实际移动后感知（揭示被暴露的障碍物）
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
                     self._capture_frame(res, node, f"move to node {node}")
@@ -222,7 +190,7 @@ class OnlineNAMO:
         return None
 
     def _world_collision(self, oid: int, nx: float, ny: float, theta: float):
-        """真实世界物理校验：把 oid 推到 (nx, ny, theta) 是否与其他障碍物碰撞。
+        """真实世界物理校验: 把 oid 推到 (nx, ny, theta) 是否与其他障碍物碰撞。
 
         对*全部*可移动障碍物（含机器人尚未感知的）检查终点位姿与推动扫掠路径。
         返回被撞到的障碍物列表 [(oid, contact_region), ...]，其中 contact_region 是

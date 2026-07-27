@@ -3,14 +3,13 @@
     f = g + h，g = 当前累积代价，h = 到目标的可采纳下界。
 
 A 搜索状态是 (node, frozenset(本次规划中已移除的障碍物))。
-经过当前被阻挡的边时需要"付费解锁"。默认 direct 模式在感知到障碍物后直接读取
-其给定做功 W，并按 J = lambda_distance * D + W 加入 g。几何计算器 push_plan 只负责
-判断移动是否可行以及寻找放置位姿。
+经过当前被阻挡的边时需要"付费解锁"：操作功 W = difficulty * push_distance，按
+J = lambda_distance * D + W 加入 g。几何计算器 push_plan 负责判断移动是否可行、
+寻找放置位姿并给出推动距离；difficulty 在触碰前由 LLM/启发式估计。
 
 正确性保证：
   * h = lambda_distance * 到目标的欧氏距离，是可采纳的（剩余行驶距离 >= 直线距离，且操作功项非负），因此第一个被弹出的目标状态即为代价最优解。
   * 分支限界会剪掉任何 f >= 当前已找到的最优目标代价的状态。
-原 LLM 难度估计代码保留给 estimated 模式；direct 模式不调用 LLM。
 
 """
 
@@ -152,10 +151,7 @@ class Planner:
         return base + extra, removals
 
     def _removal(self, oid: int):
-        """计算把障碍物移出其全部阻挡边所需的做功和放置位姿。
-
-        direct 模式直接读取感知到的 W；estimated 模式保留原来的难度估计路径。
-        """
+        """计算把障碍物移出其全部阻挡边所需的做功和放置位姿。"""
         if oid in self._removal_cache:
             return self._removal_cache[oid]
         obs = self.belief.obstacle(oid)
@@ -167,16 +163,18 @@ class Planner:
         if self.cfg.check_obstacle_collision:
             polys = [ob.polygon for oid2, ob in self.belief.perceived.items()
                      if oid2 != oid]
-            polys += self.belief.contacts
+            # 压在被推物体自身位置上的接触区要排除：扫掠区的起点就是它当前的
+            # footprint，必然与之相交，否则该物体会被判定为永远不可推动。
+            polys += [c for c in self.belief.contacts
+                      if not c.intersects(obs.polygon)]
             others = unary_union(polys) if polys else None
         feasible, dist, drop = geometry.push_plan(
             obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
             others=others)
         if not feasible:
             work = math.inf
-        elif self.cfg.work_source == "direct":
-            work = self.belief.get_work(oid)
         else:
+            # W = difficulty * 推动距离；未触碰过的障碍物用 LLM/启发式估计的 difficulty
             estimated_diff = self.belief.get_difficulty(oid, self.est)
             work = estimated_diff * dist
         res = (feasible, work, drop, dist)
@@ -185,9 +183,7 @@ class Planner:
 
     def _llm_bias(self, removals) -> float:
         """Ordering-only term: sum of LLM-estimated difficulty of removed obstacles."""
-        if (self.cfg.work_source == "direct"
-                or not self.cfg.use_llm_ordering
-                or not removals):
+        if not self.cfg.use_llm_ordering or not removals:
             return 0.0
         s = 0.0
         for (oid, _drop, _dist, _work) in removals:
