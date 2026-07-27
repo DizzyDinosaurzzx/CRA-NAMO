@@ -2,8 +2,9 @@
 方法部分中的两个几何计算器
 1. push_plan()        
 
-计算清除障碍物所阻挡边所需的实际推动距离、推动是否可行，以及障碍物最终位置（“放置位姿”）。
-实际几何结果以work = difficulty * push_distance 的形式计入代价。
+计算清除障碍物所阻挡边所需的实际推动距离、推动是否可行，以及障碍物最终位置
+（“放置位姿”）。默认 direct 模式的做功 W 由障碍物直接给出，推动距离不参与 W；
+保留的 estimated 模式仍可使用 difficulty * push_distance。
 
 2. walking_distance() 
 
@@ -63,7 +64,7 @@ def push_plan(
     优先选择不会重新阻挡其他当前畅通通道（`avoid`）的位姿，并以最短推动距离打破平局。
     由于密集路网覆盖自由空间，将避免反效果作为硬约束会禁止所有放置；任何残余的新阻挡都会通过重新感知发现，并由重规划处理。
     返回 (feasible, push_distance, drop_pose)。push_distance 是障碍物中心的欧氏移动
-    距离；调用方通过 `difficulty` 将其转换为操作功。
+    距离；direct 模式仅把它用于几何放置选择，不用于计算 W。
     """
 
     best = None                      # (penalty, distance, pose)
@@ -99,7 +100,7 @@ def push_plan(
 
 
 def push_work(obs: MovableObstacle, push_distance: float) -> float:
-    """Real manipulation work = ground-truth difficulty x push distance."""
+    """保留的 estimated 模式：difficulty x push_distance。"""
     return obs.difficulty * push_distance
 
 

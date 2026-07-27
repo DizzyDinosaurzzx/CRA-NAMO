@@ -42,19 +42,19 @@ def two_doors():
         StaticObstacle(box(14.5, 18.0, 15.5, 20.0), "wall_hi"),
     ]
 
-    # 可移动障碍物（真实世界，包含真实难度）
+    # 可移动障碍物：direct 模式在感知后直接读取固定做功 W。
     movable = [
         # A：堵住近处门口，容易移动
         MovableObstacle(x=15.0, y=4.5, l=1.4, d=2.6, theta=0.0,
-                        material="empty_cart", difficulty=0.3, oid=1),
+                        material="empty_cart", difficulty=0.3, work=0.3, oid=1),
         # B：紧邻墙体东侧，被 A 遮挡，移动难度中等
         MovableObstacle(x=16.7, y=4.5, l=1.2, d=2.4, theta=0.0,
-                        material="wooden_table", difficulty=1.2, oid=2),
+                        material="wooden_table", difficulty=1.2, work=1.2, oid=2),
         # 其他位置的干扰物（无关杂物，用于测试感知）
         MovableObstacle(x=9.0, y=12.0, l=2.0, d=2.0, theta=0.0,
-                        material="chair", difficulty=0.4, oid=3),
+                        material="chair", difficulty=0.4, work=0.4, oid=3),
         MovableObstacle(x=22.0, y=10.0, l=2.0, d=1.5, theta=0.0,
-                        material="cardboard_box", difficulty=0.2, oid=4),
+                        material="cardboard_box", difficulty=0.2, work=0.2, oid=4),
     ]
 
     start = (5.0, 4.5)
@@ -100,16 +100,16 @@ def two_doors_hidden_c():
     movable = [
         # A：堵住近门，难度排名第二。
         MovableObstacle(x=5.0, y=20.0, l=3.4, d=1.4, theta=0.0,
-                        material="loaded_pallet", difficulty=20.0, oid=1),
+                        material="loaded_pallet", difficulty=20.0, work=20.0, oid=1),
         # B：堵住远门、位于 C 的上方，难度排名第三。
         # 上移到 y=20.5（底部 19.6），正好压在 C 的顶部之上而不与之重叠。
         MovableObstacle(x=23.0, y=20.5, l=3.8, d=1.8, theta=0.0,
-                        material="wooden_crate", difficulty=2.0, oid=2),
+                        material="wooden_crate", difficulty=2.0, work=2.0, oid=2),
         # C：与 B、远门同轴，从上方房间观察时被 B 完全遮挡，难度排名第一。
         # 抬高到 y=18.8（顶部 19.5）与墙体底面严丝合缝，封死原来 C 顶与墙底之间
         # 那条 0.8 宽的竖直缝——移开 B 后机器人无法再从缝中横向绕过 C。
         MovableObstacle(x=23.0, y=18.8, l=3.8, d=1.4, theta=0.0,
-                        material="steel_safe", difficulty=200.0, oid=3),
+                        material="steel_safe", difficulty=200.0, work=200.0, oid=3),
     ]
 
     start = (5.0, 35.0)
@@ -170,13 +170,13 @@ def maze_three_movable():
     movable = [
         # A：底部入口进入后第一个岔路口。
         MovableObstacle(x=16.0, y=10.0, l=4.0, d=3.0, theta=0.0,
-                        material="cardboard_box", difficulty=0.4, oid=1),
+                        material="cardboard_box", difficulty=0.4, work=0.4, oid=1),
         # B：迷宫中央左右分流处。
         MovableObstacle(x=23.0, y=15.0, l=3.0, d=4.0, theta=0.0,
-                        material="chair", difficulty=0.8, oid=2),
+                        material="chair", difficulty=0.8, work=0.8, oid=2),
         # C：靠近左上目标区的岔路口。
         MovableObstacle(x=12.0, y=21.8, l=4.0, d=1.8, theta=0.0,
-                        material="wooden_crate", difficulty=1.5, oid=3),
+                        material="wooden_crate", difficulty=1.5, work=1.5, oid=3),
     ]
 
     start = (12.5, 1.5)     # 底部入口（图片红色箭头）
@@ -255,6 +255,7 @@ def maze_three_movable2():
             theta=0.0,
             material="cardboard_box",
             difficulty=100,
+            work=100,
             oid=1,
         ),
 
@@ -267,6 +268,7 @@ def maze_three_movable2():
             theta=0.0,
             material="chair",
             difficulty=0.5,
+            work=0.5,
             oid=2,
         ),
 
@@ -279,6 +281,7 @@ def maze_three_movable2():
             theta=0.0,
             material="wooden_crate",
             difficulty=1.5,
+            work=1.5,
             oid=3,
         ),
     ]

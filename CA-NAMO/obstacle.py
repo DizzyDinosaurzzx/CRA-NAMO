@@ -4,14 +4,12 @@
 问题中包含两类障碍物（见问题定义）：
 
 * StaticObstacle  - 不可移动的墙体/柱体（集合 L）。预先已知；用于一次性构建路网。
-* MovableObstacle - 集合 M。位置、尺寸、*材质*和真实的*难度*系数在障碍物进入
-                    感知圆之前对机器人全部未知。
+* MovableObstacle - 集合 M。位置、尺寸、材质、直接给定的做功 W 和旧难度系数在
+                    障碍物进入感知圆之前对机器人全部未知。
 
-`difficulty` 是单位推动距离功的真实系数（可理解为质量 x 摩擦力）。几何计算器返回的
-实际操作功为
+当前默认模式直接使用 `work` 作为一次成功移动该障碍物的做功 W。`difficulty` 和
+`material` 为保留的旧 LLM/难度估计模式服务；该模式下几何计算器返回的操作功为
     work = difficulty * push_distance
-LLM 永远看不到该数值；它只能看到 `material`/`description`，并预测一个用于*排列*
-搜索顺序的难度。
 """
 from __future__ import annotations
 
@@ -51,9 +49,14 @@ class MovableObstacle:
     material: str = "unknown"      # LLM 用于推理的语义标签
     difficulty: float = 1.0        # 真实的单位距离操作功系数
     oid: int = -1                  # 由场景/世界分配的唯一 ID
+    work: float = 1.0              # 当前默认模式：一次成功移动的直接做功 W
 
     # 运行时标志
     removed: bool = False          # 已经被实际移到不碍事的位置
+
+    def __post_init__(self):
+        if self.work < 0:
+            raise ValueError("work 必须为非负数")
 
     @property
     def polygon(self) -> Polygon:
@@ -71,7 +74,8 @@ class MovableObstacle:
         return MovableObstacle(
             x=x, y=y, l=self.l, d=self.d,
             theta=self.theta if theta is None else theta,
-            material=self.material, difficulty=self.difficulty, oid=self.oid,
+            material=self.material, difficulty=self.difficulty,
+            work=self.work, oid=self.oid,
         )
 
     def polygon_at(self, x: float, y: float, theta: Optional[float] = None) -> Polygon:
@@ -80,9 +84,9 @@ class MovableObstacle:
 
     # ---- 障碍物被感知后机器人允许看到的信息 ----
     def observation(self) -> dict:
-        """感知时揭示的信息：几何信息和材质标签。
+        """感知时揭示的信息：几何信息、材质标签和直接做功 W。
 
-        有意排除真实的 `difficulty`；机器人必须根据可见特征使用 LLM 或启发式方法估计。
+        `difficulty` 仍有意排除，仅供保留的旧估计/触碰模式内部使用。
         """
         return {
             "oid": self.oid,
@@ -90,8 +94,9 @@ class MovableObstacle:
             "l": self.l, "d": self.d, "theta": round(self.theta, 3),
             "area": round(self.area, 2),
             "material": self.material,
+            "work": self.work,
         }
 
     def __repr__(self):
         return (f"Obs#{self.oid}({self.material}, c=({self.x:.1f},{self.y:.1f}), "
-                f"{self.l}x{self.d}, diff={self.difficulty})")
+                f"{self.l}x{self.d}, W={self.work}, diff={self.difficulty})")

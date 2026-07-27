@@ -3,8 +3,8 @@
 Usage:
     python main.py                       # 运行
     python main.py --scenario two_doors  # 选择案例
-    python main.py --lambda_w 5          # 提高操作代价 -> 更倾向绕行
-    DEEPSEEK_API_KEY=sk-... python main.py   # 使用 DeepSeek 排列难度
+    python main.py --lambda 5            # 提高移动做功 -> 更倾向移动障碍物
+    python main.py --work-source estimated  # 可选：恢复原难度估计路径
 """
 
 from __future__ import annotations
@@ -122,8 +122,8 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
         _plot_poly(ax, p, color="royalblue", alpha=0.3, zorder=5)
 
     title = (f"{res.message}  |  J={res.J} "
-             f"(walk={res.walk_cost}, work={res.work_cost})  |  "
-             f"moved={res.removed}  |  LLM={res.llm_mode}")
+             f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
+             f"moved={res.removed}  |  source={res.work_source}")
     _finish_ax(ax, sim, title)
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
@@ -184,8 +184,11 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="maze_three_movable2")
-    ap.add_argument("--lambda_d", type=float, default=None)
-    ap.add_argument("--lambda_w", type=float, default=None)
+    ap.add_argument("--lambda", "--lambda_d", dest="lambda_d",
+                    type=float, default=None)
+    ap.add_argument("--work-source", choices=("direct", "estimated"),
+                    default=None,
+                    help="direct=感知后直接读取 W；estimated=保留的旧难度估计路径")
     ap.add_argument("--no-llm-order", action="store_true")
     ap.add_argument("--frames", action="store_true",
                     help="逐步保存机器人每一步运动的帧图片到 img/frames/")
@@ -194,9 +197,11 @@ def main():
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
     if args.lambda_d is not None:
+        if args.lambda_d < 0:
+            ap.error("--lambda 必须为非负数")
         cfg.lambda_d = args.lambda_d
-    if args.lambda_w is not None:
-        cfg.lambda_w = args.lambda_w
+    if args.work_source is not None:
+        cfg.work_source = args.work_source
     if args.no_llm_order:
         cfg.use_llm_ordering = False
     if args.frames:
@@ -209,16 +214,18 @@ def main():
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
     print(f"Scenario: {s['name']}   {sim.roadmap}")
-    print(f"Difficulty estimator: {sim.estimator.mode}"
-          + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
+    print(f"Work source       : {cfg.work_source}")
+    if cfg.work_source == "estimated":
+        print(f"Difficulty estimator: {sim.estimator.mode}"
+              + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
     print("-" * 60)
 
     res = sim.run()
 
     print(f"Success           : {res.success}   ({res.message})")
     print(f"Total cost J       : {res.J}")
-    print(f"  walk (lambda_d)  : {res.walk_cost}")
-    print(f"  work (lambda_w)  : {res.work_cost}")
+    print(f"  motion lambda*D  : {res.walk_cost}")
+    print(f"  obstacle work W  : {res.work_cost}")
     print(f"Obstacles moved    : {res.removed}")
     print(f"Replan cycles      : {res.cycles}")
     print(f"First-plan time (s): {round(res.first_plan_time, 4)}")

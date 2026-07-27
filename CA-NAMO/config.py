@@ -10,9 +10,9 @@ class Config:
     robot_radius: float = 0.35 # 机器人尺寸半径
     touch_margin: float = 0.15 # 触摸感知余量：触摸圆半径 = robot_radius + touch_margin
 
-    # -------- 代价函数 J --------
-    lambda_d: float = 1.0     # 行驶距离权重（“惜路”）
-    lambda_w: float = 1.0     # 操作功权重（“惜力”）
+    # -------- 代价函数 J = lambda_d * D + W --------
+    lambda_d: float = 1.0     # 机器人单位移动距离的做功系数 lambda
+    work_source: str = "direct"  # direct=感知后直接读取 W；estimated=保留原难度估计路径
 
     # -------- 感知 --------
     R_perc: float = 8.0       # 感知半径（以机器人为中心的感知圆半径）
@@ -43,7 +43,7 @@ class Config:
     max_replans: int = 2000          # 规划-执行-感知-重规划循环上限
 
     # -------- LLM（DeepSeek）--------
-    deepseek_api_key: str = "sk-eafcc8a14f8341cf9e99d479bf8805b1"             # 为空时使用启发式回退方案
+    deepseek_api_key: str = ""             # 为空时读取环境变量或使用启发式回退方案
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash"
     llm_timeout: float = 30.0
@@ -52,8 +52,14 @@ class Config:
     # -------- 其他 --------
     rng_seed: int = 0
     out_dir: str = "img"       # 可视化结果的输出目录
-    save_frames: bool = False   
+    save_frames: bool = True   
     verbose: bool = True
+
+    def __post_init__(self):
+        if self.lambda_d < 0:
+            raise ValueError("lambda_d 必须为非负数")
+        if self.work_source not in {"direct", "estimated"}:
+            raise ValueError("work_source 必须是 'direct' 或 'estimated'")
 
     def log(self, *args):
         if self.verbose:

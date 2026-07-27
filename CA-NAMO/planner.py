@@ -2,7 +2,8 @@
 在线"规划-执行-感知-重规划"循环（§感知与在线重规划）。
 
     plan  ：在当前信念状态下的最小代价规划（search.Planner）
-    execute：执行该规划的第一条路网边（以及所需的障碍物移除），将真实代价累加到 J
+    execute：执行该规划的第一条路网边（以及所需的障碍物移除），按 J=lambda_d*D+W
+             累加代价
     perceive：揭示新可见的障碍物（包括刚移动障碍物所暴露的物体），并增量更新路网信念
     replan ：重复上述过程，直到到达目标节点或不存在可行规划
 
@@ -38,6 +39,7 @@ class RunResult:
     total_expansions: int = 0
     llm_calls: int = 0
     llm_mode: str = "heuristic"
+    work_source: str = "direct"
     removed: List[int] = field(default_factory=list)
     robot_track: List[Tuple[float, float]] = field(default_factory=list)
     history: List[dict] = field(default_factory=list)   # snapshots for visualisation
@@ -74,7 +76,10 @@ class OnlineNAMO:
     # -------------------------------------------------------------------- 运行
     def run(self) -> RunResult:
         cfg = self.cfg
-        res = RunResult(success=False, llm_mode=self.estimator.mode)
+        llm_mode = ("not_used" if cfg.work_source == "direct"
+                    else self.estimator.mode)
+        res = RunResult(success=False, llm_mode=llm_mode,
+                        work_source=cfg.work_source)
         node = self.start_node
         res.robot_track.append(self.roadmap.nodes[node])
 
@@ -107,12 +112,17 @@ class OnlineNAMO:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
                     dx, dy, dth = act["drop"]
-                    # 需求4: 推动前触摸感知获知真实难度
+                    # 触碰事件保留；direct 模式下不会改写已知的 W。
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
+                        touch_label = (
+                            f"touch detected {touched}"
+                            if cfg.work_source == "direct"
+                            else f"touch revealed difficulty of {touched}"
+                        )
                         self._capture_frame(res, node,
-                            f"touch revealed difficulty of {touched}")
+                                            touch_label)
                     # 物理校验：在真实世界里，这次推动是否会撞到别的障碍物（含尚未
                     # 感知的）？规划是乐观的、只避开已知障碍物；现实由此处兜底。
                     hits = self._world_collision(act["oid"], dx, dy, dth)
@@ -136,10 +146,13 @@ class OnlineNAMO:
                         break
                     self.belief.relocate(obs, dx, dy, dth)
                     self._relocate_world(act["oid"], dx, dy, dth)
-                    # 需求4: 执行时用真实 difficulty 重算 work
-                    real_work = geometry.push_work(obs, act["dist"])
-                    res.work_cost += cfg.lambda_w * real_work
-                    res.J += cfg.lambda_w * real_work
+                    # direct 模式与搜索使用同一个给定 W；estimated 模式保留旧执行语义。
+                    if cfg.work_source == "direct":
+                        executed_work = act["work"]
+                    else:
+                        executed_work = geometry.push_work(obs, act["dist"])
+                    res.work_cost += executed_work
+                    res.J += executed_work
                     if act["oid"] not in res.removed:
                         res.removed.append(act["oid"])
                     self._capture_frame(res, node, f"push obstacle {act['oid']}")
@@ -158,12 +171,17 @@ class OnlineNAMO:
                     if hit_oids:
                         self._capture_frame(res, node,
                             f"collision revealed {hit_oids}")
-                    # 需求4: 触摸感知
+                    # 触碰感知保留；direct 模式只记录事件。
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
+                        touch_label = (
+                            f"touch detected {touched}"
+                            if cfg.work_source == "direct"
+                            else f"touch revealed difficulty of {touched}"
+                        )
                         self._capture_frame(res, node,
-                            f"touch revealed difficulty of {touched}")
+                                            touch_label)
                     # 每次实际移动后感知（揭示被暴露的障碍物）
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
                     self._capture_frame(res, node, f"move to node {node}")

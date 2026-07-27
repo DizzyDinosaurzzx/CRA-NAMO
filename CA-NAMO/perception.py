@@ -26,7 +26,7 @@ class Belief:
     def __init__(self, roadmap: Roadmap, cfg: Config):
         self.roadmap = roadmap
         self.cfg = cfg
-        self.perceived: Dict[int, MovableObstacle] = {}     # oid -> 障碍物（已感知到的真实难度）
+        self.perceived: Dict[int, MovableObstacle] = {}     # oid -> 已感知障碍物（含直接给定的 W）
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # 边 -> 阻挡该边的障碍物 oid 集合
         self.newly_revealed: List[int] = []
         # 通过"推动碰撞"发现的匿名占据区域：只知道"这里有东西"，不知其身份/几何/难度。
@@ -209,6 +209,10 @@ class Belief:
         if oid in self.touched_difficulty:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
+
+    def get_work(self, oid: int) -> float:
+        """直接 W 模式：障碍物被感知后即可读取其给定做功。"""
+        return self.perceived[oid].work
 
     # -------------------- 查询 ----------------------
     def blockers_of(self, key: EdgeKey) -> Set[int]:
