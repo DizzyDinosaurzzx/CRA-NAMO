@@ -16,7 +16,7 @@ from typing import Any
 
 
 # 默认测试地图：平时切换地图只需要修改这一行。
-DEFAULT_SCENARIO = "maze_three_movable"
+DEFAULT_SCENARIO = "maze_two_movable"
 
 # 地图名 -> 包含 create() 函数的 Python 模块。
 # 新增地图时只需要在这里增加一行注册。
@@ -24,6 +24,7 @@ SCENARIOS: dict[str, str] = {
     "two_doors": "scenario_two_doors",
     "two_doors_hidden_c": "scenario_two_doors_hidden_c",
     "maze_three_movable": "scenario_maze_three_movable",
+    "maze_two_movable": "scenario_maze_two_movable",
 }
 
 REQUIRED_FIELDS = {
