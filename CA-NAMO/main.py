@@ -183,7 +183,8 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scenario", default="maze_three_movable2")
+    ap.add_argument("--scenario", default=scenarios.DEFAULT_SCENARIO,
+                    choices=scenarios.names())
     ap.add_argument("--lambda", "--lambda_d", dest="lambda_d",
                     type=float, default=None)
     ap.add_argument("--work-source", choices=("direct", "estimated"),
