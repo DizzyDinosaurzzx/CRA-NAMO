@@ -2,22 +2,25 @@
 代价感知 NAMO 的全局配置
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class Config:
     # -------- 机器人 --------
     robot_radius: float = 0.35 # 机器人尺寸半径
+    touch_margin: float = 0.15 # 触摸感知余量：触摸圆半径 = robot_radius + touch_margin
 
-    # -------- 代价函数 J = lambda_move * D + W --------
-    lambda_move: float = 1.0  # 机器人单位移动距离对应的做功系数 lambda
-    gravity: float = 9.81     # 重力加速度 g；障碍物平动功 J1 = eta * g * d
+    # -------- 代价函数 J --------
+    lambda_d: float = 1.0     # 行驶距离权重（“惜路”）
+    lambda_w: float = 1.0     # 操作功权重（“惜力”）
 
     # -------- 感知 --------
     R_perc: float = 8.0       # 感知半径（以机器人为中心的感知圆半径）
-    sight_width: float = 0.2  # 视线宽度：>0 时视线是有该宽度的“走廊”，需完整穿过自由空间
+    sight_width: float = 0.2  # 视线宽度：>0 时视线是有该宽度的”走廊”，需完整穿过自由空间
                               # 且不碰障碍物才算看得见；0=零宽度射线（再窄的缝也能看穿）。
-                              # 调大可禁止“细缝偷窥”（缝宽 < sight_width 就看不穿）。
+                              # 调大可禁止”细缝偷窥”（缝宽 < sight_width 就看不穿）。
+    phi_0: float = 0.05       # 传感器最小可分辨角（弧度），约 2.86deg。
+                              # 障碍物在机器人视角中的张角小于此值时无法被视觉感知。
 
     # -------- 操作 --------
     R_push: float = 5.0       # 障碍物只能在当前位姿周围的该半径内重新放置
@@ -32,6 +35,7 @@ class Config:
     conn_radius: float = 2   # 两个节点距离不超过此值且视线无阻时建立连接
 
     # -------- 搜索 --------
+    use_llm_ordering: bool = True
     max_expansions: int = 200000    # A* 扩展次数上限
 
     # -------- 在线循环 --------
@@ -39,7 +43,7 @@ class Config:
     max_replans: int = 2000          # 规划-执行-感知-重规划循环上限
 
     # -------- LLM（DeepSeek）--------
-    deepseek_api_key: str = ""             # 为空时使用启发式回退方案
+    deepseek_api_key: str = "sk-eafcc8a14f8341cf9e99d479bf8805b1"             # 为空时使用启发式回退方案
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash"
     llm_timeout: float = 30.0
@@ -50,12 +54,6 @@ class Config:
     out_dir: str = "img"       # 可视化结果的输出目录
     save_frames: bool = True   # 是否保存过程帧（img/frames_<地图名>/）
     verbose: bool = True
-
-    def __post_init__(self):
-        if self.lambda_move < 0:
-            raise ValueError("lambda_move 必须为非负数")
-        if self.gravity <= 0:
-            raise ValueError("gravity 必须为正数")
 
     def log(self, *args):
         if self.verbose:

@@ -3,8 +3,8 @@
 Usage:
     python main.py                       # 运行
     python main.py --scenario two_doors  # 选择案例
-    python main.py --lambda 5            # 提高移动做功 -> 更倾向走短路
-    DEEPSEEK_API_KEY=sk-... python main.py   # 使用 DeepSeek 估计 eta
+    python main.py --lambda_w 5          # 提高操作代价 -> 更倾向绕行
+    DEEPSEEK_API_KEY=sk-... python main.py   # 使用 DeepSeek 排列难度
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+from shapely.geometry import LineString, Point
 
 import scenarios
 from planner import OnlineNAMO
@@ -29,6 +31,35 @@ def _plot_poly(ax, poly, **kw):
         for g in poly.geoms:
             xs, ys = g.exterior.xy
             ax.fill(xs, ys, **kw)
+
+
+def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
+    """Draw roadmap: all nodes/edges as faint backdrop, highlight current node's neighbours."""
+    rm = sim.roadmap
+
+    # All edges — very faint grey
+    for u, v in rm.edge_len:
+        x1, y1 = rm.nodes[u]
+        x2, y2 = rm.nodes[v]
+        ax.plot([x1, x2], [y1, y2], color="lightgray", lw=0.3, zorder=0.3)
+
+    # All nodes — tiny silver dots
+    xs = [p[0] for p in rm.nodes]
+    ys = [p[1] for p in rm.nodes]
+    ax.scatter(xs, ys, color="silver", s=1, zorder=0.4)
+
+    # Highlight current node's outgoing edges (available next steps)
+    if cur_node is not None and cur_node in rm.adj:
+        for v in rm.adj[cur_node]:
+            x1, y1 = rm.nodes[cur_node]
+            x2, y2 = rm.nodes[v]
+            ax.plot([x1, x2], [y1, y2], color="dodgerblue", lw=1.2, alpha=0.7,
+                    zorder=4.5)
+        nb_xs = [rm.nodes[v][0] for v in rm.adj[cur_node]]
+        nb_ys = [rm.nodes[v][1] for v in rm.adj[cur_node]]
+        ax.scatter(nb_xs, nb_ys, color="dodgerblue", s=8, alpha=0.7, zorder=4.6)
+        hx, hy = rm.nodes[cur_node]
+        ax.scatter([hx], [hy], color="dodgerblue", s=20, marker="s", zorder=4.7)
 
 
 def _draw_static(ax, sim: OnlineNAMO, original_poses):
@@ -57,6 +88,7 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
 def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     fig, ax = plt.subplots(figsize=(9, 6))
     _draw_static(ax, sim, original_poses)
+    _draw_roadmap_bg(ax, sim)
 
     # 最终障碍物 footprint
     for w in sim.world:
@@ -64,15 +96,20 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
         _plot_poly(ax, w.polygon, color=col, alpha=0.6, zorder=3)
         ax.text(w.x, w.y, str(w.oid), ha="center", va="center", fontsize=8, zorder=4)
 
-    # 机器人轨迹
-    if res.robot_track:
-        xs = [p[0] for p in res.robot_track]
-        ys = [p[1] for p in res.robot_track]
-        ax.plot(xs, ys, color="royalblue", lw=2, marker="o", ms=3, zorder=5)
-        ax.plot(xs[0], ys[0], marker="*", color="blue", ms=16, zorder=6, label="start")
+    # 机器人轨迹（圆盘扫掠面积）
+    if len(res.robot_track) >= 2:
+        corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
+        _plot_poly(ax, corridor, color="royalblue", alpha=0.3, zorder=5)
+        ax.plot(*res.robot_track[0], marker="*", color="blue", ms=16, zorder=6,
+                label="start")
+    elif res.robot_track:
+        p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
+        _plot_poly(ax, p, color="royalblue", alpha=0.3, zorder=5)
+        ax.plot(*res.robot_track[0], marker="*", color="blue", ms=16, zorder=6,
+                label="start")
 
     title = (f"{res.message}  |  J={res.J} "
-             f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
+             f"(walk={res.walk_cost}, work={res.work_cost})  |  "
              f"moved={res.removed}  |  LLM={res.llm_mode}")
     _finish_ax(ax, sim, title)
     fig.tight_layout()
@@ -81,10 +118,11 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
 
 
 def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
-                 idx: int, total: int):
-    """渲染单帧：某一步时刻的障碍物位姿 + 机器人当前位置与已走轨迹。"""
+                 idx: int, total: int, cur_node: int | None = None):
+    """渲染单帧：障碍物位姿 + 机器人位置/轨迹 + 路网。"""
     fig, ax = plt.subplots(figsize=(9, 6))
     _draw_static(ax, sim, original_poses)
+    _draw_roadmap_bg(ax, sim, cur_node=cur_node)
 
     perceived = frame["perceived"]
     for oid, poly, removed in frame["obstacles"]:
@@ -97,17 +135,20 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
         cx, cy = poly.centroid.x, poly.centroid.y
         ax.text(cx, cy, str(oid), ha="center", va="center", fontsize=8, zorder=4)
 
-    # 已走轨迹
+    # 已走轨迹（圆盘扫掠面积）
     track = frame["track"]
+    if len(track) >= 2:
+        buf = LineString(track).buffer(sim.cfg.robot_radius, cap_style=1)
+        _plot_poly(ax, buf, color="royalblue", alpha=0.25, zorder=5)
     if track:
-        xs = [p[0] for p in track]
-        ys = [p[1] for p in track]
-        ax.plot(xs, ys, color="royalblue", lw=2, marker="o", ms=3, zorder=5)
-        ax.plot(xs[0], ys[0], marker="*", color="blue", ms=16, zorder=6, label="start")
+        ax.plot(track[0][0], track[0][1], marker="*", color="blue", ms=16,
+                zorder=6, label="start")
 
-    # 机器人当前位置
+    # 机器人当前位置（圆盘）
     rx, ry = frame["robot"]
-    ax.plot(rx, ry, marker="o", color="red", ms=10, zorder=7, label="robot")
+    robot_circle = Point(rx, ry).buffer(sim.cfg.robot_radius)
+    _plot_poly(ax, robot_circle, color="red", alpha=0.7, zorder=7)
+    ax.plot(rx, ry, marker="o", color="darkred", ms=4, zorder=8, label="robot")
 
     title = f"step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
     _finish_ax(ax, sim, title)
@@ -125,38 +166,29 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
     total = len(res.frames)
     for i, frame in enumerate(res.frames):
         out = os.path.join(frames_dir, f"step_{i:03d}.png")
-        render_frame(sim, frame, original_poses, out, i, total)
+        render_frame(sim, frame, original_poses, out, i, total,
+                     cur_node=frame.get("node"))
     return total
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--scenario",
-        default=scenarios.DEFAULT_SCENARIO,
-        choices=scenarios.names(),
-        help=(
-            "选择测试地图；默认值由 scenarios.py 中的 "
-            "DEFAULT_SCENARIO 控制"
-        ),
-    )
-    ap.add_argument(
-        "--lambda", "--lambda_d",
-        dest="lambda_move",
-        type=float,
-        default=None,
-        help="机器人单位移动距离对应的做功系数 lambda",
-    )
+    ap.add_argument("--scenario", default="maze_three_movable2")
+    ap.add_argument("--lambda_d", type=float, default=None)
+    ap.add_argument("--lambda_w", type=float, default=None)
+    ap.add_argument("--no-llm-order", action="store_true")
     ap.add_argument("--frames", action="store_true",
-                    help="逐步保存帧图片到 img/frames_<地图名>/")
+                    help="逐步保存机器人每一步运动的帧图片到 img/frames/")
     args = ap.parse_args()
 
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
-    if args.lambda_move is not None:
-        if args.lambda_move < 0:
-            ap.error("--lambda 必须为非负数")
-        cfg.lambda_move = args.lambda_move
+    if args.lambda_d is not None:
+        cfg.lambda_d = args.lambda_d
+    if args.lambda_w is not None:
+        cfg.lambda_w = args.lambda_w
+    if args.no_llm_order:
+        cfg.use_llm_ordering = False
     if args.frames:
         cfg.save_frames = True
 
@@ -167,7 +199,7 @@ def main():
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
     print(f"Scenario: {s['name']}   {sim.roadmap}")
-    print(f"Eta estimator: {sim.estimator.mode}"
+    print(f"Difficulty estimator: {sim.estimator.mode}"
           + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
     print("-" * 60)
 
@@ -175,10 +207,8 @@ def main():
 
     print(f"Success           : {res.success}   ({res.message})")
     print(f"Total cost J       : {res.J}")
-    print(f"  motion (lambda*D): {res.walk_cost}")
-    print(f"  translation J1   : {res.translation_work}")
-    print(f"  rotation J2      : {res.rotation_work}")
-    print(f"  obstacle work W  : {res.work_cost}")
+    print(f"  walk (lambda_d)  : {res.walk_cost}")
+    print(f"  work (lambda_w)  : {res.work_cost}")
     print(f"Obstacles moved    : {res.removed}")
     print(f"Replan cycles      : {res.cycles}")
     print(f"First-plan time (s): {round(res.first_plan_time, 4)}")
@@ -191,7 +221,7 @@ def main():
     print(f"\nSaved visualisation -> {out}")
 
     if cfg.save_frames:
-        frames_dir = os.path.join(cfg.out_dir, f"frames_{s['name']}")
+        frames_dir = os.path.join(cfg.out_dir, "frames")
         n = render_sequence(sim, res, original_poses, frames_dir)
         print(f"Saved {n} step frames -> {frames_dir}/step_000.png ... "
               f"step_{n - 1:03d}.png")

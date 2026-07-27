@@ -1,8 +1,8 @@
 """
-在线“规划-执行-感知-重规划”循环（§感知与在线重规划）。
+在线"规划-执行-感知-重规划"循环（§感知与在线重规划）。
 
     plan  ：在当前信念状态下的最小代价规划（search.Planner）
-    execute：执行该规划的第一条路网边（以及所需的障碍物移除），将标签估计代价累加到 J
+    execute：执行该规划的第一条路网边（以及所需的障碍物移除），将真实代价累加到 J
     perceive：揭示新可见的障碍物（包括刚移动障碍物所暴露的物体），并增量更新路网信念
     replan ：重复上述过程，直到到达目标节点或不存在可行规划
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from shapely.geometry import Polygon, Point
 
@@ -30,10 +30,8 @@ import geometry
 class RunResult:
     success: bool
     J: float = 0.0
-    walk_cost: float = 0.0          # 机器人移动做功 lambda * D
-    translation_work: float = 0.0  # 障碍物平动做功 J1
-    rotation_work: float = 0.0     # 障碍物转动做功 J2（当前固定为 0）
-    work_cost: float = 0.0          # 障碍物总做功 W = J1 + J2
+    walk_cost: float = 0.0
+    work_cost: float = 0.0
     cycles: int = 0
     plan_time: float = 0.0
     first_plan_time: float = 0.0
@@ -57,7 +55,7 @@ class OnlineNAMO:
         self.cfg = cfg
         self.workspace = workspace
         self.static_obstacles = static_obstacles
-        self.world = movable_obstacles
+        self.world = movable_obstacles          # ground truth (true difficulty)
         self.start = start
         self.goal_region = goal_region
 
@@ -95,7 +93,7 @@ class OnlineNAMO:
             if plan is None:
                 res.message = "No feasible plan under current belief."
                 res.cycles = cycle + 1
-                return self._finalize_result(res, node)
+                return res
             res.total_expansions += plan.expansions
             self._snapshot(res, node, plan)
 
@@ -105,19 +103,24 @@ class OnlineNAMO:
             # ---- 执行规划的前置边（包括对应的障碍物移除）----
             moves_done = 0
             reached_goal = False
-            pushed_this_cycle = False
             for act in plan.actions:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
                     dx, dy, dth = act["drop"]
+                    # 需求4: 推动前触摸感知获知真实难度
+                    touched = self.belief.touch_check(
+                        self.roadmap.nodes[node], self.world, cfg)
+                    if touched:
+                        self._capture_frame(res, node,
+                            f"touch revealed difficulty of {touched}")
                     # 物理校验：在真实世界里，这次推动是否会撞到别的障碍物（含尚未
                     # 感知的）？规划是乐观的、只避开已知障碍物；现实由此处兜底。
                     hits = self._world_collision(act["oid"], dx, dy, dth)
                     if hits:
-                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的“知情”取决于配置：
+                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的"知情"取决于配置：
                         #   full_reveal_on_contact=True : 直接获知被撞障碍物全部信息
-                        #   False(更真实)              : 只记录“此处有物”的匿名接触区域，
-                        #                                身份/几何/标签要等遮挡移开后正常感知
+                        #   False(更真实)              : 只记录"此处有物"的匿名接触区域，
+                        #                                身份/几何/难度要等遮挡移开后正常感知
                         for oid_hit, region in hits:
                             if cfg.full_reveal_on_contact:
                                 self.belief.force_reveal(self._world_obstacle(oid_hit))
@@ -133,45 +136,50 @@ class OnlineNAMO:
                         break
                     self.belief.relocate(obs, dx, dy, dth)
                     self._relocate_world(act["oid"], dx, dy, dth)
-                    res.translation_work += act["J1"]
-                    res.rotation_work += act["J2"]
-                    res.work_cost += act["work"]
-                    res.J += act["work"]
+                    # 需求4: 执行时用真实 difficulty 重算 work
+                    real_work = geometry.push_work(obs, act["dist"])
+                    res.work_cost += cfg.lambda_w * real_work
+                    res.J += cfg.lambda_w * real_work
                     if act["oid"] not in res.removed:
                         res.removed.append(act["oid"])
-                    pushed_this_cycle = True
                     self._capture_frame(res, node, f"push obstacle {act['oid']}")
                 elif act["type"] == "move":
-                    motion_work = cfg.lambda_move * act["dist"]
-                    res.walk_cost += motion_work
-                    res.J += motion_work
+                    prev_node = node    # 需求3: 记录移动前位置
+                    res.walk_cost += cfg.lambda_d * act["dist"]
+                    res.J += cfg.lambda_d * act["dist"]
                     node = act["v"]
                     res.robot_track.append(self.roadmap.nodes[node])
                     moves_done += 1
+                    # 需求3: 碰撞感知
+                    hit_oids = self.belief.check_robot_collision(
+                        self.roadmap.nodes[prev_node],
+                        self.roadmap.nodes[node],
+                        self.world, cfg)
+                    if hit_oids:
+                        self._capture_frame(res, node,
+                            f"collision revealed {hit_oids}")
+                    # 需求4: 触摸感知
+                    touched = self.belief.touch_check(
+                        self.roadmap.nodes[node], self.world, cfg)
+                    if touched:
+                        self._capture_frame(res, node,
+                            f"touch revealed difficulty of {touched}")
                     # 每次实际移动后感知（揭示被暴露的障碍物）
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
                     self._capture_frame(res, node, f"move to node {node}")
                     if node == self.goal_node:
                         reached_goal = True
                         break
-                    # 推障规划只保证清空当前通过的路网边。通过后立即重规划，
-                    # 让障碍物的新位置及其新阻挡关系进入下一轮信念。
-                    if pushed_this_cycle or moves_done >= cfg.step_execute_edges:
+                    if moves_done >= cfg.step_execute_edges:
                         break
 
             res.cycles = cycle + 1
             if reached_goal or node == self.goal_node:
                 break
 
-        return self._finalize_result(res, node)
-
-    def _finalize_result(self, res: RunResult, node: int) -> RunResult:
-        """统一汇总成功和提前失败两种退出路径的指标。"""
         res.success = (node == self.goal_node)
         res.J = round(res.J, 4)
         res.walk_cost = round(res.walk_cost, 4)
-        res.translation_work = round(res.translation_work, 4)
-        res.rotation_work = round(res.rotation_work, 4)
         res.work_cost = round(res.work_cost, 4)
         res.plan_time = round(res.plan_time, 4)
         res.llm_calls = self.estimator.calls
@@ -182,18 +190,18 @@ class OnlineNAMO:
         return res
 
     # -------------------------------------------------------------- 辅助方法
-    def _world_obstacle(self, oid: int) -> MovableObstacle:
+    def _world_obstacle(self, oid: int) -> Optional[MovableObstacle]:
         for w in self.world:
             if w.oid == oid:
                 return w
-        raise KeyError(f"真实世界中不存在障碍物 oid={oid}")
+        return None
 
     def _world_collision(self, oid: int, nx: float, ny: float, theta: float):
         """真实世界物理校验：把 oid 推到 (nx, ny, theta) 是否与其他障碍物碰撞。
 
         对*全部*可移动障碍物（含机器人尚未感知的）检查终点位姿与推动扫掠路径。
         返回被撞到的障碍物列表 [(oid, contact_region), ...]，其中 contact_region 是
-        被推物体扫掠区与该障碍物的重叠区（即“机器人实际感受到阻力”的那块区域）；
+        被推物体扫掠区与该障碍物的重叠区（即"机器人实际感受到阻力"的那块区域）；
         空列表表示无碰撞。
         """
         if not self.cfg.check_obstacle_collision:
@@ -207,7 +215,7 @@ class OnlineNAMO:
                 continue
             wp = w.polygon
             if end_poly.intersects(wp) or swept.intersects(wp):
-                contact = swept.intersection(wp)   # 只“摸到”接触重叠区，非整个障碍物
+                contact = swept.intersection(wp)   # 只"摸到"接触重叠区，非整个障碍物
                 hits.append((w.oid, contact))
         return hits
 
@@ -222,9 +230,9 @@ class OnlineNAMO:
         if not self.cfg.save_frames:
             return
         res.frames.append({
+            "node": node,
             "robot": self.roadmap.nodes[node],
             "track": list(res.robot_track),
-            # 每个障碍物当前的 footprint（polygon 属性每次都新建，可安全快照）
             "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],
             "perceived": set(self.belief.perceived.keys()),
             "J": round(res.J, 4),
