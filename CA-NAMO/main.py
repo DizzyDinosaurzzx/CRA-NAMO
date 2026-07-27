@@ -33,6 +33,22 @@ def _plot_poly(ax, poly, **kw):
             ax.fill(xs, ys, **kw)
 
 
+def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):
+    """在给定点处画一面旗子（旗杆 + 三角旗面 + 底座点）。"""
+    x, y = point
+    # 旗杆高度随地图尺寸缩放，保证在不同大小的场景里观感一致
+    s = 0.06 * max(sim.workspace.bounds[2], sim.workspace.bounds[3])
+    top = y + s
+
+    ax.plot([x, x], [y, top], color="black", lw=1.4,
+            solid_capstyle="round", zorder=9)
+    ax.fill([x, x + 0.62 * s, x],
+            [top, top - 0.22 * s, top - 0.44 * s],
+            facecolor=color, edgecolor="black", lw=0.8,
+            zorder=9, label=label)
+    ax.plot([x], [y], marker="o", color="black", ms=3.5, zorder=9)
+
+
 def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
     """Draw roadmap: all nodes/edges as faint backdrop, highlight current node's neighbours."""
     rm = sim.roadmap
@@ -63,14 +79,15 @@ def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
 
 
 def _draw_static(ax, sim: OnlineNAMO, original_poses):
-    """绘制每一帧都相同的静态元素：工作空间、墙体、目标区域、障碍物原始位置。"""
+    """绘制每一帧都相同的静态元素：工作空间、墙体、起点/终点旗子、障碍物原始位置。"""
     _plot_poly(ax, sim.workspace, color="whitesmoke", zorder=0)
     ax.plot(*sim.workspace.exterior.xy, color="black", lw=1)
 
     for so in sim.static_obstacles:
         _plot_poly(ax, so.polygon, color="dimgray", zorder=1)
 
-    _plot_poly(ax, sim.goal_region, color="mediumseagreen", alpha=0.7, zorder=1)
+    _draw_flag(ax, sim, sim.roadmap.nodes[sim.start_node], "royalblue", "start")
+    _draw_flag(ax, sim, sim.goal_point, "red", "goal")
 
     # 原始障碍物 footprint（虚线轮廓）
     for oid, poly in original_poses.items():
@@ -100,13 +117,9 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     if len(res.robot_track) >= 2:
         corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
         _plot_poly(ax, corridor, color="royalblue", alpha=0.3, zorder=5)
-        ax.plot(*res.robot_track[0], marker="*", color="blue", ms=16, zorder=6,
-                label="start")
     elif res.robot_track:
         p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
         _plot_poly(ax, p, color="royalblue", alpha=0.3, zorder=5)
-        ax.plot(*res.robot_track[0], marker="*", color="blue", ms=16, zorder=6,
-                label="start")
 
     title = (f"{res.message}  |  J={res.J} "
              f"(walk={res.walk_cost}, work={res.work_cost})  |  "
@@ -140,9 +153,6 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
     if len(track) >= 2:
         buf = LineString(track).buffer(sim.cfg.robot_radius, cap_style=1)
         _plot_poly(ax, buf, color="royalblue", alpha=0.25, zorder=5)
-    if track:
-        ax.plot(track[0][0], track[0][1], marker="*", color="blue", ms=16,
-                zorder=6, label="start")
 
     # 机器人当前位置（圆盘）
     rx, ry = frame["robot"]
@@ -195,7 +205,7 @@ def main():
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     sim = OnlineNAMO(s["workspace"], s["static"], s["movable"],
-                     s["start"], s["goal_region"], cfg)
+                     s["start"], s["goal"], cfg)
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
     print(f"Scenario: {s['name']}   {sim.roadmap}")

@@ -50,23 +50,23 @@ class OnlineNAMO:
                  static_obstacles: List[StaticObstacle],
                  movable_obstacles: List[MovableObstacle],   # ground-truth world
                  start: Tuple[float, float],
-                 goal_region: Polygon,
+                 goal: Tuple[float, float],
                  cfg: Config):
         self.cfg = cfg
         self.workspace = workspace
         self.static_obstacles = static_obstacles
         self.world = movable_obstacles          # ground truth (true difficulty)
         self.start = start
-        self.goal_region = goal_region
+        self.goal = (float(goal[0]), float(goal[1]))
 
         self.roadmap = Roadmap(workspace, static_obstacles, cfg)
         self.start_node = self.roadmap.add_terminal(start)
-        gp = goal_region.centroid
-        gpt = (gp.x, gp.y)
+        gpt = self.goal
         if not self.roadmap.static_free.contains(Point(gpt).buffer(cfg.robot_radius)):
-            rp = goal_region.representative_point()
-            gpt = (rp.x, rp.y)
+            # 目标点处机器人圆盘放不下（贴墙/在墙内）-> 退化到最近的合法路网节点
+            gpt = self.roadmap.nodes[self.roadmap.nearest_node(gpt)]
         self.goal_node = self.roadmap.add_terminal(gpt)
+        self.goal_point = self.roadmap.nodes[self.goal_node]   # 实际到达点（用于绘图）
 
         self.estimator = DifficultyEstimator(cfg)
         self.belief = Belief(self.roadmap, cfg)

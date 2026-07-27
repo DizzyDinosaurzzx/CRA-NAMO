@@ -58,12 +58,12 @@ def two_doors():
     ]
 
     start = (5.0, 4.5)
-    goal_region = box(24.0, 3.5, 26.0, 5.5)
+    goal = (25.0, 4.5)
 
     # 所有可调参数统一在 config.py 中控制，这里不再覆盖
     cfg = Config()
     return dict(name="two_doors", workspace=workspace, static=walls,
-                movable=movable, start=start, goal_region=goal_region, cfg=cfg)
+                movable=movable, start=start, goal=goal, cfg=cfg)
 
 
 def two_doors_hidden_c():
@@ -113,12 +113,12 @@ def two_doors_hidden_c():
     ]
 
     start = (5.0, 35.0)
-    goal_region = box(4.0, 4.0, 6.0, 6.0)
+    goal = (5.0, 5.0)
 
     # 所有可调参数统一在 config.py 中控制，这里不再覆盖
     cfg = Config()
     return dict(name="two_doors_hidden_c", workspace=workspace, static=walls,
-                movable=movable, start=start, goal_region=goal_region, cfg=cfg)
+                movable=movable, start=start, goal=goal, cfg=cfg)
 
 
 def maze_three_movable():
@@ -179,8 +179,8 @@ def maze_three_movable():
                         material="wooden_crate", difficulty=1.5, oid=3),
     ]
 
-    start = (12.5, 1.5)                     # 底部入口（图片红色箭头）
-    goal_region = box(1.5, 27.0, 3.5, 29.0)  # 左上目标区（图片红旗）
+    start = (12.5, 1.5)     # 底部入口（图片红色箭头）
+    goal = (2.5, 28.0)      # 左上目标点（图片红旗）
 
     cfg = Config(
         grid_step=0.55,
@@ -188,7 +188,7 @@ def maze_three_movable():
         max_expansions=800000,
     )
     return dict(name="maze_three_movable", workspace=workspace, static=walls,
-                movable=movable, start=start, goal_region=goal_region, cfg=cfg)
+                movable=movable, start=start, goal=goal, cfg=cfg)
 
 def maze_three_movable2():
     """创建 maze_three_movable2 场景。"""
@@ -286,8 +286,8 @@ def maze_three_movable2():
     # 图片底部红色箭头对应入口。
     start = (12.5, 1.5)
 
-    # 图片左上红旗对应目标区域。
-    goal_region = box(1.5, 27.0, 3.5, 29.0)
+    # 图片左上红旗对应目标点。
+    goal = (2.5, 28.0)
 
     cfg = Config(
         grid_step=0.55,
@@ -295,7 +295,7 @@ def maze_three_movable2():
         max_expansions=800000,
     )
     return dict(name="maze_three_movable2", workspace=workspace, static=walls,
-                movable=movable, start=start, goal_region=goal_region, cfg=cfg)
+                movable=movable, start=start, goal=goal, cfg=cfg)
 
 
 SCENARIOS = {

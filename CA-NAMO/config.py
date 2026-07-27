@@ -52,7 +52,7 @@ class Config:
     # -------- 其他 --------
     rng_seed: int = 0
     out_dir: str = "img"       # 可视化结果的输出目录
-    save_frames: bool = True   # 是否保存过程帧（img/frames_<地图名>/）
+    save_frames: bool = False   
     verbose: bool = True
 
     def log(self, *args):
