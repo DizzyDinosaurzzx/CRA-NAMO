@@ -13,14 +13,14 @@ def create():
     walls = [
         StaticObstacle(box(0.0, 7.5, 40.0, 8.0), "wall_top"),
         StaticObstacle(box(0.0, 0.0, 40.0, 0.5), "wall_bottom"),
-        StaticObstacle(box(17.5, 6.0, 18.5, 6.5), "wall1"),
-        StaticObstacle(box(21.5, 1.0, 22.5, 1.5), "wall2"),
+        StaticObstacle(box(18.5, 6.5, 19.5, 7.0), "wall1"),
+        StaticObstacle(box(20.5, 1.0, 21.5, 1.5), "wall2"),
     ]
 
     movable = [
         MovableObstacle(
             x=20.0, y=4.0,
-            l=0.5, d=6, theta=0.0,
+            l=0.7, d=6, theta=0.0,
             material="wooden_crate",
             difficulty=1.0,
             oid=1,
