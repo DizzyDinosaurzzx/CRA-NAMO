@@ -55,7 +55,8 @@ MATERIAL_ALIASES: Dict[str, str] = {
     "foam": "foam_mat",
     "styrofoam": "styrofoam_box",
 }
-# LLM参考材质
+# 注入 LLM prompt 的标定锚点：跨越整个量级、彼此区分度高的少数几项。
+# 只用来对齐量纲——被查询的材质会在构造 prompt 时从中剔除，避免直接泄漏答案。
 PROMPT_ANCHORS = (
     "styrofoam_box",
     "cardboard_box",
@@ -123,13 +124,18 @@ class DifficultyEstimator:
 
     # -------------LLM估计--------------- #
     def _build_prompt(self, o: dict) -> str:
+        """构造询问 prompt。
+
+        只给少量跨量级的标定锚点，用来对齐量纲；**被查询材质本身及与它共享词元的
+        材质会被剔除**，否则 LLM 只需查表相乘就能复现启发式，等于白问。
+        """
         asked = set(_normalise(o.get("material", "")).split("_"))
         anchors = "\n".join(
             f"  {name:<18s} {MATERIAL_DENSITY[name]:g}"
             for name in sorted(PROMPT_ANCHORS, key=lambda k: MATERIAL_DENSITY[k])
             if not (asked & set(name.split("_")))
         )
-        return ( # 只给少量跨量级的标定锚点，用来对齐量纲
+        return (
             "You estimate how hard a mobile robot must work to push an obstacle "
             "aside.\n"
             "The manipulation difficulty coefficient is the work required per unit "

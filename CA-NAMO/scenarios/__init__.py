@@ -12,8 +12,9 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-DEFAULT_SCENARIO = "maze_three_a"
+DEFAULT_SCENARIO = "two_doors_hidden_c"
 SCENARIOS: dict[str, str] = {
+    "corridor": "scenario_corridor",
     "two_doors": "scenario_two_doors",
     "two_doors_hidden_c": "scenario_two_doors_hidden_c",
     "maze_three_movable": "scenario_maze_three_movable",
@@ -21,7 +22,6 @@ SCENARIOS: dict[str, str] = {
     "maze_three_a": "scenario_maze_three_a",
     "maze_three_b": "scenario_maze_three_b",
     "maze_four": "scenario_maze_four",
-    "maze_to_house": "scenario_maze_to_house",
 }
 REQUIRED_FIELDS = {
     "name",

@@ -15,6 +15,7 @@ class Roadmap:
         self.cfg = cfg
         self.workspace = workspace
         polys = [so.polygon for so in static_obstacles]
+        self.static_obstacles = static_obstacles  # 供推动规划器使用
         self.static_free = workspace.difference(unary_union(polys)) if polys else workspace
         self.nodes: List[Tuple[float, float]] = []
         self.adj: Dict[int, List[int]] = {}

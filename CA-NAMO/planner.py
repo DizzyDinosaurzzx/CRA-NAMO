@@ -27,8 +27,8 @@ class RunResult:
     llm_mode: str = "heuristic"
     removed: List[int] = field(default_factory=list)
     robot_track: List[Tuple[float, float]] = field(default_factory=list)
-    history: List[dict] = field(default_factory=list)   
-    frames: List[dict] = field(default_factory=list)    
+    history: List[dict] = field(default_factory=list)
+    frames: List[dict] = field(default_factory=list)
     message: str = ""
 
 class OnlineNAMO:
@@ -100,42 +100,58 @@ class OnlineNAMO:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
                     dx, dy, dth = act["drop"]
+                    push_path = act.get("push_path")
                     # 推动前触摸感知: 获知该障碍物的真实 difficulty
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
-                    # 物理校验: 在真实世界里，这次推动是否会撞到别的障碍物（含尚未
-                    # 感知的）？规划是乐观的、只避开已知障碍物；现实由此处兜底。
-                    hits = self._world_collision(act["oid"], dx, dy, dth)
-                    if hits:
-                        # 撞上了 -> 作废本次放置并重规划换位置。撞到什么程度的"知情"取决于配置: 
-                        #   full_reveal_on_contact=True : 直接获知被撞障碍物全部信息
-                        #   False(更真实)              : 只记录"此处有物"的匿名接触区域，
-                        #                                身份/几何/难度要等遮挡移开后正常感知
-                        for oid_hit, region in hits:
+                    # ---- 如果有 SE2 推动路径则逐步执行，否则瞬移 ----
+                    if push_path:
+                        push_success, hits = self._execute_push_path(
+                            act["oid"], obs, push_path, res, node, cfg)
+                        if not push_success:
+                            # 撞上了 -> 作废本次放置并重规划换位置
+                            for oid_hit, region in hits:
+                                if cfg.full_reveal_on_contact:
+                                    self.belief.force_reveal(self._world_obstacle(oid_hit))
+                                else:
+                                    self.belief.register_contact(region)
                             if cfg.full_reveal_on_contact:
-                                self.belief.force_reveal(self._world_obstacle(oid_hit))
+                                label = (f"push {act['oid']} blocked by "
+                                         f"{sorted(o for o, _ in hits)} -> replan")
                             else:
-                                self.belief.register_contact(region)
-                        if cfg.full_reveal_on_contact:
-                            label = (f"push {act['oid']} blocked by "
-                                     f"{sorted(o for o, _ in hits)} -> replan")
-                        else:
-                            label = (f"push {act['oid']} hit unknown obstruction "
-                                     f"-> replan")
-                        self._capture_frame(res, node, label)
-                        break
-                    self.belief.relocate(obs, dx, dy, dth)
-                    self._relocate_world(act["oid"], dx, dy, dth)
+                                label = (f"push {act['oid']} hit unknown obstruction "
+                                         f"-> replan")
+                            self._capture_frame(res, node, label)
+                            break
+                    else:
+                        # 瞬移模式: 物理校验
+                        hits = self._world_collision(act["oid"], dx, dy, dth)
+                        if hits:
+                            for oid_hit, region in hits:
+                                if cfg.full_reveal_on_contact:
+                                    self.belief.force_reveal(self._world_obstacle(oid_hit))
+                                else:
+                                    self.belief.register_contact(region)
+                            if cfg.full_reveal_on_contact:
+                                label = (f"push {act['oid']} blocked by "
+                                         f"{sorted(o for o, _ in hits)} -> replan")
+                            else:
+                                label = (f"push {act['oid']} hit unknown obstruction "
+                                         f"-> replan")
+                            self._capture_frame(res, node, label)
+                            break
+                        self.belief.relocate(obs, dx, dy, dth)
+                        self._relocate_world(act["oid"], dx, dy, dth)
+                        self._capture_frame(res, node, f"push obstacle {act['oid']}")
                     # 执行时按真实 difficulty 结算，可能与规划时的估计值不同
                     executed_work = geometry.push_work(obs, act["dist"])
                     res.work_cost += executed_work
                     res.J += executed_work
                     if act["oid"] not in res.removed:
                         res.removed.append(act["oid"])
-                    self._capture_frame(res, node, f"push obstacle {act['oid']}")
                 elif act["type"] == "move":
                     prev_node = node    # 需求3: 记录移动前位置
                     res.walk_cost += cfg.lambda_distance * act["dist"]
@@ -211,6 +227,37 @@ class OnlineNAMO:
                 contact = swept.intersection(wp)   # 只"摸到"接触重叠区，非整个障碍物
                 hits.append((w.oid, contact))
         return hits
+
+    def _execute_push_path(self, oid: int, obs, push_path: list,
+                           res: RunResult, node: int, cfg: Config):
+        """逐步执行 SE2 推动路径，每步做碰撞检测并记录帧。
+        返回 (success, hits)，success=False 表示中途撞到东西。"""
+        max_frames = cfg.push_max_frames_per_action
+        n_waypoints = len(push_path)
+        if n_waypoints > max_frames:
+            import numpy as np
+            indices = np.linspace(0, n_waypoints - 1, max_frames).astype(int)
+            sampled = [push_path[i] for i in indices]
+            sampled[0] = push_path[0]
+            sampled[-1] = push_path[-1]
+        else:
+            sampled = push_path
+
+        for step_idx, (wx, wy, wth) in enumerate(sampled):
+            if step_idx == 0:
+                continue  # 跳过起点
+            if cfg.check_obstacle_collision:
+                hits = self._world_collision(oid, wx, wy, wth)
+                if hits:
+                    return (False, hits)
+            self._relocate_world(oid, wx, wy, wth)
+            step_label = (f"push {oid} step {step_idx + 1}/{len(sampled) - 1}"
+                          if cfg.save_frames else f"push {oid}")
+            self._capture_frame(res, node, step_label)
+        # 更新信念中的最终位姿
+        final_x, final_y, final_th = push_path[-1]
+        self.belief.relocate(obs, final_x, final_y, final_th)
+        return (True, [])
 
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
         for w in self.world:

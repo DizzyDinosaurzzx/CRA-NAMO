@@ -29,6 +29,7 @@ class Planner:
         self.belief = belief
         self.est = estimator
         self.cfg = cfg
+        self.current_node: Optional[int] = None  # 记录机器人当前路网节点，供推动规划器使用
 
     # ------------------------------------------------------------------ 规划
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
@@ -46,7 +47,7 @@ class Planner:
         self._goal_xy = (gx, gy)
         # 缓存键是 (oid, edge_key)：放置方案现在依赖具体要打通哪一条边
         self._removal_cache: Dict[
-            Tuple[int, EdgeKey], Tuple[bool, float, Optional[tuple], float]
+            Tuple[int, EdgeKey], Tuple[bool, float, Optional[tuple], float, Optional[list]]
         ] = {}
         # oid -> 该障碍物当前阻挡的全部走廊并集（软罚分用），与边无关故按 oid 缓存
         self._blocked_union_cache: Dict[int, Optional[object]] = {}
@@ -68,6 +69,7 @@ class Planner:
         while open_heap:
             f, bias, _, state = heapq.heappop(open_heap)
             node, removed = state
+            self.current_node = node        # 记录机器人当前位置，供推动规划器使用
             g = g_best.get(state, math.inf)
             if f > incumbent + 1e-9:            # 分支限界剪枝
                 continue
@@ -85,7 +87,7 @@ class Planner:
                     continue
                 ng = g + step_cost
                 new_removed = removed
-                for (oid, _drop, _dist, _work) in removals:
+                for (oid, _drop, _dist, _work, _push_path) in removals:
                     new_removed = new_removed | {oid}
                 nstate = (v, new_removed)
                 if ng >= g_best.get(nstate, math.inf) - 1e-12:
@@ -95,8 +97,8 @@ class Planner:
                     continue
                 g_best[nstate] = ng
                 acts = [{"type": "remove", "oid": oid, "drop": drop,
-                         "dist": push_dist, "work": work}
-                        for (oid, drop, push_dist, work) in removals]
+                         "dist": push_dist, "work": work, "push_path": push_path}
+                        for (oid, drop, push_dist, work, push_path) in removals]
                 acts.append({"type": "move", "u": node, "v": v,
                              "dist": length, "cost": step_cost})
                 parent[nstate] = (state, acts, ng)
@@ -130,15 +132,16 @@ class Planner:
         removals = []
         extra = 0.0
         for oid in blockers:
-            feasible, work, drop, push_dist = self._removal(oid, key)
+            feasible, work, drop, push_dist, push_path = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
             extra += work
-            removals.append((oid, drop, push_dist, work))
+            removals.append((oid, drop, push_dist, work, push_path))
         return base + extra, removals
 
     def _removal(self, oid: int, key: EdgeKey):
         """计算把障碍物移出【这一条边】所需的做功和放置位姿。
+        同时尝试规划 SE2 推动路径。
 
         硬约束只要求腾空 `key` 这一条通道，而不是该障碍物当前阻挡的所有通道。
         密集路网下一个箱子会同时压住几十条边，它们的并集是个远大于箱体的区域，
@@ -157,10 +160,10 @@ class Planner:
         # 软项：该障碍物当前阻挡的全部通道（即旧版的硬 must_clear）。落点仍压在
         # 上面就说明机器人稍后还得再推它一次，按面积占比计入罚分。每个 oid 只算
         # 一次并缓存——它与具体打通哪条边无关。
+        own = [self.roadmap.edge_corridor[k]
+               for k, bs in self.belief.edge_blockers.items() if oid in bs]
         residual = self._blocked_union_cache.get(oid, False)
         if residual is False:
-            own = [self.roadmap.edge_corridor[k]
-                   for k, bs in self.belief.edge_blockers.items() if oid in bs]
             residual = unary_union(own) if own else None
             self._blocked_union_cache[oid] = residual
         avoid = self.free_union
@@ -173,16 +176,57 @@ class Planner:
             polys += [c for c in self.belief.contacts
                       if not c.intersects(obs.polygon)]
             others = unary_union(polys) if polys else None
-        feasible, dist, drop = geometry.push_plan(
-            obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
-            others=others, goal_xy=self._goal_xy, residual=residual)
+
+        estimated_diff = self.belief.get_difficulty(oid, self.est)
+        push_path = None
+        drop = None
+        push_dist = 0.0
+        feasible = False
+
+        robot_pos = (self.roadmap.nodes[self.current_node]
+                     if self.current_node is not None else (0.0, 0.0))
+        bounds = self.roadmap.workspace.bounds
+        bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
+
+        # SE2 全空间搜索（只清当前边，per-edge 模式下无需清全部走廊）
+        if self.cfg.push_use_planner and must_clear is not None:
+            se2_feasible, se2_path, se2_cost, se2_goal = geometry.push_plan_se2(
+                obs, [must_clear], self.roadmap.static_obstacles, bounds_xy,
+                robot_pos, self.cfg, others_polys=others)
+            if se2_feasible and se2_path:
+                feasible = True
+                push_path = se2_path
+                drop = se2_goal
+                push_dist = se2_cost
+
+        # 回退：环形采样 + SE2 路径规划
+        if not feasible:
+            sample_thetas = None
+            if self.cfg.push_sample_theta:
+                base_th = obs.theta
+                sample_thetas = [base_th, base_th + math.pi/4,
+                                 base_th + math.pi/2, base_th + 3*math.pi/4]
+            feasible, push_dist, drop = geometry.push_plan(
+                obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
+                others=others, goal_xy=self._goal_xy, residual=residual,
+                sample_thetas=sample_thetas)
+            if feasible and self.cfg.push_use_planner:
+                se2_feasible, se2_path, se2_cost = geometry.push_path_plan(
+                    obs, drop, self.roadmap.static_obstacles, bounds_xy,
+                    robot_pos, self.cfg)
+                if se2_feasible and se2_path:
+                    push_path = se2_path
+                    push_dist = se2_cost
+                else:
+                    feasible = False  # 无 SE2 路径 → 不可行，不瞬移
+
         if not feasible:
             work = math.inf
         else:
             # W = difficulty * 推动距离；未触碰过的障碍物用 LLM/启发式估计的 difficulty
-            estimated_diff = self.belief.get_difficulty(oid, self.est)
-            work = estimated_diff * dist
-        res = (feasible, work, drop, dist)
+            work = estimated_diff * push_dist
+
+        res = (feasible, work, drop, push_dist, push_path)
         self._removal_cache[cache_key] = res
         return res
 
@@ -191,6 +235,6 @@ class Planner:
         if not self.cfg.use_llm_ordering or not removals:
             return 0.0
         s = 0.0
-        for (oid, _drop, _dist, _work) in removals:
+        for (oid, _drop, _dist, _work, _push_path) in removals:
             s += self.est.estimate(self.belief.obstacle(oid).observation())
         return s

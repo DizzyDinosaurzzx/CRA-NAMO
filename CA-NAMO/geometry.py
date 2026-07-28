@@ -12,6 +12,7 @@ from shapely.geometry import Point, Polygon, MultiPolygon, LineString, box
 from shapely.ops import unary_union
 from obstacle import MovableObstacle
 from config import Config
+import push_planner
 
 
 # -------------计算器 1：推动规划--------------- #
@@ -41,6 +42,7 @@ def push_plan(
     others: Optional[Polygon] = None,  # 其他可移动障碍物当前占据的区域（硬约束：不得碰撞）
     goal_xy: Optional[Tuple[float, float]] = None,   # 目标点：用于避开剩余路线
     residual: Optional[Polygon] = None,  # 该障碍物当前阻挡的全部通道（软约束：尽量一并让开）
+    sample_thetas: Optional[list] = None,  # 额外采样的 theta 值；None=仅采样当前朝向
 ) -> Tuple[bool, float, Optional[Tuple[float, float, float]]]:
 
     """
@@ -71,6 +73,14 @@ def push_plan(
     best = None                      # (score, distance, pose)
     cx, cy = obs.x, obs.y
 
+    # 额外采样的 theta 值
+    thetas_to_try = [obs.theta]
+    if sample_thetas:
+        for th in sample_thetas:
+            th_wrapped = th % math.pi
+            if not any(abs(t - th_wrapped) < 1e-9 for t in thetas_to_try):
+                thetas_to_try.append(th_wrapped)
+
     # 障碍物到目标的直线走廊：落在其中意味着机器人下一段路会再次被它挡住。
     route = None
     if goal_xy is not None:
@@ -87,44 +97,197 @@ def push_plan(
             ang = 2.0 * math.pi * a / n
             nx = round(cx + r * math.cos(ang), 3)
             ny = round(cy + r * math.sin(ang), 3)
-            end_poly = obs.polygon_at(nx, ny)
 
-            if not static_free.contains(end_poly):
-                continue
-            if must_clear is not None and end_poly.intersects(must_clear):
-                continue
-            if others is not None and end_poly.intersects(others):
-                continue                              # 终点压到了别的障碍物
-            swept = _swept_region(obs, nx, ny)
-            if not static_free.contains(swept):
-                continue
-            if others is not None and swept.intersects(others):
-                continue                              # 推动路径穿过了别的障碍物
+            for th in thetas_to_try:
+                end_poly = obs.polygon_at(nx, ny, th)
 
-            blocks_route = 1 if (route is not None
-                                 and end_poly.intersects(route)) else 0
-            penalty = 1 if (avoid is not None and end_poly.intersects(avoid)) else 0
-            # 仍压在该障碍物原本阻挡的通道上的比例（0~1）。硬约束只保证腾空了当前
-            # 这一条边，这一项负责把"顺带让开其他通道"变成偏好，抑制反复推同一个
-            # 物体。用面积占比而非计数：一次相交运算即可，且天然归一化。
-            residual_frac = 0.0
-            if residual is not None:
-                inter = end_poly.intersection(residual)
-                if not inter.is_empty:
-                    residual_frac = inter.area / end_poly.area
-            dist = math.hypot(nx - cx, ny - cy)
-            # 加权求和而非字典序：各偏好都折算成"等效米数"叠加到推动距离上。
-            # 字典序会让任意一项无条件压倒距离，从而选出很远、很糟的落点——迷宫里
-            # route 只是直线代理、并不可靠，一旦让它独裁就会把障碍物推进真正的通道。
-            score = (dist + W_ROUTE * blocks_route + W_AVOID * penalty
-                     + W_RESIDUAL * residual_frac)
-            cand = (round(score, 3), round(dist, 3), (nx, ny, obs.theta))
-            if best is None or cand[:2] < best[:2]:
-                best = cand
+                if not static_free.contains(end_poly):
+                    continue
+                if must_clear is not None and end_poly.intersects(must_clear):
+                    continue
+                if others is not None and end_poly.intersects(others):
+                    continue                              # 终点压到了别的障碍物
+                swept = _swept_region(obs, nx, ny)
+                if not static_free.contains(swept):
+                    continue
+                if others is not None and swept.intersects(others):
+                    continue                              # 推动路径穿过了别的障碍物
+
+                blocks_route = 1 if (route is not None
+                                     and end_poly.intersects(route)) else 0
+                penalty = 1 if (avoid is not None and end_poly.intersects(avoid)) else 0
+                # 仍压在该障碍物原本阻挡的通道上的比例（0~1）。硬约束只保证腾空了当前
+                # 这一条边，这一项负责把"顺带让开其他通道"变成偏好，抑制反复推同一个
+                # 物体。用面积占比而非计数：一次相交运算即可，且天然归一化。
+                residual_frac = 0.0
+                if residual is not None:
+                    inter = end_poly.intersection(residual)
+                    if not inter.is_empty:
+                        residual_frac = inter.area / end_poly.area
+                dist = math.hypot(nx - cx, ny - cy)
+                # 加权求和而非字典序：各偏好都折算成"等效米数"叠加到推动距离上。
+                # 字典序会让任意一项无条件压倒距离，从而选出很远、很糟的落点——迷宫里
+                # route 只是直线代理、并不可靠，一旦让它独裁就会把障碍物推进真正的通道。
+                score = (dist + W_ROUTE * blocks_route + W_AVOID * penalty
+                         + W_RESIDUAL * residual_frac)
+                cand = (round(score, 3), round(dist, 3), (nx, ny, th))
+                if best is None or cand[:2] < best[:2]:
+                    best = cand
     if best is None:
         return (False, math.inf, None)
     return (True, best[1], best[2])
 
+
+# ---------- 计算器 1b：SE2 推动路径规划 ---------- #
+
+def push_plan_se2(
+    obs: MovableObstacle,
+    must_clear_polys,                   # corridor polygons that must be cleared
+    static_obstacles,                   # list of StaticObstacle
+    bounds: Tuple[float, float, float, float],
+    robot_pos: Tuple[float, float],
+    cfg: Config,
+    others_polys = None,                # additional polygons to avoid (other movable obstacles)
+) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
+    """Use PushPlanner to search full SE2 space for the cheapest pose that clears the route.
+
+    Unlike the two-step push_plan()+push_path_plan(), this lets rotated and unrotated
+    goals compete on equal footing in a single Dijkstra search.
+    Returns (feasible, path, push_cost, goal_pose).
+    """
+    if not cfg.push_use_planner:
+        return (False, None, math.inf, None)
+
+    # cache key
+    if not hasattr(push_plan_se2, '_cache'):
+        push_plan_se2._cache = {}
+
+    try:
+        start_pose = (obs.x, obs.y, obs.theta)
+
+        xmin, xmax, ymin, ymax = bounds
+        bw, bh = xmax - xmin, ymax - ymin
+        cell = cfg.push_cell
+        nx_c = int(bw / cell)
+        ny_c = int(bh / cell)
+        max_states = 200000
+        if nx_c * ny_c * cfg.push_n_theta > max_states:
+            cell = max(cell, math.sqrt(bw * bh * cfg.push_n_theta / max_states))
+
+        # Include others in cache key (different obstacles => different C-space)
+        others_key = ("none" if others_polys is None
+                      else (round(others_polys.area, 1), round(others_polys.bounds[0], 1)))
+        cache_key = (obs.l, obs.d, round(obs.x, 1), round(obs.y, 1),
+                     bounds, robot_pos, cfg.R_push, cell, others_key)
+        if cache_key in push_plan_se2._cache:
+            planner = push_plan_se2._cache[cache_key]
+        else:
+            # 工作圆半径 = 机器人到障碍物距离 + R_push（障碍物始终在圆内且有推送空间）
+            dist_to_obs = math.hypot(robot_pos[0] - obs.x, robot_pos[1] - obs.y)
+            # 合并静态障碍物和 other 可移动障碍物作为不可穿越区域
+            all_walls = [so.polygon for so in static_obstacles]
+            if others_polys is not None:
+                if hasattr(others_polys, 'geoms'):
+                    all_walls.extend(others_polys.geoms)
+                elif not others_polys.is_empty:
+                    all_walls.append(others_polys)
+
+            wr = dist_to_obs + cfg.R_push + 1.0
+            planner = push_planner.build_push_planner(
+                static_free=None,
+                wall_polys=all_walls,
+                obstacle_w=obs.l, obstacle_h=obs.d,
+                bounds=bounds, robot_pos=robot_pos,
+                work_radius=wr if cfg.push_containment != "none" else float("inf"),
+                cell=cell, n_theta=cfg.push_n_theta,
+                connectivity=cfg.push_connectivity,
+                rot_weight=cfg.push_rot_weight,
+                containment=cfg.push_containment,
+                verbose=cfg.verbose,
+            )
+            push_plan_se2._cache[cache_key] = planner
+
+        # Set the corridor to clear (re-set each call as blocked edges may differ)
+        corridor_verts = [push_planner.polygon_exterior_coords(p)
+                          for p in must_clear_polys] if must_clear_polys else []
+        planner.set_corridor([c for c in corridor_verts if len(c) >= 3])
+
+        result = planner.plan_anywhere(start_pose)
+
+        if result.success:
+            return (True, result.path, result.cost, result.goal)
+        else:
+            return (False, None, math.inf, None)
+    except Exception as e:
+        if cfg.verbose:
+            print(f"[push_plan_se2] error: {e}")
+        return (False, None, math.inf, None)
+
+
+def push_path_plan(
+    obs: MovableObstacle,
+    drop_pose: Tuple[float, float, float],
+    static_obstacles,
+    bounds: Tuple[float, float, float, float],
+    robot_pos: Tuple[float, float],
+    cfg: Config,
+) -> Tuple[bool, Optional[list], float]:
+    """使用 SE2 推动规划器，规划从障碍物当前位置到目标位姿的连续推动路径。"""
+    if not cfg.push_use_planner:
+        return (False, None, math.inf)
+
+    cache_key = (obs.l, obs.d, bounds, robot_pos, cfg.R_push)
+    if not hasattr(push_path_plan, '_planner_cache'):
+        push_path_plan._planner_cache = {}
+
+    try:
+        start_pose = (obs.x, obs.y, obs.theta)
+        if (abs(start_pose[0] - drop_pose[0]) < 1e-6
+                and abs(start_pose[1] - drop_pose[1]) < 1e-6
+                and abs(push_planner.wrap_dtheta(start_pose[2], drop_pose[2])) < 1e-6):
+            return (True, [start_pose, drop_pose], 0.0)
+
+        xmin, xmax, ymin, ymax = bounds
+        bw, bh = xmax - xmin, ymax - ymin
+        cell = cfg.push_cell
+        nx_c = int(bw / cell)
+        ny_c = int(bh / cell)
+        max_states = 200000
+        if nx_c * ny_c * cfg.push_n_theta > max_states:
+            cell = max(cell, math.sqrt(bw * bh * cfg.push_n_theta / max_states))
+
+        actual_key = (obs.l, obs.d, round(obs.x, 1), round(obs.y, 1), bounds, robot_pos, cfg.R_push, cell)
+        if actual_key in push_path_plan._planner_cache:
+            planner = push_path_plan._planner_cache[actual_key]
+        else:
+            dist_to_obs = math.hypot(robot_pos[0] - obs.x, robot_pos[1] - obs.y)
+            wr = dist_to_obs + cfg.R_push + 1.0
+            planner = push_planner.build_push_planner(
+                static_free=None,
+                wall_polys=[so.polygon for so in static_obstacles],
+                obstacle_w=obs.l, obstacle_h=obs.d,
+                bounds=bounds, robot_pos=robot_pos,
+                work_radius=wr if cfg.push_containment != "none" else float("inf"),
+                cell=cell, n_theta=cfg.push_n_theta,
+                connectivity=cfg.push_connectivity,
+                rot_weight=cfg.push_rot_weight,
+                containment=cfg.push_containment,
+                verbose=cfg.verbose,
+            )
+            push_path_plan._planner_cache[actual_key] = planner
+
+        result = planner.plan_path(start_pose, drop_pose)
+        if result.success:
+            return (True, result.path, result.cost)
+        else:
+            return (False, None, math.inf)
+    except Exception as e:
+        if cfg.verbose:
+            print(f"[push_path_plan] SE2 planner error: {e}")
+        return (False, None, math.inf)
+
+
+# ---------- 计算器 1c：推动做功 ---------- #
 
 def push_work(obs: MovableObstacle, push_distance: float) -> float:
     return obs.difficulty * push_distance   #推开障碍物的操作功

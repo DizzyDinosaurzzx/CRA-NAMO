@@ -1,5 +1,6 @@
 """CA-NAMO的全局配置"""
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 @dataclass
 class Config:
@@ -13,14 +14,23 @@ class Config:
     # -------- 感知 -------- #
     R_perc: float = 8.0       # 感知半径（以机器人为中心的感知圆半径）
     sight_width: float = 0.2  # 视线宽度
-    phi_0: float = 0.05       # 传感器最小可分辨角
 
     # -------- 操作 -------- #
     R_push: float = 5.0       # 障碍物只能在当前位姿周围的该半径内重新放置
     drop_ring_samples: int = 24     # 在障碍物周围尝试的候选放置方向数
     drop_radius_steps: int = 6      # 尝试的候选放置距离数（0..R_push）
     check_obstacle_collision: bool = True  # 放置障碍物时是否检测与其他障碍物的碰撞
-    full_reveal_on_contact: bool = False   # 推动碰撞后：True=获知被撞障碍物全部信息；False=只知“此处有物”
+    full_reveal_on_contact: bool = False   # 推动碰撞后：True=获知被撞障碍物全部信息；False=只知"此处有物"
+
+    # -------- SE2 Push Planner --------
+    push_use_planner: bool = True
+    push_cell: float = 0.15
+    push_n_theta: int = 12
+    push_connectivity: int = 8
+    push_containment: str = "centroid"
+    push_rot_weight: float | None = None  # None=auto half-diagonal (physically correct arc length)
+    push_sample_theta: bool = True
+    push_max_frames_per_action: int = 30
 
     # -------- 路网 -------- #
     grid_step: float = 1    # 静态自由空间中路网节点的网格间距
@@ -43,8 +53,8 @@ class Config:
 
     # -------- 其他 -------- #
     rng_seed: int = 0
-    out_dir: str = "img"       
-    save_frames: bool = True   
+    out_dir: str = "img"       # 可视化结果的输出目录
+    save_frames: bool = True   # 是否保存过程帧（img/frames_<地图名>/）
     verbose: bool = True
 
     def __post_init__(self):

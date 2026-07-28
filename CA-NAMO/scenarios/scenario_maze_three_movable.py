@@ -62,8 +62,8 @@ def create():
             l=2,
             d=2,
             theta=0.0,
-            material="concrete_block",  # 25.0 x 4.00 = 100.0
-            difficulty=100,
+            material="foam_mat",        # 0.05 x 4.00 = 0.20
+            difficulty=0.2,
             oid=1,
         ),
 
@@ -81,7 +81,7 @@ def create():
 
         # C：靠近左上目标区的岔路口。
         MovableObstacle(
-            x=12,
+            x=12.2,
             y=21.8,
             l=4,
             d=1.8,

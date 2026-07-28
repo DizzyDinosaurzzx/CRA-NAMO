@@ -99,9 +99,10 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
         p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
         _plot_poly(ax, p, color="royalblue", alpha=0.3, zorder=5)
 
+    push_mode = "SE2" if sim.cfg.push_use_planner else "teleport"
     title = (f"{res.message}  |  J={res.J} "
              f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
-             f"moved={res.removed}  |  LLM={res.llm_mode}")
+             f"moved={res.removed}  |  push={push_mode}  |  LLM={res.llm_mode}")
     _finish_ax(ax, sim, title)
     fig.tight_layout(rect=(0, 0, 0.85, 1))
     fig.savefig(out_path, dpi=130)

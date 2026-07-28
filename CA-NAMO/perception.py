@@ -1,7 +1,6 @@
 """感知与信念状态维护与更新"""
 
 from __future__ import annotations
-import math
 from typing import Dict, List, Set, Tuple
 from shapely.geometry import LineString, Point, Polygon
 from obstacle import MovableObstacle
@@ -44,36 +43,28 @@ class Belief:
         return self.newly_revealed
 
     # -------------------- 可见性（多点采样 + 墙体遮挡） ----------------------
-    def _angular_width(self, robot_pos, obs: MovableObstacle) -> float:
-        """需求1: 障碍物矩形在 robot_pos 处的角宽度（弧度）。"""
-        rx, ry = robot_pos
-        coords = list(obs.polygon.exterior.coords)[:-1]
-        angles = sorted(math.atan2(y - ry, x - rx) for x, y in coords)
-        max_gap = 0.0
-        for i in range(len(angles) - 1):
-            max_gap = max(max_gap, angles[i + 1] - angles[i])
-        max_gap = max(max_gap, angles[0] + 2 * math.pi - angles[-1])
-        return 2 * math.pi - max_gap
-
-    def _edge_samples(self, obs: MovableObstacle):
-        """矩形的四条边，每条边用 (角, 边中点, 角) 三个采样点表示。"""
+    def _half_edge_samples(self, obs: MovableObstacle):
+        """矩形的八条半边，每条半边用 (端点, 中点, 端点) 三个采样点表示。
+        半边 = 一条边从角点到边中点的那一半。
+        只要任意一条半边完全可见，就认为机器人看清了该障碍物。
+        """
         coords = list(obs.polygon.exterior.coords)[:-1]   # 4 个角（去掉闭合重复点）
         n = len(coords)
-        edges = []
+        halves = []
         for i in range(n):
             a = coords[i]
             b = coords[(i + 1) % n]
             mid = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
-            edges.append((a, mid, b))
-        return edges
+            for p, q in ((a, mid), (mid, b)):
+                c = ((p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0)
+                halves.append((p, c, q))
+        return halves
 
     def _point_visible(self, robot_pos, p,
                        target: MovableObstacle,
                        world_obstacles: List[MovableObstacle]) -> bool:
-        """从机器人到采样点 p 的视线是否畅通（不被墙体或其他障碍物遮挡）。
-
-        cfg.sight_width>0 时把视线视为具有该宽度的走廊（缓冲后判断），窄于该宽度的
-        缝隙无法看穿；为 0 时退化为零宽度射线。
+        """从机器人到采样点 p 的视线是否畅通（不被墙体或其他障碍物遮挡）
+        cfg.sight_width>0 时把视线视为具有该宽度的走廊（缓冲后判断），窄于该宽度的缝隙无法看穿；为 0 时退化为零宽度射线。
         """
         seg = LineString([robot_pos, p])
         width = self.cfg.sight_width
@@ -91,13 +82,11 @@ class Belief:
 
     def _visible(self, robot_pos, target: MovableObstacle,
                  world_obstacles: List[MovableObstacle]) -> bool:
-        """需求1+2: 视角 > phi_0 且至少一条完整边可见时才感知到障碍物。"""
-        if self._angular_width(robot_pos, target) < self.cfg.phi_0:
-            return False
-        for a, mid, b in self._edge_samples(target):
-            if (self._point_visible(robot_pos, a, target, world_obstacles)
-                    and self._point_visible(robot_pos, mid, target, world_obstacles)
-                    and self._point_visible(robot_pos, b, target, world_obstacles)):
+        """需求1+2: 至少半条边完整可见即认为感知到该障碍物的全部信息。"""
+        for p, c, q in self._half_edge_samples(target):
+            if (self._point_visible(robot_pos, p, target, world_obstacles)
+                    and self._point_visible(robot_pos, c, target, world_obstacles)
+                    and self._point_visible(robot_pos, q, target, world_obstacles)):
                 return True
         return False
 
@@ -122,9 +111,8 @@ class Belief:
     # -------------------- 碰撞接触（部分信息） ----------------------
     def register_contact(self, region: Polygon):
         """记录一块通过推动碰撞发现的匿名占据区域（不含身份/难度信息）。
-
         先扣掉已感知障碍物的 footprint：那部分不是"新信息"，而且此后不会再被
-        `_clear_contacts_overlapping` 清理（该障碍物不会二次 newly_revealed），
+        `_clear_contacts_overlapping` 清理（该障碍物不会二次 newly_revealed）
         会退化成一块永久压在它身上的幽灵区域，把它自己锁成不可推动。
         """
         if region is None or region.is_empty:

@@ -12,15 +12,15 @@ def create():
     ]
 
     movable = [
-        # A：堵住近门，难度排名第二。
+        # A：堵住近门，难度排名第二（略低于 C）。
         MovableObstacle(
             x=5.0,
             y=20.0,
             l=3.4,
             d=1.4,
             theta=0.0,
-            material="steel_shelf",         # 4.20 x 4.76 = 19.99
-            difficulty=20.0,
+            material="dizzydinosaur",  # 37.5 x 4.76 = 178.5
+            difficulty=2.5,
             oid=1,
         ),
         # B：堵住远门、位于 C 的上方，难度排名第三，B 的底部与 C 的顶部相接，但二者不重叠。

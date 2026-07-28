@@ -1,0 +1,40 @@
+"""Corridor scenario: start and goal in same corridor, separated by one movable obstacle."""
+
+from __future__ import annotations
+from shapely.geometry import box
+from config import Config
+from obstacle import MovableObstacle, StaticObstacle
+
+
+def create():
+    workspace = box(0, 0, 40, 8)
+    t = 0.5
+
+    walls = [
+        StaticObstacle(box(0.0, 7.5, 40.0, 8.0), "wall_top"),
+        StaticObstacle(box(0.0, 0.0, 40.0, 0.5), "wall_bottom"),
+        StaticObstacle(box(17.5, 6.0, 18.5, 6.5), "wall1"),
+        StaticObstacle(box(21.5, 1.0, 22.5, 1.5), "wall2"),
+    ]
+
+    movable = [
+        MovableObstacle(
+            x=20.0, y=4.0,
+            l=0.5, d=6, theta=0.0,
+            material="wooden_crate",
+            difficulty=1.0,
+            oid=1,
+        ),
+    ]
+
+    cfg = Config()
+
+    return {
+        "name": "corridor",
+        "workspace": workspace,
+        "static": walls,
+        "movable": movable,
+        "start": (4.0, 4.0),
+        "goal": (36.0, 4.0),
+        "cfg": cfg,
+    }
