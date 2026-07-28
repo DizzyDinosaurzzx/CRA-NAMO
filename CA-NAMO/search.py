@@ -134,7 +134,11 @@ class Planner:
     def _edge_cost(self, key: EdgeKey, removed_in_plan) -> Tuple[float, list]:
         cfg = self.cfg
         base = cfg.lambda_distance * self.roadmap.edge_len[key]
-        blockers = self.belief.blockers_of(key) - set(removed_in_plan)
+        blockers = self.belief.blockers_of(key)
+        if cfg.push_clear_scope != "repeat":
+            # "edge"/"union"：该 oid 一旦被推过，后续边一律免费。对 "union" 是自洽的
+            # （一次推动确实清空了它挡住的全部通道）；对 "edge" 则是那条已知的低估。
+            blockers = blockers - set(removed_in_plan)
         if not blockers:
             return base, []
         removals = []
@@ -148,32 +152,31 @@ class Planner:
         return base + extra, removals
 
     def _removal(self, oid: int, key: EdgeKey):
-        """计算把障碍物移出【这一条边】所需的做功和放置位姿。
-        同时尝试规划 SE2 推动路径。
-
-        硬约束只要求腾空 `key` 这一条通道，而不是该障碍物当前阻挡的所有通道。
-        密集路网下一个箱子会同时压住几十条边，它们的并集是个远大于箱体的区域，
-        要整体挪出去往往需要 3 米以上的位移——超过 R_push 就直接判为不可推动，
-        于是机器人被迫绕远路。按边计算后所需位移降到亚米级（实测中位 0.6 m）。
-
-        代价是乐观：`_edge_cost` 里同一 oid 一旦进入 removed_in_plan，后续边就
-        当作已通行，但这次放置只保证腾空了 `key`。执行后重新感知会得到真实的
-        阻挡关系，由重规划纠正——与本规划器对未知空间的乐观假设是同一套路子。
-        """
+        """计算把障碍物推开所需的做功和放置位姿，同时规划 SE2 推动路径"""
         cache_key = (oid, key)
         if cache_key in self._removal_cache:
             return self._removal_cache[cache_key]
         obs = self.belief.obstacle(oid)
-        must_clear = self.roadmap.edge_corridor[key]
-        # 软项：该障碍物当前阻挡的全部通道（即旧版的硬 must_clear）。落点仍压在
-        # 上面就说明机器人稍后还得再推它一次，按面积占比计入罚分。每个 oid 只算
-        # 一次并缓存——它与具体打通哪条边无关。
+        # 该障碍物当前阻挡的全部通道并集。每个 oid 只算一次并缓存——与具体打通哪条边无关。
         own = [self.roadmap.edge_corridor[k]
                for k, bs in self.belief.edge_blockers.items() if oid in bs]
         residual = self._blocked_union_cache.get(oid, False)
         if residual is False:
             residual = unary_union(own) if own else None
             self._blocked_union_cache[oid] = residual
+
+        # SE2 规划器的 set_corridor() 用 inside_convex() 逐块判定，要求每块【凸】；
+        # 单条边的走廊是 buffer(cap_style=2) 出来的矩形，天然凸，而它们的并集
+        # 既非凸也可能是 MultiPolygon。所以这里保留两种形式：
+        #   clear_polys —— 凸块列表，喂给 SE2 规划器
+        #   must_clear  —— 单个几何（可非凸），喂给环形采样的 intersects 判定
+        if self.cfg.push_clear_scope == "union" and own:
+            clear_polys = own
+            must_clear = residual
+            residual = None      # 并集已升为硬约束，不必再作为软罚分重复计入
+        else:
+            must_clear = self.roadmap.edge_corridor[key]
+            clear_polys = [must_clear]
         avoid = self.free_union
         others = None
         if self.cfg.check_obstacle_collision:
@@ -195,10 +198,10 @@ class Planner:
         bounds = self.roadmap.workspace.bounds
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
-        # SE2 全空间搜索（只清当前边，per-edge 模式下无需清全部走廊）
+        # SE2 全空间搜索
         if self.cfg.push_use_planner and must_clear is not None:
             se2_feasible, se2_path, se2_cost, se2_goal = geometry.push_plan_se2(
-                obs, [must_clear], self.roadmap.static_obstacles, bounds_xy,
+                obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
                 robot_pos, self.cfg, others_polys=others)
             if se2_feasible and se2_path:
                 feasible = True

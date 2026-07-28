@@ -30,6 +30,11 @@ class Config:
     drop_ring_samples: int = 24     # 在障碍物周围尝试的候选放置方向数
     drop_radius_steps: int = 6      # 尝试的候选放置距离数（0..R_push）
     check_obstacle_collision: bool = True  # 放置障碍物时是否检测与其他障碍物的碰撞
+    push_clear_scope: str = "repeat"
+    # 推开障碍物的代价如何记账（三者的放置硬约束/计费方式不同）：
+    #   "edge"   = 只腾空当前边，且该 oid 之后所有边免费  -> 系统性低估（实测约 8x）
+    #   "repeat" = 只腾空当前边，但【每条被挡的边都照实计一次推动费】-> 诚实、保守
+    #   "union"  = 一次推到全清该障碍物挡住的所有通道       -> 记账自洽但实际做功更大
     full_reveal_on_contact: bool = False   # 推动碰撞后：True=获知被撞障碍物全部信息；False=只知"此处有物"
 
     # -------- SE2 Push Planner --------
