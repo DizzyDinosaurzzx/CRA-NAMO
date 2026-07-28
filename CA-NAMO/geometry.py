@@ -22,15 +22,38 @@ import push_planner
 
 W_ROUTE = 5.0     # 落点压在"障碍物->目标"直线走廊上：机器人下一段路会再被它挡住
 W_AVOID = 0.5     # 落点重新挡住了其他当前畅通的通道
-# 落点仍压在该障碍物原本阻挡的其他通道上：机器人稍后还得再推一次。
-# 八张图实测：0 -> 总J 1032/重复推 24；0.5 与 1.0 同为最优 841.7/2；2.0 起回升到
-# 1009.5。取平台区上沿。
 W_RESIDUAL = 1.0
 
-def _swept_region(obs: MovableObstacle, nx: float, ny: float) -> Polygon: #计算矩形平移时扫过的区域
+# 扫掠区离散化时允许的最大单步转角（15°）。步长越小越贴近真实扫掠区，
+# 代价是更多次 shapely 布尔运算。
+_SWEPT_MAX_DTHETA = math.pi / 12.0
+
+
+def _swept_region(obs: MovableObstacle, nx: float, ny: float,
+                  theta: Optional[float] = None) -> Polygon:
+    """矩形从当前位姿运动到 (nx, ny, theta) 所扫过的区域。
+
+    纯平移时首末位姿的凸包就是精确的扫掠区。**一旦带上旋转，凸包就不再是保守
+    近似**：长条绕形心转 90°，真实扫掠区是半径 L/2 的圆盘，会从首末位姿的凸包
+    里鼓出来（3.0x0.5 的长条转 90°，终点位姿有 83% 的面积落在凸包之外）。
+    漏掉的正是碰撞最可能发生的那一圈。
+
+    因此按 <=15° 的步长插出中间位姿，逐段取凸包再求并：每一小段的转角都很小，
+    分段凸包足够贴合，且始终把真实扫掠区包在里面。
+    """
     start = obs.polygon
-    end = obs.polygon_at(nx, ny)
-    return unary_union([start, end]).convex_hull
+    # 矩形是 pi 周期的，转角取 [-pi/2, pi/2) 上的最短有向增量
+    dtheta = 0.0 if theta is None else push_planner.wrap_dtheta(obs.theta, theta)
+    if abs(dtheta) < 1e-9:
+        return unary_union([start, obs.polygon_at(nx, ny)]).convex_hull
+
+    steps = max(2, int(math.ceil(abs(dtheta) / _SWEPT_MAX_DTHETA)))
+    poses = [obs.polygon_at(obs.x + (nx - obs.x) * i / steps,
+                            obs.y + (ny - obs.y) * i / steps,
+                            obs.theta + dtheta * i / steps)
+             for i in range(steps + 1)]
+    return unary_union([unary_union([a, b]).convex_hull
+                        for a, b in zip(poses, poses[1:])])
 
 
 def push_plan(
@@ -107,7 +130,7 @@ def push_plan(
                     continue
                 if others is not None and end_poly.intersects(others):
                     continue                              # 终点压到了别的障碍物
-                swept = _swept_region(obs, nx, ny)
+                swept = _swept_region(obs, nx, ny, th)
                 if not static_free.contains(swept):
                     continue
                 if others is not None and swept.intersects(others):
@@ -291,6 +314,26 @@ def push_path_plan(
 
 
 # ---------- 计算器 1c：推动做功 ---------- #
+
+def se2_path_cost(obs: MovableObstacle, poses, cfg: Config) -> float:
+    """一段 SE2 位姿序列的推动代价 = 平移弧长 + r̄ * 累计转角。
+
+    与 push_planner 内部的代价定义（rot_weight = r̄）完全一致，因此返回值可以直接
+    当作 `push_work()` 的 `push_distance`。
+
+    用途是按【实际执行的那段轨迹】结算做功：推动中途被撞停时，障碍物只走完了
+    规划路径的一个前缀，不能再拿规划时的全程代价去记账，也不能当作没发生过。
+    """
+    if poses is None or len(poses) < 2:
+        return 0.0
+    rot_weight = (push_planner.mean_rotation_radius(obs.l, obs.d)
+                  if cfg.push_rot_weight is None else float(cfg.push_rot_weight))
+    total = 0.0
+    for a, b in zip(poses, poses[1:]):
+        total += math.hypot(b[0] - a[0], b[1] - a[1])
+        total += rot_weight * abs(push_planner.wrap_dtheta(a[2], b[2]))
+    return total
+
 
 def push_work(difficulty: float, push_distance: float) -> float:
     """推开障碍物的操作功。difficulty 即物理模型中的 μmg。

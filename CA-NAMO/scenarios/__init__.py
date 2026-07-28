@@ -12,7 +12,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-DEFAULT_SCENARIO = "corridor"
+DEFAULT_SCENARIO = "two_doors"
 SCENARIOS: dict[str, str] = {
     "corridor": "scenario_corridor",
     "two_doors": "scenario_two_doors",

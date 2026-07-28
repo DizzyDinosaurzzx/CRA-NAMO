@@ -1,6 +1,4 @@
-"""
-增广路网的构建
-"""
+"""增广路网的构建"""
 
 from __future__ import annotations
 import math

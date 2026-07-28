@@ -108,29 +108,35 @@ class OnlineNAMO:
                             res, node, f"touch revealed difficulty of {touched}")
                     # ---- 如果有 SE2 推动路径则逐步执行，否则瞬移 ----
                     if push_path:
-                        push_success, hits = self._execute_push_path(
+                        push_success, hits, executed_dist = self._execute_push_path(
                             act["oid"], obs, push_path, res, node, cfg)
-                        if not push_success:
-                            # 撞上了 -> 作废本次放置并重规划换位置
-                            self._handle_push_collision(res, node, act["oid"], hits)
-                            break
                     else:
-                        # 瞬移模式: 物理校验
+                        # 瞬移模式: 物理校验。瞬移要么整体完成、要么完全没发生，
+                        # 不存在"推到一半"，因此撞上时实际推动距离就是 0。
                         hits = self._world_collision(act["oid"], dx, dy, dth)
-                        if hits:
-                            self._handle_push_collision(res, node, act["oid"], hits)
-                            break
-                        self.belief.relocate(obs, dx, dy, dth)
-                        self._relocate_world(act["oid"], dx, dy, dth)
-                        self._capture_frame(res, node, f"push obstacle {act['oid']}")
-                    # 执行时按【真实】difficulty 结算，可能与规划时的估计值不同。
-                    # 必须从世界取：信念里的副本 difficulty 是 NaN（尚未获知）。
-                    true_diff = self._world_obstacle(act["oid"]).difficulty
-                    executed_work = geometry.push_work(true_diff, act["dist"])
-                    res.work_cost += executed_work
-                    res.J += executed_work
-                    if act["oid"] not in res.removed:
-                        res.removed.append(act["oid"])
+                        push_success = not hits
+                        executed_dist = 0.0
+                        if push_success:
+                            self.belief.relocate(obs, dx, dy, dth)
+                            self._relocate_world(act["oid"], dx, dy, dth)
+                            executed_dist = act["dist"]
+                            self._capture_frame(res, node,
+                                                f"push obstacle {act['oid']}")
+                    # 按【实际推动的那一段】结算，difficulty 取【真实】值（可能与规划
+                    # 时的估计不同）。必须从世界取：信念里的副本 difficulty 是 NaN。
+                    # 中途撞停时 executed_dist 只覆盖已走完的前缀——障碍物确实动了、
+                    # 功确实做了，直接 break 会把这笔功漏记，让 J 系统性偏低。
+                    if executed_dist > 0.0:
+                        true_diff = self._world_obstacle(act["oid"]).difficulty
+                        executed_work = geometry.push_work(true_diff, executed_dist)
+                        res.work_cost += executed_work
+                        res.J += executed_work
+                        if act["oid"] not in res.removed:
+                            res.removed.append(act["oid"])
+                    if not push_success:
+                        # 撞上了 -> 作废本次放置并重规划换位置
+                        self._handle_push_collision(res, node, act["oid"], hits)
+                        break
                 elif act["type"] == "move":
                     prev_node = node    # 需求3: 记录移动前位置
                     res.walk_cost += cfg.lambda_distance * act["dist"]
@@ -196,7 +202,7 @@ class OnlineNAMO:
             return []
         mover = self._world_obstacle(oid)
         end_poly = mover.polygon_at(nx, ny, theta)
-        swept = geometry._swept_region(mover, nx, ny)
+        swept = geometry._swept_region(mover, nx, ny, theta)
         hits = []
         for w in self.world:
             if w.oid == oid:
@@ -223,41 +229,50 @@ class OnlineNAMO:
 
     @staticmethod
     def _sample_push_path(push_path: list, max_frames: int) -> list:
-        """把推动路径抽稀到至多 max_frames 个途经点（始终保留首尾）。"""
+        """把推动路径抽稀到至多 max_frames 个途经点，返回【下标】（始终保留首尾）。
+
+        返回下标而非位姿，是为了在中途撞停时能把原始路径精确切到实际执行的前缀上
+        再算做功。若改用抽稀后的折线去算，跳过的途经点会让转弯处被拉成直线，
+        做功系统性少算。
+        """
         if len(push_path) <= max_frames:
-            return push_path
-        indices = np.linspace(0, len(push_path) - 1, max_frames).astype(int)
-        return [push_path[i] for i in indices]
+            return list(range(len(push_path)))
+        return [int(i) for i in np.linspace(0, len(push_path) - 1, max_frames)]
 
     def _execute_push_path(self, oid: int, obs, push_path: list,
                            res: RunResult, node: int, cfg: Config):
         """逐步执行 SE2 推动路径，每步做碰撞检测并记录帧。
-        返回 (success, hits)，success=False 表示中途撞到东西。"""
-        sampled = self._sample_push_path(push_path, cfg.push_max_frames_per_action)
-        last_pose = push_path[0]
-        moved = False
 
-        for step_idx, (wx, wy, wth) in enumerate(sampled):
+        返回 `(success, hits, executed_dist)`：
+        `executed_dist` 是【实际走完的那段路径】的 SE2 代价（平移弧长 + r̄·转角），
+        中途撞停时只统计已执行的前缀，可直接喂给 `geometry.push_work()`。
+        """
+        sampled = self._sample_push_path(push_path, cfg.push_max_frames_per_action)
+        start_i = sampled[0]
+        last_i = start_i
+
+        for step_idx, pi in enumerate(sampled):
             if step_idx == 0:
                 continue  # 跳过起点
+            wx, wy, wth = push_path[pi]
             if cfg.check_obstacle_collision:
                 hits = self._world_collision(oid, wx, wy, wth)
                 if hits:
-                    # 障碍物已经被推到 last_pose 才撞停，信念必须同步到该实际位姿：
-                    # 否则世界里它在半路、信念以为它没动过，二者永久脱节。
+                    # 障碍物已经被推到 push_path[last_i] 才撞停，信念必须同步到该
+                    # 实际位姿：否则世界里它在半路、信念以为它没动过，二者永久脱节。
                     # 第一步就撞停时世界也没动过，此时不能调用 relocate——那会把
                     # 它标记成 removed。
-                    if moved:
-                        self.belief.relocate(obs, *last_pose)
-                    return (False, hits)
+                    if last_i != start_i:
+                        self.belief.relocate(obs, *push_path[last_i])
+                    return (False, hits,
+                            geometry.se2_path_cost(obs, push_path[:last_i + 1], cfg))
             self._relocate_world(oid, wx, wy, wth)
-            last_pose = (wx, wy, wth)
-            moved = True
+            last_i = pi
             self._capture_frame(res, node,
                                 f"push {oid} step {step_idx}/{len(sampled) - 1}")
         # 更新信念中的最终位姿
         self.belief.relocate(obs, *push_path[-1])
-        return (True, [])
+        return (True, [], geometry.se2_path_cost(obs, push_path, cfg))
 
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
         for w in self.world:
