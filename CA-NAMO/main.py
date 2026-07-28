@@ -8,6 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from shapely.geometry import LineString, Point
+import config
 import scenarios
 from planner import OnlineNAMO
 
@@ -168,9 +169,10 @@ def main():
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
     if args.lambda_distance is not None:
-        if args.lambda_distance < 0:
-            ap.error("--lambda 必须为非负数")
-        cfg.lambda_distance = args.lambda_distance
+        try:
+            cfg.lambda_distance = config.validate_lambda(args.lambda_distance)
+        except ValueError as e:
+            ap.error(str(e))
     if args.no_llm_order:
         cfg.use_llm_ordering = False
     if args.frames:

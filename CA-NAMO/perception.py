@@ -12,7 +12,9 @@ class Belief:
     def __init__(self, roadmap: Roadmap, cfg: Config):
         self.roadmap = roadmap
         self.cfg = cfg
-        self.perceived: Dict[int, MovableObstacle] = {}     # oid -> 已感知障碍物（含直接给定的 W）
+        # oid -> 已感知障碍物的【副本】。持有副本而非世界对象的引用，否则
+        # `obstacle(oid).difficulty` 会直接返回 ground truth，绕开触摸/估计机制。
+        self.perceived: Dict[int, MovableObstacle] = {}
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # 边 -> 阻挡该边的障碍物 oid 集合
         self.newly_revealed: List[int] = []
         # 通过"推动碰撞"发现的匿名占据区域：只知道"这里有东西"，不知其身份/几何/难度。
@@ -25,22 +27,45 @@ class Belief:
     # -------------------- 感知 ----------------------
     def perceive(self, world_obstacles: List[MovableObstacle],
                  robot_pos: Tuple[float, float]) -> List[int]:
-        """Reveal every visible, not-yet-known obstacle around `robot_pos`."""
+        """揭示 `robot_pos` 周围所有可见障碍物；已知的则刷新其位姿。
+
+        已知障碍物必须重新对齐：信念里的位姿只在机器人自己推动时更新，一旦推动
+        中途被撞停（世界停在半路、信念以为没动），二者就会永久脱节。看得见就同步，
+        是让信念自愈的最低成本手段。
+        """
         self.newly_revealed = []
         rp = Point(robot_pos)
         for w in world_obstacles:
-            if w.oid in self.perceived:
+            known = self.perceived.get(w.oid)
+            # 已知且位姿一致 —— 没有任何可同步的信息，直接跳过昂贵的可见性判定
+            if known is not None and self._pose_matches(known, w):
                 continue
             if rp.distance(Point(w.center())) > self.cfg.R_perc:
                 continue
             if not self._visible(robot_pos, w, world_obstacles):
                 continue
-            self.perceived[w.oid] = w
+            if known is not None:
+                self._sync_pose(known, w)
+                continue
+            obs = w.perceived_copy()
+            self.perceived[w.oid] = obs
             self.newly_revealed.append(w.oid)
-            self._update_edges_for(w)
+            self._update_edges_for(obs)
             # 该物体现在被完整感知，之前对它的匿名"接触"记录可以清除（由真实 footprint 取代）
-            self._clear_contacts_overlapping(w.polygon)
+            self._clear_contacts_overlapping(obs.polygon)
         return self.newly_revealed
+
+    @staticmethod
+    def _pose_matches(a: MovableObstacle, b: MovableObstacle) -> bool:
+        return (abs(a.x - b.x) < 1e-9 and abs(a.y - b.y) < 1e-9
+                and abs(a.theta - b.theta) < 1e-9)
+
+    def _sync_pose(self, known: MovableObstacle, world_obs: MovableObstacle):
+        """把已感知副本的位姿对齐到世界真实位姿。"""
+        self._forget_edges(known.oid)
+        known.x, known.y, known.theta = world_obs.x, world_obs.y, world_obs.theta
+        known.removed = world_obs.removed
+        self._update_edges_for(known)
 
     # -------------------- 可见性（多点采样 + 墙体遮挡） ----------------------
     def _half_edge_samples(self, obs: MovableObstacle):
@@ -70,7 +95,7 @@ class Belief:
         width = self.cfg.sight_width
         sight = seg.buffer(width / 2.0, cap_style=2) if width > 0 else seg
         # 墙体遮挡：视线一旦离开静态自由空间（= 工作空间挖去墙体）即被墙挡住
-        if not self.roadmap.static_free.contains(sight):
+        if not self.roadmap.static_free_prep.contains(sight):
             return False
         # 其他可移动障碍物遮挡
         for w in world_obstacles:
@@ -131,26 +156,37 @@ class Belief:
             return
         self.contacts = [c for c in self.contacts if not c.intersects(poly)]
 
-    def force_reveal(self, obs: MovableObstacle) -> List[int]:
+    def force_reveal(self, world_obs: MovableObstacle) -> List[int]:
         """物理接触导致的强制揭示：无视感知半径与遮挡，直接把障碍物纳入信念。
 
         用于机器人推动某障碍物时撞上一个尚未感知的物体——碰撞本身就暴露了它。
         """
-        if obs.oid in self.perceived:
+        if world_obs.oid in self.perceived:
             return []
+        obs = world_obs.perceived_copy()
         self.perceived[obs.oid] = obs
         self.newly_revealed.append(obs.oid)
         self._update_edges_for(obs)
+        # 真实 footprint 已知，覆盖它的匿名接触区必须清掉，否则会退化成一块永久
+        # 压在它身上的幽灵区域，把它自己锁成不可推动（见 register_contact 的说明）。
+        self._clear_contacts_overlapping(obs.polygon)
         return [obs.oid]
+
+    def _forget_edges(self, oid: int):
+        """清除某障碍物在【所有】边上的阻挡关系。
+
+        不能只清 `_update_edges_for` 扫描的那个包围盒邻域：障碍物移动后新旧位置
+        的邻域可能完全不相交，旧位置上的阻挡记录会残留下来。
+        """
+        for blockers in self.edge_blockers.values():
+            blockers.discard(oid)
 
     def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):
         """Apply an executed push: move the obstacle and refresh its blocked edges."""
-        # 删除它原有的阻挡关系
-        for blockers in self.edge_blockers.values():
-            blockers.discard(obs.oid)
+        self._forget_edges(obs.oid)
         obs.x, obs.y, obs.theta = x, y, theta
         obs.removed = True
-        self._update_edges_for(obs)     # 无反效果 => 新的阻挡集是原阻挡集的子集
+        self._update_edges_for(obs)
 
     # -------------------- 需求3: 机器人自身碰撞感知 ----------------------
     def check_robot_collision(

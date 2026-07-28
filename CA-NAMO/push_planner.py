@@ -87,37 +87,6 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
     return inside
 
 
-def regular_polygon(cx: float, cy: float, r: float, k: int = 8) -> np.ndarray:
-    """正 k 边形，外接于半径 r（保守近似）。"""
-    r_out = r / math.cos(math.pi / k)
-    ang = np.arange(k) * 2 * math.pi / k + math.pi / k
-    return np.stack([cx + r_out * np.cos(ang), cy + r_out * np.sin(ang)], axis=1)
-
-
-def corridor_polygons(route: np.ndarray, width: float) -> List[np.ndarray]:
-    """将折线 + 半宽度转换为凸多边形集合（每段一个矩形 + 每个顶点一个八边形）。"""
-    route = np.asarray(route, dtype=float)
-    polys: List[np.ndarray] = []
-    half = width / 2.0
-    for i in range(len(route) - 1):
-        a, b = route[i], route[i + 1]
-        e = b - a
-        L = math.hypot(e[0], e[1])
-        if L < 1e-12:
-            continue
-        if half <= 1e-12:
-            polys.append(np.array([a, b]))
-            continue
-        u = e / L
-        nvec = np.array([-u[1], u[0]])
-        polys.append(np.array([a + half * nvec, a - half * nvec,
-                               b - half * nvec, b + half * nvec]))
-    if half > 1e-12:
-        for p in route:
-            polys.append(regular_polygon(p[0], p[1], half, k=8))
-    return polys
-
-
 def wrap_dtheta(a: float, b: float) -> float:
     """角度在 [0, pi) 环上的最短有向旋转增量，范围 [-pi/2, pi/2)。"""
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
@@ -245,18 +214,15 @@ class PushPlanner:
         self.unit = cell / self._W_AXIS
         self.W_rot = int(round(self.rot_step_cost / self.unit))
 
-        if verbose:
-            print(f"[PushPlanner] grid {self.nx}x{self.ny}x{n_theta} = "
-                  f"{self.nx * self.ny * n_theta:,} states, cell={cell}, "
-                  f"dtheta={math.degrees(self.dtheta):.1f}deg, {connectivity}-conn")
-            print(f"[PushPlanner] margin={self.margin:.4f} "
-                  f"(0.1*cell={0.1*cell:.4f} + bulge={self.bulge:.5f})")
-            print(f"[PushPlanner] trans 1 cell={cell:.4f}, rot 1 step={self.rot_step_cost:.4f}"
-                  f" (w_rot={self.rot_weight:.3f})")
-
         self._build_moves()
         self._build_cspace()
-        self._cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._cache: Optional[Tuple[np.ndarray, np.ndarray, int]] = None
+
+        if verbose:
+            print(f"[push] {obstacle_w:g}x{obstacle_h:g} obstacle | "
+                  f"grid {self.nx}x{self.ny}x{n_theta} @ cell {cell:.2f} | "
+                  f"free {self.free.mean() * 100:.0f}% "
+                  f"-> reachable {self.allowed.mean() * 100:.0f}%")
 
     # -------------------------------------------------------- 移动定义
     def _build_moves(self) -> None:
@@ -311,14 +277,14 @@ class PushPlanner:
         self.free = ~blocked
         self.in_disk = indisk
         self.allowed = self.free & self.in_disk
+        # 未经 _unstick_start 豁免的原始版本。规划器实例是跨调用缓存的，而
+        # _unstick_start() 会就地放开一小片格子——那是只对【某个起点】成立的豁免，
+        # 必须在下次规划前还原，否则会永久累积成虚假的可通行区域。
+        self._allowed_base = self.allowed.copy()
+        self._unstuck = False
 
         # 当未提供走廊时，route_block 保持全 False
         self.route_block = np.zeros(shape, dtype=bool)
-
-        if self.verbose:
-            print(f"[PushPlanner] free={self.free.mean() * 100:.1f}% | "
-                  f"in_disk={self.in_disk.mean() * 100:.1f}% | "
-                  f"allowed={self.allowed.mean() * 100:.1f}%")
 
     # -------------------------------------------------- 起点解卡（离散化伪影修复）
     def _true_collision(self, pose: Tuple[float, float, float]) -> bool:
@@ -344,6 +310,9 @@ class PushPlanner:
 
         返回被解锁的状态数（0 表示起点本来就通畅，无需处理）。
         """
+        if self._unstuck:                 # 还原上一个起点留下的豁免
+            np.copyto(self.allowed, self._allowed_base)
+            self._unstuck = False
         if self.allowed[start_idx]:
             return 0
         if not self.in_disk[start_idx]:
@@ -380,9 +349,11 @@ class PushPlanner:
                     continue              # 真实碰撞，保持占据
                 stack.append(nxt)
 
-        if self.verbose and freed:
-            print(f"[PushPlanner] start unstuck: {freed} state(s) freed around "
-                  f"{self._pose(*start_idx)} (grid-snap artifact)")
+        if freed:
+            self._unstuck = True
+            if self.verbose:
+                x, y, _ = self._pose(*start_idx)
+                print(f"[push] unstuck {freed} states at ({x:.1f}, {y:.1f})")
         return freed
 
     # ----------------------------------------------------------- 索引辅助函数
@@ -596,8 +567,7 @@ def polygon_exterior_coords(polygon) -> np.ndarray:
     return np.array(coords, dtype=float)
 
 
-def build_push_planner(static_free,           # shapely Polygon/MultiPolygon — 静态自由空间
-                       wall_polys,             # shapely Polygon 列表 — 静态墙壁轮廓
+def build_push_planner(wall_polys,             # shapely Polygon 列表 — 不可穿越区域轮廓
                        obstacle_w: float,
                        obstacle_h: float,
                        bounds: Tuple[float, float, float, float],
@@ -613,10 +583,8 @@ def build_push_planner(static_free,           # shapely Polygon/MultiPolygon —
 
     参数
     ----------
-    static_free : shapely Polygon
-        可通行的自由空间（工作空间减去静态障碍物）。
     wall_polys : shapely Polygon 列表
-        静态障碍物轮廓（用于构建构型空间）。
+        不可穿越区域的轮廓：静态墙体 + 其他可移动障碍物（用于构建构型空间）。
     obstacle_w, obstacle_h : float
         被推矩形的尺寸。
     bounds : (xmin, xmax, ymin, ymax)

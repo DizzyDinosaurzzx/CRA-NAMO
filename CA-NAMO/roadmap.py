@@ -7,6 +7,7 @@ import math
 from typing import Dict, List, Tuple
 from shapely.geometry import Point, Polygon, LineString
 from shapely.ops import unary_union
+from shapely.prepared import prep
 from config import Config
 EdgeKey = Tuple[int, int]
 
@@ -17,6 +18,9 @@ class Roadmap:
         polys = [so.polygon for so in static_obstacles]
         self.static_obstacles = static_obstacles  # 供推动规划器使用
         self.static_free = workspace.difference(unary_union(polys)) if polys else workspace
+        # 预处理版本：static_free 全程只读，而 contains() 在建图/可见性/放置判定里被
+        # 调用成千上万次。prep() 预先建好边索引，谓词判定快一个数量级，语义完全等价。
+        self.static_free_prep = prep(self.static_free)
         self.nodes: List[Tuple[float, float]] = []
         self.adj: Dict[int, List[int]] = {}
         self.edge_len: Dict[EdgeKey, float] = {}
@@ -33,7 +37,7 @@ class Roadmap:
         while y <= maxy + 1e-9:
             x = minx
             while x <= maxx + 1e-9:
-                if self.static_free.contains(Point(x, y).buffer(cfg.robot_radius)):
+                if self.static_free_prep.contains(Point(x, y).buffer(cfg.robot_radius)):
                     nid = len(self.nodes)
                     self.nodes.append((round(x, 3), round(y, 3)))
                     self.adj[nid] = []
@@ -58,7 +62,7 @@ class Roadmap:
         if dist > cfg.conn_radius + 1e-9:
             return
         corridor = LineString([a, b]).buffer(cfg.robot_radius, cap_style=2)
-        if not self.static_free.contains(corridor):
+        if not self.static_free_prep.contains(corridor):
             return
         key = (u, v) if u < v else (v, u)
         self.edge_len[key] = round(dist, 4)
@@ -90,16 +94,13 @@ class Roadmap:
             if dist > cfg.conn_radius * 2 + 1e-9:
                 continue
             corridor = LineString([p, (x, y)]).buffer(cfg.robot_radius, cap_style=2)
-            if self.static_free.contains(corridor):
+            if self.static_free_prep.contains(corridor):
                 key = (nid, other) if nid < other else (other, nid)
                 self.edge_len[key] = round(dist, 4)
                 self.edge_corridor[key] = corridor
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
         return nid
-
-    def all_edges(self):
-        return list(self.edge_len.keys())
 
     def __repr__(self):
         return f"Roadmap(nodes={len(self.nodes)}, edges={len(self.edge_len)})"

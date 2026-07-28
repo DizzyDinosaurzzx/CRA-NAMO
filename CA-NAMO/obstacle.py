@@ -10,12 +10,11 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 from shapely.geometry import Polygon
-from shapely.affinity import translate, rotate
 
 
 def _rect_polygon(x: float, y: float, l: float, d: float, theta: float) -> Polygon:
@@ -62,13 +61,16 @@ class MovableObstacle:
     def center(self):
         return (self.x, self.y)
 
-    def moved_copy(self, x: float, y: float, theta: Optional[float] = None) -> "MovableObstacle":
-        """复制一个移动到新位姿的障碍物（用于候选放置位置）。"""
+    def perceived_copy(self) -> "MovableObstacle":
+        """复制一份供 Belief 持有的副本，difficulty 置为 NaN（= 尚未获知）。
+
+        信念必须与仿真世界解耦：直接存世界对象的引用会让 `belief.obstacle(oid).difficulty`
+        悄悄返回 ground truth，绕过 `Belief.get_difficulty()` 的估计/触摸逻辑。
+        用 NaN 而不是某个默认值，是为了让任何误读都立刻显形而不是静默地"恰好对了"。
+        """
         return MovableObstacle(
-            x=x, y=y, l=self.l, d=self.d,
-            theta=self.theta if theta is None else theta,
-            material=self.material, difficulty=self.difficulty,
-            oid=self.oid,
+            x=self.x, y=self.y, l=self.l, d=self.d, theta=self.theta,
+            material=self.material, difficulty=math.nan, oid=self.oid,
         )
 
     def polygon_at(self, x: float, y: float, theta: Optional[float] = None) -> Polygon:

@@ -4,7 +4,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from shapely.ops import unary_union
 from config import Config
@@ -19,8 +19,6 @@ class Plan:
     node_path: List[int]
     actions: List[dict]                  # 有序的 'move' / 'remove' 动作序列
     expansions: int
-    def removals(self):
-        return [a for a in self.actions if a["type"] == "remove"]
 
 class Planner:
     def __init__(self, roadmap: Roadmap, belief: Belief,
@@ -29,7 +27,9 @@ class Planner:
         self.belief = belief
         self.est = estimator
         self.cfg = cfg
-        self.current_node: Optional[int] = None  # 记录机器人当前路网节点，供推动规划器使用
+        # 本次规划中机器人所在位置，供推动规划器确定工作圆。整个 plan() 期间固定，
+        # 见 plan() 里的说明。
+        self._robot_pos: Tuple[float, float] = (0.0, 0.0)
 
     # ------------------------------------------------------------------ 规划
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
@@ -45,6 +45,11 @@ class Planner:
         self.free_union = unary_union(free_corridors) if free_corridors else None
         # 放置障碍物时需要知道目标在哪，避免把它挪到机器人剩余路线上
         self._goal_xy = (gx, gy)
+        # 推动可行性一律按【本次规划的出发点】评估，整个 plan() 期间固定。
+        # 曾经用 A* 当前弹出的节点，它每扩展一步就变一次，而 _removal 的缓存键
+        # 只有 (oid, edge)——于是从远处评估某次推动时，会沿用近处节点算出的
+        # “可行”结论，实际上那时障碍物根本不在工作圆内，代价被系统性低估。
+        self._robot_pos = rm.nodes[start_node]
         # 缓存键是 (oid, edge_key)：放置方案现在依赖具体要打通哪一条边
         self._removal_cache: Dict[
             Tuple[int, EdgeKey], Tuple[bool, float, Optional[tuple], float, Optional[list]]
@@ -69,14 +74,17 @@ class Planner:
         while open_heap:
             f, bias, _, state = heapq.heappop(open_heap)
             node, removed = state
-            self.current_node = node        # 记录机器人当前位置，供推动规划器使用
             g = g_best.get(state, math.inf)
             if f > incumbent + 1e-9:            # 分支限界剪枝
                 continue
             if node == goal_node:
                 incumbent = g
                 goal_state = state
-                break                            # h 可采纳 => 第一个弹出的即为最优
+                # 注意：这【不是】最优性保证。h 本身可采纳，但 _edge_cost 对
+                # removed_in_plan 的处理是乐观的（一次推动只保证腾空了那一条边，
+                # 却让该 oid 在后续所有边上都当作已让开），所以 g 本身就是下界。
+                # 取第一个弹出的目标，与"对未知空间保持乐观、靠重规划纠正"一致。
+                break
             expansions += 1
             if expansions > cfg.max_expansions:
                 break
@@ -183,8 +191,7 @@ class Planner:
         push_dist = 0.0
         feasible = False
 
-        robot_pos = (self.roadmap.nodes[self.current_node]
-                     if self.current_node is not None else (0.0, 0.0))
+        robot_pos = self._robot_pos
         bounds = self.roadmap.workspace.bounds
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
@@ -207,13 +214,14 @@ class Planner:
                 sample_thetas = [base_th, base_th + math.pi/4,
                                  base_th + math.pi/2, base_th + 3*math.pi/4]
             feasible, push_dist, drop = geometry.push_plan(
-                obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
+                obs, self.roadmap.static_free_prep, must_clear, avoid, self.cfg,
                 others=others, goal_xy=self._goal_xy, residual=residual,
                 sample_thetas=sample_thetas)
             if feasible and self.cfg.push_use_planner:
+                # others 必须一并传入：漏传会规划出穿过其他可移动障碍物的推动路径
                 se2_feasible, se2_path, se2_cost = geometry.push_path_plan(
                     obs, drop, self.roadmap.static_obstacles, bounds_xy,
-                    robot_pos, self.cfg)
+                    robot_pos, self.cfg, others_polys=others)
                 if se2_feasible and se2_path:
                     push_path = se2_path
                     push_dist = se2_cost
@@ -223,8 +231,8 @@ class Planner:
         if not feasible:
             work = math.inf
         else:
-            # W = difficulty * 推动距离；未触碰过的障碍物用 LLM/启发式估计的 difficulty
-            work = estimated_diff * push_dist
+            # 规划期用估计难度：触碰过的是真实值，否则是 LLM/启发式估计
+            work = geometry.push_work(estimated_diff, push_dist)
 
         res = (feasible, work, drop, push_dist, push_path)
         self._removal_cache[cache_key] = res

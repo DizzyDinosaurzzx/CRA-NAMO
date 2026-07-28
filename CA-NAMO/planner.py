@@ -4,13 +4,14 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+import numpy as np
 from shapely.geometry import Polygon, Point
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
-from search import Planner, Plan
+from search import Planner
 import geometry
 
 @dataclass
@@ -27,7 +28,6 @@ class RunResult:
     llm_mode: str = "heuristic"
     removed: List[int] = field(default_factory=list)
     robot_track: List[Tuple[float, float]] = field(default_factory=list)
-    history: List[dict] = field(default_factory=list)
     frames: List[dict] = field(default_factory=list)
     message: str = ""
 
@@ -59,7 +59,7 @@ class OnlineNAMO:
     def _add_terminal(self, p: Tuple[float, float]) -> int:
         """把起点/终点插入路网；该点放不下机器人圆盘时退化到最近的合法节点。"""
         cfg = self.cfg
-        if not self.roadmap.static_free.contains(Point(p).buffer(cfg.robot_radius)):
+        if not self.roadmap.static_free_prep.contains(Point(p).buffer(cfg.robot_radius)):
             # 点在墙内或贴墙太近 -> 退化到最近的合法路网节点
             p = self.roadmap.nodes[self.roadmap.nearest_node(p)]
         return self.roadmap.add_terminal(p)
@@ -88,7 +88,6 @@ class OnlineNAMO:
                 res.cycles = cycle + 1
                 return res
             res.total_expansions += plan.expansions
-            self._snapshot(res, node, plan)
 
             if node == self.goal_node:
                 break
@@ -113,41 +112,21 @@ class OnlineNAMO:
                             act["oid"], obs, push_path, res, node, cfg)
                         if not push_success:
                             # 撞上了 -> 作废本次放置并重规划换位置
-                            for oid_hit, region in hits:
-                                if cfg.full_reveal_on_contact:
-                                    self.belief.force_reveal(self._world_obstacle(oid_hit))
-                                else:
-                                    self.belief.register_contact(region)
-                            if cfg.full_reveal_on_contact:
-                                label = (f"push {act['oid']} blocked by "
-                                         f"{sorted(o for o, _ in hits)} -> replan")
-                            else:
-                                label = (f"push {act['oid']} hit unknown obstruction "
-                                         f"-> replan")
-                            self._capture_frame(res, node, label)
+                            self._handle_push_collision(res, node, act["oid"], hits)
                             break
                     else:
                         # 瞬移模式: 物理校验
                         hits = self._world_collision(act["oid"], dx, dy, dth)
                         if hits:
-                            for oid_hit, region in hits:
-                                if cfg.full_reveal_on_contact:
-                                    self.belief.force_reveal(self._world_obstacle(oid_hit))
-                                else:
-                                    self.belief.register_contact(region)
-                            if cfg.full_reveal_on_contact:
-                                label = (f"push {act['oid']} blocked by "
-                                         f"{sorted(o for o, _ in hits)} -> replan")
-                            else:
-                                label = (f"push {act['oid']} hit unknown obstruction "
-                                         f"-> replan")
-                            self._capture_frame(res, node, label)
+                            self._handle_push_collision(res, node, act["oid"], hits)
                             break
                         self.belief.relocate(obs, dx, dy, dth)
                         self._relocate_world(act["oid"], dx, dy, dth)
                         self._capture_frame(res, node, f"push obstacle {act['oid']}")
-                    # 执行时按真实 difficulty 结算，可能与规划时的估计值不同
-                    executed_work = geometry.push_work(obs, act["dist"])
+                    # 执行时按【真实】difficulty 结算，可能与规划时的估计值不同。
+                    # 必须从世界取：信念里的副本 difficulty 是 NaN（尚未获知）。
+                    true_diff = self._world_obstacle(act["oid"]).difficulty
+                    executed_work = geometry.push_work(true_diff, act["dist"])
                     res.work_cost += executed_work
                     res.J += executed_work
                     if act["oid"] not in res.removed:
@@ -228,20 +207,35 @@ class OnlineNAMO:
                 hits.append((w.oid, contact))
         return hits
 
+    def _handle_push_collision(self, res: RunResult, node: int, oid: int, hits):
+        """推动撞上东西后的统一善后：更新信念 + 记录一帧。"""
+        cfg = self.cfg
+        for oid_hit, region in hits:
+            if cfg.full_reveal_on_contact:
+                self.belief.force_reveal(self._world_obstacle(oid_hit))
+            else:
+                self.belief.register_contact(region)
+        if cfg.full_reveal_on_contact:
+            label = f"push {oid} blocked by {sorted(o for o, _ in hits)} -> replan"
+        else:
+            label = f"push {oid} hit unknown obstruction -> replan"
+        self._capture_frame(res, node, label)
+
+    @staticmethod
+    def _sample_push_path(push_path: list, max_frames: int) -> list:
+        """把推动路径抽稀到至多 max_frames 个途经点（始终保留首尾）。"""
+        if len(push_path) <= max_frames:
+            return push_path
+        indices = np.linspace(0, len(push_path) - 1, max_frames).astype(int)
+        return [push_path[i] for i in indices]
+
     def _execute_push_path(self, oid: int, obs, push_path: list,
                            res: RunResult, node: int, cfg: Config):
         """逐步执行 SE2 推动路径，每步做碰撞检测并记录帧。
         返回 (success, hits)，success=False 表示中途撞到东西。"""
-        max_frames = cfg.push_max_frames_per_action
-        n_waypoints = len(push_path)
-        if n_waypoints > max_frames:
-            import numpy as np
-            indices = np.linspace(0, n_waypoints - 1, max_frames).astype(int)
-            sampled = [push_path[i] for i in indices]
-            sampled[0] = push_path[0]
-            sampled[-1] = push_path[-1]
-        else:
-            sampled = push_path
+        sampled = self._sample_push_path(push_path, cfg.push_max_frames_per_action)
+        last_pose = push_path[0]
+        moved = False
 
         for step_idx, (wx, wy, wth) in enumerate(sampled):
             if step_idx == 0:
@@ -249,14 +243,20 @@ class OnlineNAMO:
             if cfg.check_obstacle_collision:
                 hits = self._world_collision(oid, wx, wy, wth)
                 if hits:
+                    # 障碍物已经被推到 last_pose 才撞停，信念必须同步到该实际位姿：
+                    # 否则世界里它在半路、信念以为它没动过，二者永久脱节。
+                    # 第一步就撞停时世界也没动过，此时不能调用 relocate——那会把
+                    # 它标记成 removed。
+                    if moved:
+                        self.belief.relocate(obs, *last_pose)
                     return (False, hits)
             self._relocate_world(oid, wx, wy, wth)
-            step_label = (f"push {oid} step {step_idx + 1}/{len(sampled) - 1}"
-                          if cfg.save_frames else f"push {oid}")
-            self._capture_frame(res, node, step_label)
+            last_pose = (wx, wy, wth)
+            moved = True
+            self._capture_frame(res, node,
+                                f"push {oid} step {step_idx}/{len(sampled) - 1}")
         # 更新信念中的最终位姿
-        final_x, final_y, final_th = push_path[-1]
-        self.belief.relocate(obs, final_x, final_y, final_th)
+        self.belief.relocate(obs, *push_path[-1])
         return (True, [])
 
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
@@ -277,12 +277,4 @@ class OnlineNAMO:
             "perceived": set(self.belief.perceived.keys()),
             "J": round(res.J, 4),
             "label": label,
-        })
-
-    def _snapshot(self, res: RunResult, node: int, plan: Plan):
-        res.history.append({
-            "robot": self.roadmap.nodes[node],
-            "node_path": list(plan.node_path),
-            "perceived": [o.oid for o in self.belief.perceived.values()],
-            "cost": plan.cost,
         })

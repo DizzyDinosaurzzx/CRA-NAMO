@@ -1,7 +1,17 @@
 """CA-NAMO的全局配置"""
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+
+def validate_lambda(value: float) -> float:
+    """lambda_distance 的唯一校验入口（构造时与命令行覆盖时共用）。"""
+    value = float(value)
+    if value < 0:
+        raise ValueError("lambda_distance 必须为非负数")
+    return value
+
+
 @dataclass
 class Config:
     # -------- 机器人 -------- #
@@ -58,8 +68,7 @@ class Config:
     verbose: bool = True
 
     def __post_init__(self):
-        if self.lambda_distance < 0:
-            raise ValueError("lambda_distance 必须为非负数")
+        self.lambda_distance = validate_lambda(self.lambda_distance)
 
     def log(self, *args):
         if self.verbose:
