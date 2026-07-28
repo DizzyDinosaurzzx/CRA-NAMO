@@ -15,6 +15,12 @@ from config import Config
 
 # -------------计算器 1：推动规划--------------- #
 
+# 放置位姿的软偏好权重，单位是"等效推动米数"，直接加到推动距离上参与比较。
+# 障碍物可在可达范围内任意平移，只受墙体与其他障碍物约束，不存在"只能推不能拉"
+# 的方向限制，因此这里没有与机器人相对方位有关的罚分。
+W_ROUTE = 5.0    # 落点压在"障碍物->目标"直线走廊上：机器人下一段路会再被它挡住
+W_AVOID = 0.5    # 落点重新挡住了其他当前畅通的通道
+
 def _swept_region(obs: MovableObstacle, nx: float, ny: float) -> Polygon: #计算矩形从当前位姿平移到 (nx, ny) 时扫过的区域
     start = obs.polygon
     end = obs.polygon_at(nx, ny)
@@ -28,6 +34,7 @@ def push_plan(
     avoid: Optional[Polygon],          # 应避免重新阻挡的其他畅通通道（软约束）
     cfg: Config,
     others: Optional[Polygon] = None,  # 其他可移动障碍物当前占据的区域（硬约束：不得碰撞）
+    goal_xy: Optional[Tuple[float, float]] = None,   # 目标点：用于避开剩余路线
 ) -> Tuple[bool, float, Optional[Tuple[float, float, float]]]:
 
     """
@@ -39,19 +46,39 @@ def push_plan(
       * 它完全腾空 `must_clear`——即该障碍物当前挡住的通道（从而让“付费可解锁”的边真正被打通）
       * 终点位姿与推动扫掠路径都不与其他可移动障碍物 `others` 相交（物体不能互相穿透/叠放）
 
-    在可行位姿中，我们将避免反效果的偏好作为软目标
-    优先选择不会重新阻挡其他当前畅通通道（`avoid`）的位姿，并以最短推动距离打破平局。
-    由于密集路网覆盖自由空间，将避免反效果作为硬约束会禁止所有放置；任何残余的新阻挡都会通过重新感知发现，并由重规划处理。
-    返回 (feasible, push_distance, drop_pose)。push_distance 是障碍物中心的欧氏移动
-    距离；direct 模式仅把它用于几何放置选择，不用于计算 W。
+    障碍物在可达范围内自由平移：方向不受限（不区分推/拉），只要终点位姿与平移
+    扫掠区都不撞墙、不撞其他障碍物即可。移动过程中与机器人自身的碰撞不予考虑。
+
+    可行位姿按加权得分取最小：
+
+        score = 推动距离 + W_ROUTE * 挡住剩余路线 + W_AVOID * 挡住其他畅通通道
+
+    `route`（障碍物 -> 目标的直线走廊）这一项是关键：只用 `avoid` 时，密集路网让
+    走廊铺满自由空间，几乎每个候选都判为“挡住了别的路”，该项退化成常数，选择塌缩
+    成“最短距离 + 枚举顺序”，于是障碍物被顺着机器人的行进方向一路顶着走，每个
+    重规划周期再撞上、再推。用加权和而不是字典序，是因为 route 只是直线代理，在
+    迷宫里并不可靠；让它无条件压倒距离会把障碍物推到很远的糟糕位置。
+
+    返回 (feasible, push_distance, drop_pose)。push_distance 是障碍物中心的欧氏移动距离。
     """
 
-    best = None                      # (penalty, distance, pose)
+    best = None                      # (score, distance, pose)
     cx, cy = obs.x, obs.y
+
+    # 障碍物到目标的直线走廊：落在其中意味着机器人下一段路会再次被它挡住。
+    route = None
+    if goal_xy is not None:
+        route = LineString([(cx, cy), goal_xy]).buffer(cfg.robot_radius)
+
+    # 注意：曾尝试把枚举起点改成"背离机器人"的方向再向两侧展开。它只影响同分候选
+    # 之间的取舍，但实测会让 two_doors_hidden_c 与 maze_to_house 从成功变为失败
+    # （见提交说明的消融数据），因此保持固定的 0..2pi 顺序。
+    n = cfg.drop_ring_samples
+
     for k in range(1, cfg.drop_radius_steps + 1):
         r = cfg.R_push * k / cfg.drop_radius_steps
-        for a in range(cfg.drop_ring_samples):
-            ang = 2.0 * math.pi * a / cfg.drop_ring_samples
+        for a in range(n):
+            ang = 2.0 * math.pi * a / n
             nx = round(cx + r * math.cos(ang), 3)
             ny = round(cy + r * math.sin(ang), 3)
             end_poly = obs.polygon_at(nx, ny)
@@ -68,9 +95,15 @@ def push_plan(
             if others is not None and swept.intersects(others):
                 continue                              # 推动路径穿过了别的障碍物
 
+            blocks_route = 1 if (route is not None
+                                 and end_poly.intersects(route)) else 0
             penalty = 1 if (avoid is not None and end_poly.intersects(avoid)) else 0
             dist = math.hypot(nx - cx, ny - cy)
-            cand = (penalty, round(dist, 3), (nx, ny, obs.theta))
+            # 加权求和而非字典序：两个偏好都折算成"等效米数"叠加到推动距离上。
+            # 字典序会让任意一项无条件压倒距离，从而选出很远、很糟的落点——迷宫里
+            # route 只是直线代理、并不可靠，一旦让它独裁就会把障碍物推进真正的通道。
+            score = dist + W_ROUTE * blocks_route + W_AVOID * penalty
+            cand = (round(score, 3), round(dist, 3), (nx, ny, obs.theta))
             if best is None or cand[:2] < best[:2]:
                 best = cand
     if best is None:

@@ -1,8 +1,9 @@
 """
-地图加载接口
-新增地图：
-1. 新建一个 ``scenario_<地图名>.py`` 文件，并提供无参数的 ``create()`` 函数
+地图加载接口（scenarios/ 包）
+所有地图文件都放在本目录下，与规划器代码分开。新增地图：
+1. 在 ``scenarios/`` 下新建 ``scenario_<地图名>.py``，提供无参数的 ``create()`` 函数
 2. 在 ``SCENARIOS`` 中添加一行：``"<地图名>": "scenario_<地图名>"``
+   （只写模块名，不带 ``scenarios.`` 前缀，加载时按包内相对导入解析）
 切换 ``python main.py`` 默认运行的地图时，只需修改 ``DEFAULT_SCENARIO``
 命令行仍可用 ``--scenario <地图名>`` 临时选择其他已注册地图。
 """
@@ -43,7 +44,8 @@ def load(name: str | None = None) -> dict[str, Any]:
         available = ", ".join(names())
         raise ValueError(f"未知地图 {selected!r}；可选地图：{available}")
 
-    module = import_module(module_name)
+    # 包内相对导入：注册表里只写模块名，文件实际位于 scenarios/ 下
+    module = import_module(f".{module_name}", package=__name__)
     create = getattr(module, "create", None)
     if not callable(create):
         raise TypeError(f"地图模块 {module_name!r} 必须提供无参数的 create() 函数")

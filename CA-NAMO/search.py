@@ -1,34 +1,17 @@
-"""
-在增广路网上使用分支限界的最佳优先搜索。
-    f = g + h，g = 当前累积代价，h = 到目标的可采纳下界。
-
-A 搜索状态是 (node, frozenset(本次规划中已移除的障碍物))。
-经过当前被阻挡的边时需要"付费解锁"：操作功 W = difficulty * push_distance，按
-J = lambda_distance * D + W 加入 g。几何计算器 push_plan 负责判断移动是否可行、
-寻找放置位姿并给出推动距离；difficulty 在触碰前由 LLM/启发式估计。
-
-正确性保证：
-  * h = lambda_distance * 到目标的欧氏距离，是可采纳的（剩余行驶距离 >= 直线距离，且操作功项非负），因此第一个被弹出的目标状态即为代价最优解。
-  * 分支限界会剪掉任何 f >= 当前已找到的最优目标代价的状态。
-
-"""
+"""在增广路网上使用分支限界的最佳优先搜索"""
 
 from __future__ import annotations
-
 import heapq
 import itertools
 import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-
 from shapely.ops import unary_union
-
 from config import Config
 from roadmap import Roadmap, EdgeKey
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
 import geometry
-
 
 @dataclass
 class Plan:
@@ -60,6 +43,8 @@ class Planner:
         free_corridors = [rm.edge_corridor[k] for k in rm.edge_len
                           if not self.belief.blockers_of(k)]
         self.free_union = unary_union(free_corridors) if free_corridors else None
+        # 放置障碍物时需要知道目标在哪，避免把它挪到机器人剩余路线上
+        self._goal_xy = (gx, gy)
         self._removal_cache: Dict[
             int, Tuple[bool, float, Optional[tuple], float]
         ] = {}
@@ -170,7 +155,7 @@ class Planner:
             others = unary_union(polys) if polys else None
         feasible, dist, drop = geometry.push_plan(
             obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
-            others=others)
+            others=others, goal_xy=self._goal_xy)
         if not feasible:
             work = math.inf
         else:
