@@ -87,6 +87,32 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
     return inside
 
 
+def mean_rotation_radius(w: float, h: float) -> float:
+    """矩形绕形心转动时的等效力矩臂 r̄（单位：米）。
+
+    均匀压力下，滑动摩擦力矩 = μ(mg/A)·∬r dA，故转动 θ 的做功为
+
+        J2 = μmg·θ·r̄,   r̄ = (1/A)∬ r dA
+
+    对 w x h 的矩形积分得到闭式解：
+
+        r̄ = √(w²+h²)/6 + w²/(12h)·ln((√(w²+h²)+h)/w) + h²/(12w)·ln((√(w²+h²)+w)/h)
+
+    与 J1 = μmg·d 同为 μmg 的倍数，因此 r̄ 就是"1 弧度旋转折合多少米平移"，
+    正是规划器 rot_weight 需要的量纲。（已与数值积分核对，吻合到 1e-16。）
+
+    注意：这【不是】半对角线。半对角线是最远角点的轨迹半径，比 r̄ 大约 1.9 倍，
+    用它当代价会系统性高估旋转、让规划器过度回避转动。半对角线在本模块中仍用于
+    碰撞膨胀量与解卡半径——那两处要的是几何外延，不是力矩臂。
+    """
+    if w <= 0.0 or h <= 0.0:
+        return 0.0
+    s = math.hypot(w, h)
+    return (s / 6.0
+            + (w * w / (12.0 * h)) * math.log((s + h) / w)
+            + (h * h / (12.0 * w)) * math.log((s + w) / h))
+
+
 def wrap_dtheta(a: float, b: float) -> float:
     """角度在 [0, pi) 环上的最短有向旋转增量，范围 [-pi/2, pi/2)。"""
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
@@ -155,7 +181,7 @@ class PushPlanner:
         平移移动的网格连通性。
     rot_weight : float 或 None
         1 弧度旋转的代价（以平移距离为单位）。
-        None = 使用障碍物半对角线长度（最远角点扫过的弧长）。
+        None = 使用 mean_rotation_radius()，即均匀压力下的摩擦力矩臂 r̄。
     containment : "centroid" 或 "body"
         "centroid" = 仅形心必须在工作圆内（在网格上精确判定）。
         "body" = 全部四个角点都必须在工作圆内（更保守）。
@@ -199,10 +225,12 @@ class PushPlanner:
         self.thetas = np.arange(n_theta) * (math.pi / n_theta)
         self.X, self.Y = np.meshgrid(self.xs, self.ys, indexing="ij")
 
-        # 代价参数
+        # 代价参数。r_half_diag 只用于【几何】外延（膨胀量、解卡半径）；
+        # 旋转【代价】用的是力矩臂 r̄，两者相差约 1.9 倍，不可混用。
         self.r_half_diag = 0.5 * math.hypot(obstacle_w, obstacle_h)
         self.dtheta = math.pi / n_theta
-        self.rot_weight = self.r_half_diag if rot_weight is None else float(rot_weight)
+        self.rot_weight = (mean_rotation_radius(obstacle_w, obstacle_h)
+                           if rot_weight is None else float(rot_weight))
         self.rot_step_cost = self.rot_weight * self.dtheta
 
         # 保守膨胀：0.1*cell 可减少靠墙障碍物的误判阻塞，

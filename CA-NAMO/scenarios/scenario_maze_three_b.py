@@ -116,10 +116,6 @@ def create():
                     difficulty=1,
                     oid=5,
                 ),
-      
-
-
-
     ]
     start = (12.5, 1.5)
     goal = (2.5, 28.0)

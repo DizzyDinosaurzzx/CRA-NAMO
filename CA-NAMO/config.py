@@ -38,7 +38,10 @@ class Config:
     push_n_theta: int = 12
     push_connectivity: int = 8
     push_containment: str = "centroid"
-    push_rot_weight: float | None = None  # None=auto half-diagonal (physically correct arc length)
+    # 1 弧度旋转折合多少米平移。None = 自动取矩形的摩擦力矩臂 r̄（见
+    # push_planner.mean_rotation_radius），使 W = difficulty * se2_cost
+    # 恰好等于 μmg·d + μmg·θ·r̄ 这一物理做功模型。
+    push_rot_weight: float | None = None
     push_sample_theta: bool = True
     push_max_frames_per_action: int = 30
 

@@ -293,7 +293,18 @@ def push_path_plan(
 # ---------- 计算器 1c：推动做功 ---------- #
 
 def push_work(difficulty: float, push_distance: float) -> float:
-    """推开障碍物的操作功 W = difficulty * 推动距离。
+    """推开障碍物的操作功。difficulty 即物理模型中的 μmg。
+
+    刚体在均匀压力下被推动，做功分为平移与绕形心转动两部分：
+
+        J1 = μmg · d                 (平移距离 d)
+        J2 = μmg · θ · r̄             (转动 θ，r̄ = 摩擦力矩臂)
+
+        W  = J1 + J2 = difficulty · (d + θ·r̄)
+
+    `push_distance` 传入的正是括号里那个 `d + θ·r̄`：SE2 规划器以
+    rot_weight = r̄ 累加代价（见 push_planner.mean_rotation_radius），
+    所以它返回的 cost 天然就是这个和，无需在此再拆分。
 
     显式传入 difficulty 而不是从障碍物对象里读：规划期用的是估计值（来自信念），
     结算期用的是 ground truth（来自世界），两者绝不能混。

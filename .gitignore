@@ -1,6 +1,9 @@
 # ---- macOS ----
 .DS_Store
 
+# ---- 编辑器 ----
+.vscode/
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
