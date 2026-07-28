@@ -58,8 +58,7 @@ def c_obstacle(shape_poly: np.ndarray, obs_corners_local: np.ndarray) -> np.ndar
 
 def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
                   margin: float = 0.0) -> np.ndarray:
-    """判断点是否在逆时针凸多边形内部（向外膨胀 margin）。
-    向量化实现；保守近似（取外侧超集）。"""
+    """判断点是否在逆时针凸多边形内部（向外膨胀 margin）"""
     poly = np.asarray(poly, dtype=float)
     n = len(poly)
     if n == 0:
@@ -88,23 +87,7 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
 
 
 def mean_rotation_radius(w: float, h: float) -> float:
-    """矩形绕形心转动时的等效力矩臂 r̄（单位：米）。
-
-    均匀压力下，滑动摩擦力矩 = μ(mg/A)·∬r dA，故转动 θ 的做功为
-
-        J2 = μmg·θ·r̄,   r̄ = (1/A)∬ r dA
-
-    对 w x h 的矩形积分得到闭式解：
-
-        r̄ = √(w²+h²)/6 + w²/(12h)·ln((√(w²+h²)+h)/w) + h²/(12w)·ln((√(w²+h²)+w)/h)
-
-    与 J1 = μmg·d 同为 μmg 的倍数，因此 r̄ 就是"1 弧度旋转折合多少米平移"，
-    正是规划器 rot_weight 需要的量纲。（已与数值积分核对，吻合到 1e-16。）
-
-    注意：这【不是】半对角线。半对角线是最远角点的轨迹半径，比 r̄ 大约 1.9 倍，
-    用它当代价会系统性高估旋转、让规划器过度回避转动。半对角线在本模块中仍用于
-    碰撞膨胀量与解卡半径——那两处要的是几何外延，不是力矩臂。
-    """
+    """矩形绕形心转动时的等效力矩臂r̄"""
     if w <= 0.0 or h <= 0.0:
         return 0.0
     s = math.hypot(w, h)
@@ -117,10 +100,7 @@ def wrap_dtheta(a: float, b: float) -> float:
     """角度在 [0, pi) 环上的最短有向旋转增量，范围 [-pi/2, pi/2)。"""
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
 
-
-# =============================================================================
-# 2. SAT 碰撞检测（独立验证，不依赖规划器网格）
-# =============================================================================
+# ============ SAT 碰撞检测 ============= #
 
 def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
     """分离轴定理：判断两个凸多边形是否相交。"""
@@ -137,11 +117,7 @@ def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
             if pa.max() < pb.min() - eps or pb.max() < pa.min() - eps:
                 return False
     return True
-
-
-# =============================================================================
-# 3. PushPlanner：SE2 网格 + Dial 桶队列 Dijkstra
-# =============================================================================
+# ============ SE2网络+ Dial桶队列 Dijkstra ============= #
 
 @dataclass
 class PushPlanResult:
@@ -156,36 +132,7 @@ class PushPlanResult:
 
 
 class PushPlanner:
-    """矩形障碍物的 SE2 最小推动路径规划器。
-
-    在满足静态障碍物约束和可选工作圆约束的前提下，规划从起始位姿到目标位姿的
-    连续推动路径。
-
-    参数
-    ----------
-    wall_polys : 列表，元素为 (n,2) ndarray
-        静态墙壁的凸多边形。
-    obstacle_w, obstacle_h : float
-        被推矩形的尺寸。
-    bounds : (xmin, xmax, ymin, ymax)
-        搜索空间边界框。
-    robot_pos : (rx, ry)
-        工作圆圆心（推动时机器人所在位置）。
-    work_radius : float
-        工作圆半径。inf = 无约束。
-    cell : float
-        平移网格单元尺寸。
-    n_theta : int
-        [0, pi) 范围内的角度划分数。
-    connectivity : 8 或 16
-        平移移动的网格连通性。
-    rot_weight : float 或 None
-        1 弧度旋转的代价（以平移距离为单位）。
-        None = 使用 mean_rotation_radius()，即均匀压力下的摩擦力矩臂 r̄。
-    containment : "centroid" 或 "body"
-        "centroid" = 仅形心必须在工作圆内（在网格上精确判定）。
-        "body" = 全部四个角点都必须在工作圆内（更保守）。
-    """
+    """矩形障碍物的 SE2 最小推动路径规划器。"""
 
     _W_AXIS = 990
     _W_DIAG = 1400
@@ -325,19 +272,7 @@ class PushPlanner:
         return False
 
     def _unstick_start(self, start_idx: Tuple[int, int, int]) -> int:
-        """把因【栅格吸附 + margin 膨胀】而被误判占据的起点邻域重新标记为可通行。
-
-        障碍物卡在窄门里时会出现这种情况：它真实位姿并不碰墙，但吸附到格心后
-        再套上 margin，矩形就会啃进墙里几毫米，于是起点自身以及它逃出窄口所需
-        的每一个中间格子全部 free=False，Dijkstra 一步也扩展不出去，该障碍物被
-        永久判定为不可推动（详见 two_doors_hidden_c 中的障碍物 B）。
-
-        解法：以起点为种子做一次 BFS，只接纳【精确 SAT 判定不碰墙】的格子，
-        并把它们并入 self.allowed。膨胀量只在这一小片"脱困区"内被豁免，
-        其余空间仍按保守 margin 处理，因此不会牺牲全局的离散安全性。
-
-        返回被解锁的状态数（0 表示起点本来就通畅，无需处理）。
-        """
+        """优化器起点解卡：如果起点被膨胀障碍物阻塞，则在其附近搜索一小片可通行区域，豁免这些格子。"""
         if self._unstuck:                 # 还原上一个起点留下的豁免
             np.copyto(self.allowed, self._allowed_base)
             self._unstuck = False
@@ -347,7 +282,6 @@ class PushPlanner:
             return 0                      # 在工作圆外，不是膨胀造成的，交给上层报错
         if self._true_collision(self._pose(*start_idx)):
             return 0                      # 真的埋在墙里，不能豁免
-
         # 只在起点附近搜索：脱困所需的位移是亚米级的，限制半径可避免
         # 在真正被墙围死时退化成全图 BFS。
         max_cells = max(3, int(math.ceil(self.r_half_diag / self.cell)) + 2)
@@ -407,11 +341,6 @@ class PushPlanner:
 
     # ------------------------------------------------- Dial 桶队列 Dijkstra
     def _search(self, start_idx: Tuple[int, int, int]):
-        """Dial 桶队列 Dijkstra 算法。所有边权重为非负整数。
-
-        返回 (dist_int, parent)；dist_int == INF 表示不可达。
-        真实代价 = dist_int * self.unit。
-        """
         N = self.nx * self.ny * self.n_theta
         allowed = self.allowed.reshape(-1)
         INF = np.int64(1) << 62
@@ -468,9 +397,7 @@ class PushPlanner:
 
     # ----------------------------------------------------------------- 规划
     def set_corridor(self, corridor_polys: List[np.ndarray]):
-        """设置障碍物必须腾空的走廊区域。
-        在构造后调用，为 plan_anywhere() 添加路径阻挡信息。
-        """
+        """设置障碍物必须腾空的走廊区域 """
         rblock = np.zeros((self.nx, self.ny, self.n_theta), dtype=bool)
         for k, th in enumerate(self.thetas):
             O = rect_corners(0.0, 0.0, self.obstacle_w, self.obstacle_h, th)
@@ -482,12 +409,7 @@ class PushPlanner:
 
     def plan_anywhere(self,
                       start_pose: Tuple[float, float, float]) -> PushPlanResult:
-        """规划最小代价推动到【任意】满足腾空 route_block 走廊的位姿。
-
-        从 start_pose 出发搜索整个 SE2 可达空间，寻找 route_block=False
-        （障碍物不再阻挡走廊）的最优目标。这是原 push_obstacle_planner 的行为
-        ——目标由规划器自行选择，而非由外部环状采样器指定。
-        """
+        """规划最小代价推动到【任意】满足腾空 route_block 走廊的位姿"""
         start_idx = self._snap(*start_pose)
 
         if not self.in_disk[start_idx]:
@@ -534,10 +456,7 @@ class PushPlanner:
     def plan_path(self,
                   start_pose: Tuple[float, float, float],
                   goal_pose: Tuple[float, float, float]) -> PushPlanResult:
-        """在 SE2 中规划从起始位姿到目标位姿的最小代价推动路径。
-
-        返回包含路径、代价和诊断信息的 PushPlanResult。
-        """
+        """在 SE2 中规划从起始位姿到目标位姿的最小代价推动路径"""
         start_idx = self._snap(*start_pose)
         goal_idx = self._snap(*goal_pose)
 
@@ -580,11 +499,7 @@ class PushPlanner:
 
         return PushPlanResult(True, "", cost, trans, rot, poses)
 
-
-# =============================================================================
-# 4. 工厂函数：从 CA-NAMO 数据构建 PushPlanner
-# =============================================================================
-
+# ============ 工厂函数 ============= #
 def polygon_exterior_coords(polygon) -> np.ndarray:
     """提取 shapely Polygon 的外边界顶点为 numpy 数组（去除闭合重复点）。"""
     # shapely Polygon 的外边界坐标包含闭合重复点；将其去除
@@ -593,7 +508,6 @@ def polygon_exterior_coords(polygon) -> np.ndarray:
     if len(coords) >= 2 and coords[0] == coords[-1]:
         coords = coords[:-1]
     return np.array(coords, dtype=float)
-
 
 def build_push_planner(wall_polys,             # shapely Polygon 列表 — 不可穿越区域轮廓
                        obstacle_w: float,
@@ -607,26 +521,7 @@ def build_push_planner(wall_polys,             # shapely Polygon 列表 — 不�
                        rot_weight: Optional[float] = None,
                        containment: str = "centroid",
                        verbose: bool = False) -> PushPlanner:
-    """从 CA-NAMO 风格的数据构建 PushPlanner。
-
-    参数
-    ----------
-    wall_polys : shapely Polygon 列表
-        不可穿越区域的轮廓：静态墙体 + 其他可移动障碍物（用于构建构型空间）。
-    obstacle_w, obstacle_h : float
-        被推矩形的尺寸。
-    bounds : (xmin, xmax, ymin, ymax)
-        搜索空间的边界框。
-    robot_pos : (rx, ry)
-        推动时机器人的位置（工作圆圆心）。
-    work_radius : float
-        工作圆半径。inf = 无圆形约束。
-    cell, n_theta, connectivity, rot_weight, containment :
-        透传给 PushPlanner。
-    verbose : bool
-        构造时打印诊断信息。
-    """
-    # 从 shapely 多边形提取凸顶点数组
+    """从 CA-NAMO 风格的数据构建 PushPlanner。"""
     wall_verts = [polygon_exterior_coords(p) for p in wall_polys]
 
     return PushPlanner(
