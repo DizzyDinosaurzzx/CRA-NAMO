@@ -28,14 +28,14 @@ class Config:
 
     # -------- 搜索 -------- #
     use_llm_ordering: bool = True
-    max_expansions: int = 100000    # A* 扩展次数上限
+    max_expansions: int = 100000    
 
     # -------- 在线循环 -------- #
     step_execute_edges: int = 1     # 重新感知的刷新频率（走几步就重新更新一遍感知）
-    max_replans: int = 1000          # 规划-执行-感知-重规划循环上限
+    max_replans: int = 1000         
 
-    # -------- LLM（DeepSeek）-------- #
-    deepseek_api_key: str = ""             # 为空时读环境变量 DEEPSEEK_API_KEY；仍为空则用启发式
+    # -------- LLM-------- #
+    deepseek_api_key: str = ""     
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash"
     llm_timeout: float = 30.0
@@ -43,8 +43,8 @@ class Config:
 
     # -------- 其他 -------- #
     rng_seed: int = 0
-    out_dir: str = "img"       # 可视化结果的输出目录
-    save_frames: bool = bool   # 是否保存过程帧（img/frames_<地图名>/）
+    out_dir: str = "img"       
+    save_frames: bool = True   
     verbose: bool = True
 
     def __post_init__(self):

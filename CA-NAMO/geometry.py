@@ -13,15 +13,20 @@ from shapely.ops import unary_union
 from obstacle import MovableObstacle
 from config import Config
 
+
 # -------------计算器 1：推动规划--------------- #
 
 # 放置位姿的软偏好权重，单位是"等效推动米数"，直接加到推动距离上参与比较。
-# 障碍物可在可达范围内任意平移，只受墙体与其他障碍物约束，不存在"只能推不能拉"
-# 的方向限制，因此这里没有与机器人相对方位有关的罚分。
-W_ROUTE = 5.0    # 落点压在"障碍物->目标"直线走廊上：机器人下一段路会再被它挡住
-W_AVOID = 0.5    # 落点重新挡住了其他当前畅通的通道
+# 障碍物可在可达范围内任意平移，只受墙体与其他障碍物约束
 
-def _swept_region(obs: MovableObstacle, nx: float, ny: float) -> Polygon: #计算矩形从当前位姿平移到 (nx, ny) 时扫过的区域
+W_ROUTE = 5.0     # 落点压在"障碍物->目标"直线走廊上：机器人下一段路会再被它挡住
+W_AVOID = 0.5     # 落点重新挡住了其他当前畅通的通道
+# 落点仍压在该障碍物原本阻挡的其他通道上：机器人稍后还得再推一次。
+# 八张图实测：0 -> 总J 1032/重复推 24；0.5 与 1.0 同为最优 841.7/2；2.0 起回升到
+# 1009.5。取平台区上沿。
+W_RESIDUAL = 1.0
+
+def _swept_region(obs: MovableObstacle, nx: float, ny: float) -> Polygon: #计算矩形平移时扫过的区域
     start = obs.polygon
     end = obs.polygon_at(nx, ny)
     return unary_union([start, end]).convex_hull
@@ -35,6 +40,7 @@ def push_plan(
     cfg: Config,
     others: Optional[Polygon] = None,  # 其他可移动障碍物当前占据的区域（硬约束：不得碰撞）
     goal_xy: Optional[Tuple[float, float]] = None,   # 目标点：用于避开剩余路线
+    residual: Optional[Polygon] = None,  # 该障碍物当前阻挡的全部通道（软约束：尽量一并让开）
 ) -> Tuple[bool, float, Optional[Tuple[float, float, float]]]:
 
     """
@@ -98,11 +104,20 @@ def push_plan(
             blocks_route = 1 if (route is not None
                                  and end_poly.intersects(route)) else 0
             penalty = 1 if (avoid is not None and end_poly.intersects(avoid)) else 0
+            # 仍压在该障碍物原本阻挡的通道上的比例（0~1）。硬约束只保证腾空了当前
+            # 这一条边，这一项负责把"顺带让开其他通道"变成偏好，抑制反复推同一个
+            # 物体。用面积占比而非计数：一次相交运算即可，且天然归一化。
+            residual_frac = 0.0
+            if residual is not None:
+                inter = end_poly.intersection(residual)
+                if not inter.is_empty:
+                    residual_frac = inter.area / end_poly.area
             dist = math.hypot(nx - cx, ny - cy)
-            # 加权求和而非字典序：两个偏好都折算成"等效米数"叠加到推动距离上。
+            # 加权求和而非字典序：各偏好都折算成"等效米数"叠加到推动距离上。
             # 字典序会让任意一项无条件压倒距离，从而选出很远、很糟的落点——迷宫里
             # route 只是直线代理、并不可靠，一旦让它独裁就会把障碍物推进真正的通道。
-            score = dist + W_ROUTE * blocks_route + W_AVOID * penalty
+            score = (dist + W_ROUTE * blocks_route + W_AVOID * penalty
+                     + W_RESIDUAL * residual_frac)
             cand = (round(score, 3), round(dist, 3), (nx, ny, obs.theta))
             if best is None or cand[:2] < best[:2]:
                 best = cand
@@ -112,8 +127,7 @@ def push_plan(
 
 
 def push_work(obs: MovableObstacle, push_distance: float) -> float:
-    """推开障碍物的操作功 W = difficulty x push_distance。"""
-    return obs.difficulty * push_distance
+    return obs.difficulty * push_distance   #推开障碍物的操作功
 
 
 # -------------计算器 2：自由空间距离计算器--------------- #

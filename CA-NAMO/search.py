@@ -22,7 +22,6 @@ class Plan:
     def removals(self):
         return [a for a in self.actions if a["type"] == "remove"]
 
-
 class Planner:
     def __init__(self, roadmap: Roadmap, belief: Belief,
                  estimator: DifficultyEstimator, cfg: Config):
@@ -45,9 +44,12 @@ class Planner:
         self.free_union = unary_union(free_corridors) if free_corridors else None
         # 放置障碍物时需要知道目标在哪，避免把它挪到机器人剩余路线上
         self._goal_xy = (gx, gy)
+        # 缓存键是 (oid, edge_key)：放置方案现在依赖具体要打通哪一条边
         self._removal_cache: Dict[
-            int, Tuple[bool, float, Optional[tuple], float]
+            Tuple[int, EdgeKey], Tuple[bool, float, Optional[tuple], float]
         ] = {}
+        # oid -> 该障碍物当前阻挡的全部走廊并集（软罚分用），与边无关故按 oid 缓存
+        self._blocked_union_cache: Dict[int, Optional[object]] = {}
 
         def h(node):
             x, y = rm.nodes[node]
@@ -128,21 +130,39 @@ class Planner:
         removals = []
         extra = 0.0
         for oid in blockers:
-            feasible, work, drop, push_dist = self._removal(oid)
+            feasible, work, drop, push_dist = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
             extra += work
             removals.append((oid, drop, push_dist, work))
         return base + extra, removals
 
-    def _removal(self, oid: int):
-        """计算把障碍物移出其全部阻挡边所需的做功和放置位姿。"""
-        if oid in self._removal_cache:
-            return self._removal_cache[oid]
+    def _removal(self, oid: int, key: EdgeKey):
+        """计算把障碍物移出【这一条边】所需的做功和放置位姿。
+
+        硬约束只要求腾空 `key` 这一条通道，而不是该障碍物当前阻挡的所有通道。
+        密集路网下一个箱子会同时压住几十条边，它们的并集是个远大于箱体的区域，
+        要整体挪出去往往需要 3 米以上的位移——超过 R_push 就直接判为不可推动，
+        于是机器人被迫绕远路。按边计算后所需位移降到亚米级（实测中位 0.6 m）。
+
+        代价是乐观：`_edge_cost` 里同一 oid 一旦进入 removed_in_plan，后续边就
+        当作已通行，但这次放置只保证腾空了 `key`。执行后重新感知会得到真实的
+        阻挡关系，由重规划纠正——与本规划器对未知空间的乐观假设是同一套路子。
+        """
+        cache_key = (oid, key)
+        if cache_key in self._removal_cache:
+            return self._removal_cache[cache_key]
         obs = self.belief.obstacle(oid)
-        own = [self.roadmap.edge_corridor[k]
-               for k, bs in self.belief.edge_blockers.items() if oid in bs]
-        must_clear = unary_union(own) if own else None
+        must_clear = self.roadmap.edge_corridor[key]
+        # 软项：该障碍物当前阻挡的全部通道（即旧版的硬 must_clear）。落点仍压在
+        # 上面就说明机器人稍后还得再推它一次，按面积占比计入罚分。每个 oid 只算
+        # 一次并缓存——它与具体打通哪条边无关。
+        residual = self._blocked_union_cache.get(oid, False)
+        if residual is False:
+            own = [self.roadmap.edge_corridor[k]
+                   for k, bs in self.belief.edge_blockers.items() if oid in bs]
+            residual = unary_union(own) if own else None
+            self._blocked_union_cache[oid] = residual
         avoid = self.free_union
         others = None
         if self.cfg.check_obstacle_collision:
@@ -155,7 +175,7 @@ class Planner:
             others = unary_union(polys) if polys else None
         feasible, dist, drop = geometry.push_plan(
             obs, self.roadmap.static_free, must_clear, avoid, self.cfg,
-            others=others, goal_xy=self._goal_xy)
+            others=others, goal_xy=self._goal_xy, residual=residual)
         if not feasible:
             work = math.inf
         else:
@@ -163,7 +183,7 @@ class Planner:
             estimated_diff = self.belief.get_difficulty(oid, self.est)
             work = estimated_diff * dist
         res = (feasible, work, drop, dist)
-        self._removal_cache[oid] = res
+        self._removal_cache[cache_key] = res
         return res
 
     def _llm_bias(self, removals) -> float:
