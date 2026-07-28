@@ -189,21 +189,65 @@ class Belief:
         self._update_edges_for(obs)
 
     # -------------------- 需求3: 机器人自身碰撞感知 ----------------------
+    @staticmethod
+    def _first_contact_t(from_pos, to_pos, poly: Polygon, radius: float,
+                         coarse: int = 64, refine: int = 20) -> float:
+        """机器人圆盘沿 from->to 平移时，首次碰到 `poly` 的行程比例 t ∈ [0, 1]。
+
+        先粗扫定位到第一个接触样本，再在它与上一个未接触样本之间二分。不能直接对
+        [0, 1] 二分：接触区间可能只是路径中段的一小段，终点未必仍在接触，二分会
+        整段错过。粗扫漏掉的极短擦碰按 1.0 处理（相当于走完整条边，偏保守）。
+        """
+        fx, fy = from_pos
+        dx, dy = to_pos[0] - fx, to_pos[1] - fy
+
+        def touching(t: float) -> bool:
+            return poly.distance(Point(fx + dx * t, fy + dy * t)) <= radius
+
+        if touching(0.0):
+            return 0.0
+        lo = 0.0
+        for i in range(1, coarse + 1):
+            t = i / coarse
+            if touching(t):
+                hi = t
+                for _ in range(refine):
+                    mid = 0.5 * (lo + hi)
+                    if touching(mid):
+                        hi = mid
+                    else:
+                        lo = mid
+                return hi
+            lo = t
+        return 1.0
+
     def check_robot_collision(
         self, from_pos, to_pos,
         world_obstacles: List[MovableObstacle],
         cfg: Config,
-    ) -> List[int]:
-        """检查机器人移动是否撞到未感知障碍物，撞到则 force_reveal。"""
+    ) -> Tuple[List[int], float]:
+        """检查机器人沿 from->to 是否撞上未感知障碍物，撞到则 force_reveal。
+
+        返回 `(revealed_oids, t_contact)`，`t_contact` 是首次接触处的行程比例，
+        无碰撞时为 1.0。**只揭示最先接触到的那些障碍物**：机器人在接触点就停住了，
+        走廊后半段扫到的东西它根本没走到，一并揭示等于白送信息。
+        """
         corridor = LineString([from_pos, to_pos]).buffer(cfg.robot_radius, cap_style=1)
+        candidates = [w for w in world_obstacles
+                      if w.oid not in self.perceived
+                      and corridor.intersects(w.polygon)]
+        if not candidates:
+            return [], 1.0
+
+        ts = [self._first_contact_t(from_pos, to_pos, w.polygon, cfg.robot_radius)
+              for w in candidates]
+        t_hit = min(ts)
         revealed: List[int] = []
-        for w in world_obstacles:
-            if w.oid in self.perceived:
-                continue
-            if corridor.intersects(w.polygon):
+        for w, t in zip(candidates, ts):
+            if t <= t_hit + 1e-6:          # 同时撞上的算一起
                 self.force_reveal(w)
                 revealed.append(w.oid)
-        return revealed
+        return revealed, t_hit
 
     # -------------------- 需求4: 触摸感知难度 ----------------------
     def touch_check(

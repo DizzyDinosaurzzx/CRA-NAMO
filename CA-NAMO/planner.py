@@ -139,19 +139,36 @@ class OnlineNAMO:
                         break
                 elif act["type"] == "move":
                     prev_node = node    # 需求3: 记录移动前位置
+                    from_pos = self.roadmap.nodes[prev_node]
+                    to_pos = self.roadmap.nodes[act["v"]]
+                    # 需求3: 碰撞感知。必须在记账与落子【之前】做：撞上未感知障碍物
+                    # 时机器人只能推进到接触点，不可能穿过去。原先先付钱、先把 node
+                    # 挪到 v、再检测，命中后只记一帧就继续，机器人会停在障碍物内部
+                    # 甚至另一侧，这条边却按畅通计费。停在内部时它的所有出边随即被
+                    # 新揭示的障碍物封死，下一轮还会伪装成"无可行解"的失败。
+                    hit_oids, t_contact = self.belief.check_robot_collision(
+                        from_pos, to_pos, self.world, cfg)
+                    if hit_oids:
+                        contact_pos = (
+                            from_pos[0] + (to_pos[0] - from_pos[0]) * t_contact,
+                            from_pos[1] + (to_pos[1] - from_pos[1]) * t_contact)
+                        # 推进到接触点再退回 prev_node：机器人始终留在路网节点上，
+                        # 这一去一回的路程照实计费（绝不低估）。退回后该边已被新揭示
+                        # 的障碍物封死，同一方案不会被再次选中，因此不会死循环。
+                        blocked_dist = 2.0 * t_contact * act["dist"]
+                        res.walk_cost += cfg.lambda_distance * blocked_dist
+                        res.J += cfg.lambda_distance * blocked_dist
+                        # 撞上就是物理接触，被撞者的真实 difficulty 随之暴露
+                        self.belief.touch_check(contact_pos, self.world, cfg)
+                        self.belief.perceive(self.world, from_pos)
+                        self._capture_frame(
+                            res, node, f"collision revealed {hit_oids} -> replan")
+                        break
                     res.walk_cost += cfg.lambda_distance * act["dist"]
                     res.J += cfg.lambda_distance * act["dist"]
                     node = act["v"]
                     res.robot_track.append(self.roadmap.nodes[node])
                     moves_done += 1
-                    # 需求3: 碰撞感知
-                    hit_oids = self.belief.check_robot_collision(
-                        self.roadmap.nodes[prev_node],
-                        self.roadmap.nodes[node],
-                        self.world, cfg)
-                    if hit_oids:
-                        self._capture_frame(res, node,
-                            f"collision revealed {hit_oids}")
                     # 触摸感知: 获知被触碰障碍物的真实 difficulty
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
