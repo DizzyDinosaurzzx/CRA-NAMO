@@ -1,7 +1,6 @@
 """CA-NAMO的全局配置"""
 
 from dataclasses import dataclass, field
-
 @dataclass
 class Config:
     # -------- 机器人 -------- #
@@ -21,8 +20,7 @@ class Config:
     drop_ring_samples: int = 24     # 在障碍物周围尝试的候选放置方向数
     drop_radius_steps: int = 6      # 尝试的候选放置距离数（0..R_push）
     check_obstacle_collision: bool = True  # 放置障碍物时是否检测与其他障碍物的碰撞
-    full_reveal_on_contact: bool = False   # 推动碰撞后：True=直接获知被撞障碍物全部信息；
-                                           # False(更真实)=只知“此处有物”，移开遮挡后才完整感知
+    full_reveal_on_contact: bool = False   # 推动碰撞后：True=获知被撞障碍物全部信息；False=只知“此处有物”
 
     # -------- 路网 -------- #
     grid_step: float = 1    # 静态自由空间中路网节点的网格间距
@@ -30,11 +28,11 @@ class Config:
 
     # -------- 搜索 -------- #
     use_llm_ordering: bool = True
-    max_expansions: int = 200000    # A* 扩展次数上限
+    max_expansions: int = 100000    # A* 扩展次数上限
 
     # -------- 在线循环 -------- #
     step_execute_edges: int = 1     # 重新感知的刷新频率（走几步就重新更新一遍感知）
-    max_replans: int = 2000          # 规划-执行-感知-重规划循环上限
+    max_replans: int = 1000          # 规划-执行-感知-重规划循环上限
 
     # -------- LLM（DeepSeek）-------- #
     deepseek_api_key: str = ""             # 为空时读环境变量 DEEPSEEK_API_KEY；仍为空则用启发式
