@@ -31,7 +31,7 @@ from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
-from search import Planner
+from search import Planner, push_signature
 import geometry
 
 # 仿真结果汇总
@@ -83,6 +83,9 @@ class OnlineNAMO:
         self.estimator = DifficultyEstimator(cfg)   # 障碍物难度估算器
         self.belief = Belief(self.roadmap, cfg)     # 机器人的部分可观测信念
         self._plan_paths: List[dict] = []           # 当前规划出的所有路径（供逐帧可视化）
+        # 执行期证实为"一步都推不动"的推动尝试。规划器只能读信念，而撞墙这类失败
+        # 在信念里留不下痕迹，必须由执行侧单独记账，否则同一个死计划会被无限重放。
+        self.failed_pushes: set = set()
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
         # 把起点/终点插入路网；该点放不下机器人圆盘时退化到最近的合法节点
@@ -103,7 +106,8 @@ class OnlineNAMO:
         self.belief.perceive(self.world, self.roadmap.nodes[node])
         self._capture_frame(res, node, "start")
 
-        planner = Planner(self.roadmap, self.belief, self.estimator, cfg)
+        planner = Planner(self.roadmap, self.belief, self.estimator, cfg,
+                          self.failed_pushes)
 
         for cycle in range(cfg.max_replans):
             t0 = time.time()
@@ -145,6 +149,11 @@ class OnlineNAMO:
                         res.J += executed_work
                         if act["oid"] not in res.removed:
                             res.removed.append(act["oid"])
+                    elif not push_success:
+                        # 一步都没推动就撞停：世界和信念都毫发未动，下一轮必然规划出
+                        # 同一个计划。登记这次失败，逼规划器改走别的方案——最坏情况是
+                        # 尽快报"无可行解"，而不是空转到 max_replans 耗尽。
+                        self.failed_pushes.add((push_signature(obs), act["key"]))
                     if not push_success:
                         # 撞上了，作废本次放置并重规划换位置
                         self._handle_push_collision(res, node, act["oid"], hits)

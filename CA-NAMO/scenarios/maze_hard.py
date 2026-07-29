@@ -66,8 +66,8 @@ def create():
             l=2,
             d=2,
             theta=0.0,
-            material="concrete_block",  # 25.0 x 4.00 = 100.0
-            difficulty=100,
+            material="box",  # 25.0 x 4.00 = 100.0
+            difficulty=0.1,
             oid=1,
         ),
 

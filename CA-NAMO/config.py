@@ -13,7 +13,7 @@ class Config:
     robot_radius: float = 0.3    # 机器人半径
 
     # -------- 代价函数 J = lambda * D + W -------- #
-    lambda_distance: float = 1    # 移动做工系数
+    lambda_distance: float = 100000    # 移动做工系数
 
     # -------- 感知 -------- #
     R_perc: float = 1000.0       # 感知半径
@@ -40,11 +40,11 @@ class Config:
 
     # -------- 搜索 -------- #
     use_llm_ordering: bool = True
-    max_expansions: int = 10000    
+    max_expansions: int = 100000    
 
     # -------- 在线循环 -------- #
     step_execute_edges: int = 1     # 重新感知频率
-    max_replans: int = 1000         
+    max_replans: int = 10000         
 
     # -------- LLM-------- #
     deepseek_api_key: str = ""     
