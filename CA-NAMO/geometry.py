@@ -123,6 +123,7 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
         rot_weight=cfg.push_rot_weight,
         containment=cfg.push_containment,
         forward_penalty=cfg.push_forward_penalty,
+        oid=obs.oid,
         verbose=cfg.verbose,
     )
     _PLANNER_CACHE[key] = planner

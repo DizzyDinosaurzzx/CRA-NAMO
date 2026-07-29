@@ -297,6 +297,9 @@ def main():
     # 运行仿真sim
     res = sim.run()
 
+    # 把运行期的 [push] 日志与下面的统计结果隔开
+    print("-" * 60)
+
     # 打印仿真统计结果
     print(f"Success           : {res.success}   ({res.message})")
     print(f"Total cost J       : {res.J}")

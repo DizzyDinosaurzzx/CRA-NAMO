@@ -34,9 +34,9 @@ class Config:
     push_rot_weight: float | None = None
     push_max_frames_per_action: int = 30
 
-    # -------- 路网（全图统一网格） -------- #
-    grid_step: float = 0.5    # 路网节点网格间距
-    conn_radius: float = 1  # 路网节点的连接半径
+    # -------- 路网 -------- #
+    grid_step: float = 1    # 路网节点网格间距
+    conn_radius: float = 2  # 路网节点的连接半径
 
     # -------- 搜索 -------- #
     use_llm_ordering: bool = True

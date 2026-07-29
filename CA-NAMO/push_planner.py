@@ -207,10 +207,12 @@ class PushPlanner:
                  rot_weight: Optional[float] = None,
                  containment: str = "centroid",
                  forward_penalty: float = 0.0,
+                 oid: int = -1,
                  verbose: bool = False):
         assert connectivity in (8, 16), "connectivity supports only 8 or 16"
         assert containment in ("body", "centroid")
 
+        self.oid = oid          # 仅用于日志标识，不参与任何计算
         self.forward_penalty = float(forward_penalty)
         self.wall_polys = wall_polys
         self.obstacle_w = obstacle_w
@@ -257,8 +259,7 @@ class PushPlanner:
         self._cache: Optional[Tuple[np.ndarray, np.ndarray, int]] = None
 
         if verbose:
-            print(f"[push] {obstacle_w:g}x{obstacle_h:g} obstacle | "
-                  f"grid {self.nx}x{self.ny}x{n_theta} @ cell {cell:.2f} | "
+            print(f"[push] oid={self.oid} | "
                   f"free {self.free.mean() * 100:.0f}% "
                   f"-> reachable {self.allowed.mean() * 100:.0f}%")
 
@@ -424,7 +425,7 @@ class PushPlanner:
             self._unstuck_for = start_idx
             if self.verbose:
                 x, y, _ = self._pose(*start_idx)
-                print(f"[push] unstuck {freed} states at ({x:.1f}, {y:.1f}) "
+                print(f"[push] oid={self.oid} unstuck {freed} states at ({x:.1f}, {y:.1f}) "
                       f"clearance={clearance:.3f}")
         return freed
 
@@ -774,6 +775,7 @@ def build_push_planner(wall_polys,             # shapely Polygon 列表 — 不�
                        rot_weight: Optional[float] = None,
                        containment: str = "centroid",
                        forward_penalty: float = 0.0,
+                       oid: int = -1,
                        verbose: bool = False) -> PushPlanner:
     """从 CA-NAMO 风格的数据构建 PushPlanner。"""
     wall_verts = [polygon_exterior_coords(p) for p in wall_polys]
@@ -791,5 +793,6 @@ def build_push_planner(wall_polys,             # shapely Polygon 列表 — 不�
         rot_weight=rot_weight,
         containment=containment,
         forward_penalty=forward_penalty,
+        oid=oid,
         verbose=verbose,
     )
