@@ -28,20 +28,32 @@ import push_planner
 _SWEPT_MAX_DTHETA = math.pi / 12.0
 
 
+def _swept_between(obs: MovableObstacle, a, b) -> Polygon:
+    """矩形从位姿 a=(x, y, theta) 运动到 b 所扫过的区域。
+
+    `_swept_region` 是它"起点固定为障碍物当前位姿"的特例。抽出来是为了让
+    push_plan_se2 能用**执行期一模一样的模型**去复核整条规划路径。
+    """
+    ax, ay, ath = a
+    bx, by, bth = b
+    dtheta = push_planner.wrap_dtheta(ath, bth)
+    if abs(dtheta) < 1e-9:
+        return unary_union([obs.polygon_at(ax, ay, ath),
+                            obs.polygon_at(bx, by, ath)]).convex_hull
+    steps = max(2, int(math.ceil(abs(dtheta) / _SWEPT_MAX_DTHETA)))
+    poses = [obs.polygon_at(ax + (bx - ax) * i / steps,
+                            ay + (by - ay) * i / steps,
+                            ath + dtheta * i / steps)
+             for i in range(steps + 1)]
+    return unary_union([unary_union([p, q]).convex_hull
+                        for p, q in zip(poses, poses[1:])])
+
+
 def _swept_region(obs: MovableObstacle, nx: float, ny: float,
                   theta: Optional[float] = None) -> Polygon:
     """矩形从当前位姿运动到 (nx, ny, theta) 所扫过的区域"""
-    start = obs.polygon
-    dtheta = 0.0 if theta is None else push_planner.wrap_dtheta(obs.theta, theta)
-    if abs(dtheta) < 1e-9:
-        return unary_union([start, obs.polygon_at(nx, ny)]).convex_hull
-    steps = max(2, int(math.ceil(abs(dtheta) / _SWEPT_MAX_DTHETA)))
-    poses = [obs.polygon_at(obs.x + (nx - obs.x) * i / steps,
-                            obs.y + (ny - obs.y) * i / steps,
-                            obs.theta + dtheta * i / steps)
-             for i in range(steps + 1)]
-    return unary_union([unary_union([a, b]).convex_hull
-                        for a, b in zip(poses, poses[1:])])
+    return _swept_between(obs, (obs.x, obs.y, obs.theta),
+                          (nx, ny, obs.theta if theta is None else theta))
 
 
 # ---------- 计算器 1b：SE2 推动路径规划 ---------- #
@@ -132,6 +144,43 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
     return planner
 
 
+# 路径复核的重叠面积阈值。与 planner._CONTACT_AREA_EPS 同一口径：相切不算碰撞，
+# 否则紧挨着的两个障碍物会互相判死（谁都动不了）。
+_PATH_CONTACT_AREA_EPS = 1e-9
+
+
+def _path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
+    """逐段检查 SE2 路径的扫掠区，判据与 planner._world_collision 完全一致。
+
+    构型空间再保守也只是离散近似（格心逐点判定），而执行期判的是相邻位姿之间的
+    连续扫掠区。这里用同一个模型把路径过一遍，宁可换个落点或报无解，也不要交给
+    执行器一条注定撞车的路径——那会白跑一个重规划周期。
+
+    `blockers` 是 _blocker_index() 预处理过的 (多边形, 包围盒) 列表。地图上有上百个
+    墙体+障碍物，而一段扫掠区只可能碰到附近那几个，先用包围盒筛掉绝大多数，
+    再做真正的 shapely 布尔运算——这一步每次规划要跑几千遍，不筛会慢一个量级。
+    """
+    if not path or len(path) < 2 or not blockers:
+        return True
+    for a, b in zip(path, path[1:]):
+        swept = _swept_between(obs, a, b)
+        sminx, sminy, smaxx, smaxy = swept.bounds
+        for poly, (pminx, pminy, pmaxx, pmaxy) in blockers:
+            if pmaxx < sminx or pminx > smaxx or pmaxy < sminy or pminy > smaxy:
+                continue
+            if not swept.intersects(poly):
+                continue
+            if swept.intersection(poly).area > _PATH_CONTACT_AREA_EPS:
+                return False
+    return True
+
+
+def _blocker_index(static_obstacles, others_polys):
+    """(多边形, 包围盒) 列表，供 _path_is_clear_against 做包围盒预筛。"""
+    polys = [so.polygon for so in static_obstacles] + _polygon_parts(others_polys)
+    return [(p, p.bounds) for p in polys]
+
+
 def push_plan_se2(
     obs: MovableObstacle,
     must_clear_polys,                   # 必须被腾空的走廊多边形
@@ -157,8 +206,18 @@ def push_plan_se2(
                           for p in must_clear_polys] if must_clear_polys else []
         planner.set_corridor([c for c in corridor_verts if len(c) >= 3])
 
-        result = planner.plan_anywhere((obs.x, obs.y, obs.theta))
+        # 复核回调交给 plan_anywhere：它按代价升序逐个试落点，返回第一条过关的路径。
+        # 放在这里而不是拿到结果后再判，是为了不会"最便宜的那个落点不行 -> 整个
+        # 障碍物判为推不动"，那样会平白丢掉大量本来可行的推动。
+        blockers = _blocker_index(static_obstacles, others_polys)
+
+        def _validate(poses):
+            return _path_is_clear_against(obs, poses, blockers)
+
+        result = planner.plan_anywhere((obs.x, obs.y, obs.theta),
+                                       validate=_validate)
         if not result.success:
+            cfg.log(f"[push_plan_se2] oid={obs.oid} {result.reason}")
             return (False, None, math.inf, None)
         # 精确几何复核：规划器是在离散构型空间里判断"腾空"的，起点还会被吸附到格心，
         # 于是可能出现真实位姿压着走廊、格心却不压的错位——那样它会把"原地不动"当成
