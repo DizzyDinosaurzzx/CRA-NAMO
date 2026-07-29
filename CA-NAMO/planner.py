@@ -1,24 +1,4 @@
-"""
-CA-NAMO的在线"规划-执行-感知-重规划"循环
-
-本模块是 CA-NAMO 的核心调度器，负责将感知、规划、执行三个子系统串联成闭环：
-
-    感知 (Belief)       规划 (Planner)        执行 (OnlineNAMO)
-    ─────────────       ──────────────        ────────────────
-    探测可见障碍物  ──→  在信念路网上搜索  ──→  沿规划边移动 /
-    揭示物理接触障碍物    代价最小的路径        推动障碍物 /
-                                               碰撞检测与回退
-         ↑                                        │
-         └──────────── 新信息触发重规划 ←──────────┘
-
-一次完整的仿真运行流程：
-1. 从起点出发，构建初始信念（扫描可见障碍物）
-2. 规划器在信念路网上搜索一条考虑了"绕路 vs 推障碍物"权衡的最优路径
-3. 执行规划的动作序列（移动 / 推动），每步做碰撞检测
-4. 执行过程中持续感知：新的障碍物被发现或碰撞暴露了未知物体 → 更新信念 → 触发重规划
-5. 重复 2–4，直到到达目标或超出最大重规划次数
-
-"""
+"""CA-NAMO的在线"规划-执行-感知-重规划"循环"""
 
 from __future__ import annotations
 import time
@@ -34,8 +14,6 @@ from llm_difficulty import DifficultyEstimator
 from search import Planner, push_signature
 import geometry
 
-# 执行期碰撞判据的面积阈值：相切的接触面积恰好是 0，真实穿模远大于这个数量级。
-# 见 _world_collision。
 _CONTACT_AREA_EPS = 1e-9
 
 # 仿真结果汇总
@@ -87,8 +65,6 @@ class OnlineNAMO:
         self.estimator = DifficultyEstimator(cfg)   # 障碍物难度估算器
         self.belief = Belief(self.roadmap, cfg)     # 机器人的部分可观测信念
         self._plan_paths: List[dict] = []           # 当前规划出的所有路径（供逐帧可视化）
-        # 执行期证实为"一步都推不动"的推动尝试。规划器只能读信念，而撞墙这类失败
-        # 在信念里留不下痕迹，必须由执行侧单独记账，否则同一个死计划会被无限重放。
         self.failed_pushes: set = set()
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
@@ -154,9 +130,6 @@ class OnlineNAMO:
                         if act["oid"] not in res.removed:
                             res.removed.append(act["oid"])
                     elif not push_success:
-                        # 一步都没推动就撞停：世界和信念都毫发未动，下一轮必然规划出
-                        # 同一个计划。登记这次失败，逼规划器改走别的方案——最坏情况是
-                        # 尽快报"无可行解"，而不是空转到 max_replans 耗尽。
                         self.failed_pushes.add((push_signature(obs), act["key"]))
                     if not push_success:
                         # 撞上了，作废本次放置并重规划换位置
@@ -226,16 +199,6 @@ class OnlineNAMO:
         return None
 
     def _world_collision(self, oid: int, nx: float, ny: float, theta: float):
-        """真实世界物理校验: 把 oid 推到 (nx, ny, theta) 是否撞上东西
-
-        判据是【重叠面积】而不是 shapely 的 `.intersects()`：后者对**恰好贴合**也返回
-        True，而扫掠区永远包含起点位姿，所以只要有邻居紧挨着当前障碍物，它的第一步
-        无论往哪个方向推都会被判成撞车（接触面积 0.0），于是这一对障碍物互相锁死、
-        谁也动不了。maze_doors 里 oid 7 和 8 就是这样一对（底边/顶边同为 y=4.05）。
-
-        这与 push_planner._START_COLLISION_EPS 是同一个取舍：相切不算碰撞，必须真正
-        重叠才算。真实的擦碰重叠面积远在阈值之上（实测撞墙那次是 0.0063 m²）。
-        """
         if not self.cfg.check_obstacle_collision:
             return []
         mover = self._world_obstacle(oid)
@@ -244,7 +207,6 @@ class OnlineNAMO:
         hits = []
 
         def overlapping(poly):
-            """返回接触区；只贴合不重叠时返回 None。"""
             contact = swept.intersection(poly)
             if contact.area > _CONTACT_AREA_EPS:
                 return contact
@@ -266,7 +228,6 @@ class OnlineNAMO:
         return hits
 
     def _handle_push_collision(self, res: RunResult, node: int, oid: int, hits):
-        """推动撞上东西后的统一善后：更新信念 + 记录一帧。"""
         cfg = self.cfg
         for oid_hit, region in hits:
             if oid_hit is None:
@@ -292,7 +253,6 @@ class OnlineNAMO:
 
     def _execute_push_path(self, oid: int, obs, push_path: list,
                            res: RunResult, node: int, cfg: Config):
-        """逐步执行 SE2 推动路径，每步做碰撞检测并记录帧"""
         frame_at = set(self._sample_push_path(push_path,
                                               cfg.push_max_frames_per_action))
         n = len(push_path)
@@ -317,14 +277,12 @@ class OnlineNAMO:
         return (True, [], geometry.se2_path_cost(obs, push_path, cfg))
 
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
-        """将真实世界中指定障碍物的位姿更新到新位置，并标记为已移除 (removed=True)"""
         for w in self.world:
             if w.oid == oid:
                 w.x, w.y, w.theta, w.removed = x, y, theta, True
                 return
 
     def _plan_to_paths(self, plan) -> List[dict]:
-        """把一个计划拆成可视化用的折线集合：机器人路线 + 每个障碍物的推动路径"""
         if plan is None:
             return []
         paths: List[dict] = []
@@ -341,7 +299,6 @@ class OnlineNAMO:
         return paths
 
     def _capture_frame(self, res: RunResult, node: int, label: str):
-        """记录一帧当前世界状态（机器人 + 所有障碍物位姿），用于逐步动画"""
         if not self.cfg.save_frames:
             return
         res.frames.append({

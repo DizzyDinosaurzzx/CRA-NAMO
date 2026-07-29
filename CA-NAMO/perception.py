@@ -166,12 +166,6 @@ class Belief:
     @staticmethod
     def _first_contact_t(from_pos, to_pos, poly: Polygon, radius: float,
                          coarse: int = 64, refine: int = 20) -> float:
-        """机器人圆盘沿 from->to 平移时，首次碰到 `poly` 的行程比例 t ∈ [0, 1]。
-
-        先粗扫定位到第一个接触样本，再在它与上一个未接触样本之间二分。不能直接对
-        [0, 1] 二分：接触区间可能只是路径中段的一小段，终点未必仍在接触，二分会
-        整段错过。粗扫漏掉的极短擦碰按 1.0 处理（相当于走完整条边，偏保守）。
-        """
         fx, fy = from_pos
         dx, dy = to_pos[0] - fx, to_pos[1] - fy
 

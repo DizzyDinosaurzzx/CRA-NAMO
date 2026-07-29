@@ -22,11 +22,6 @@ class Plan:
 
 
 def push_signature(obs) -> tuple:
-    """一次推动尝试的登记标识：障碍物 + 它当时的位姿。
-
-    位姿量化到毫米 / 毫弧度纯粹是为了让 key 稳定可哈希——信念里的位姿只会被
-    `Belief.relocate` 整体改写，不存在逐步累积的浮点漂移。
-    """
     return (obs.oid, round(obs.x, 3), round(obs.y, 3), round(obs.theta, 4))
 
 
@@ -38,8 +33,6 @@ class Planner:
         self.belief = belief
         self.est = estimator
         self.cfg = cfg
-        # 执行期实测为"一步都推不动"的推动尝试，元素是 (push_signature, EdgeKey)。
-        # 由 OnlineNAMO 持有并跨重规划周期累积，见 _removal()。
         self.failed_pushes = set() if failed_pushes is None else failed_pushes
         self._robot_pos: Tuple[float, float] = (0.0, 0.0)
 
@@ -89,8 +82,6 @@ class Planner:
                 if nf >= incumbent - 1e-9:
                     continue
                 g_best[v] = ng
-                # 带上 key：执行期推动失败时要按【这条边的走廊】登记，
-                # 同一个障碍物为另一条边让路是另一回事，不该一并封掉。
                 acts = [{"type": "remove", "oid": oid, "drop": drop,
                          "dist": push_dist, "work": work, "push_path": push_path,
                          "key": key}
@@ -141,11 +132,6 @@ class Planner:
             return self._removal_cache[cache_key]
         obs = self.belief.obstacle(oid)
         if (push_signature(obs), key) in self.failed_pushes:
-            # 这条推动上一轮真去执行过，一步都没推动就撞停了。撞的若是墙，信念里不会
-            # 留下任何痕迹（墙本就是已知几何），于是不拦住它的话，下一轮会拿完全相同
-            # 的信念规划出逐字节相同的计划，如此空转到 max_replans 耗尽。
-            # 登记的是"该位姿 + 该走廊"这一组合：障碍物一旦真被推动过、位姿变了，
-            # 签名自然不再匹配，封禁随之失效，不会误伤后续的重试。
             res = (False, math.inf, None, 0.0, None)
             self._removal_cache[cache_key] = res
             return res

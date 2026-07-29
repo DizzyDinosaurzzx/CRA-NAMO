@@ -1,12 +1,4 @@
-"""
-主程序入口 & 可视化模块
-
-本文件包含两个部分：
-1. 可视化函数：将仿真结果渲染为 matplotlib 图片，包括：
-   - 最终汇总图（完整路径 + 障碍物最终状态 + 路网 + 机器人扫过区域）
-   - 逐帧动画帧（机器人分步移动过程，含感知状态变化）
-2. main() 入口：解析命令行参数、加载场景、运行 CA-NAMO 计算、输出统计结果
-"""
+"""主程序入口 & 可视化模块"""
 
 from __future__ import annotations
 import argparse
@@ -95,8 +87,6 @@ def _draw_static(ax, sim: OnlineNAMO, original_poses):
 
 
 # ---------------- 画布布局 ---------------- #
-# 绘图区按地图长宽比缩放进这个包围盒，因此长条形（corridor 40x8）和竖长形
-# （hidden_obstacle 28x40）的地图都能填满画面且不变形。
 _PLOT_BOX = (8.0, 7.0)     # 绘图区最大 (宽, 高)，英寸
 _MARGIN = 0.5              # 左右两侧 + 底部刻度标签的边距，英寸
 _TOP_PAD = 0.12            # 标题上方的留白，英寸
@@ -108,12 +98,6 @@ _LEGEND_NCOL = 5
 
 
 def _wrap_title(text: str, width_inch: float) -> str:
-    """把标题折成至多 _TITLE_LINES 行，超出则截断。
-
-    标题必须占固定行数：行数一变画布高度就得跟着变，同一场景各帧尺寸不一致就没法
-    直接合成动画。原先是一整行不折行，长标题要么被画布裁掉要么压到图上。
-    """
-    # 等宽近似：字号 pt 的平均字宽约 0.55 * pt / 72 英寸
     ncols = max(20, int(width_inch / (0.55 * _TITLE_FS / 72.0)))
     lines = textwrap.wrap(text, width=ncols) or [""]
     if len(lines) > _TITLE_LINES:
@@ -121,14 +105,7 @@ def _wrap_title(text: str, width_inch: float) -> str:
         lines[-1] = lines[-1][:max(1, ncols - 1)] + "…"
     return "\n".join(lines)
 
-
 def _new_canvas(sim: OnlineNAMO):
-    """按地图长宽比新建画布，返回 (fig, ax)。
-
-    坐标轴框的长宽比与数据完全一致，且左右边距相等，所以地图在画面里既填满又居中。
-    自下而上依次是：图例条带、x 轴刻度标签、绘图区、标题——四者各占一段互不重叠的
-    高度，谁也不会压到谁。
-    """
     minx, miny, maxx, maxy = sim.workspace.bounds
     w, h = (maxx - minx) + 2.0, (maxy - miny) + 2.0   # 与下面 xlim/ylim 的外扩一致
     s = min(_PLOT_BOX[0] / w, _PLOT_BOX[1] / h)
@@ -150,9 +127,6 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
     ax.set_ylim(miny - 1, maxy + 1)
     ax.set_title(_wrap_title(title, ax.figure.get_figwidth() - 2 * _MARGIN),
                  fontsize=_TITLE_FS)
-    # 图例移到画布最下方并水平居中。原先放在右侧，要靠 tight_layout(rect=(0,0,.85,1))
-    # 给它腾出 15% 的横向空间，地图因此被挤到画面左边；放到下方就不占横向空间了。
-    # 用 fig.legend 而不是 ax.legend：后者以坐标轴为锚点，会压在 x 轴刻度标签上。
     handles, labels = ax.get_legend_handles_labels()
     if handles:
         ax.figure.legend(handles, labels, loc="lower center",
@@ -235,7 +209,6 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
 
 
 def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
-    """批量渲染仿真过程中所有帧，生成逐帧动画图片序列"""
     os.makedirs(frames_dir, exist_ok=True) 
     for old in glob.glob(os.path.join(frames_dir, "step_*.png")):
         os.remove(old) # 清空旧图片
@@ -279,26 +252,21 @@ def main():
     if args.frames:
         cfg.save_frames = True
 
-    # 确保输出目录存在（如 img/）
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     # 初始化CA-NAMO仿真器
     sim = OnlineNAMO(s["workspace"], s["static"], s["movable"],
                      s["start"], s["goal"], cfg)
-    # 记录障碍物的原始位置（用于可视化中画虚线轮廓）
+    
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
-    # 打印场景基本信息
     print(f"Scenario: {s['name']}   {sim.roadmap}")
     print(f"Difficulty estimator: {sim.estimator.mode}"
           + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
     print("-" * 60)
 
-    # 运行仿真sim
     res = sim.run()
-
-    # 把运行期的 [push] 日志与下面的统计结果隔开
-    print("-" * 60)
+    print("-" * 60) # 把运行期的 [push] 日志与下面的统计结果隔开
 
     # 打印仿真统计结果
     print(f"Success           : {res.success}   ({res.message})")

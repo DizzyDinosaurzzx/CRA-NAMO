@@ -1,11 +1,4 @@
-"""
-SE2推动路径规划器
-在 SE2 构型空间 (x, y, theta) 中为矩形障碍物规划从起始位姿到目标位姿的连续推动路径。
-路径满足：
-1. 静态障碍物碰撞约束（采用保守膨胀以保证离散安全性）
-2. 可选的工作圆约束（障碍物必须在机器人可达范围内）
-3. 最小推动路径长度（平移弧长 + 加权旋转）
-"""
+"""SE2推动路径规划器"""
 
 from __future__ import annotations
 import math
@@ -15,7 +8,6 @@ import numpy as np
 
 # ============ 基础几何 ============= #
 def rect_corners(cx: float, cy: float, w: float, h: float, theta: float) -> np.ndarray:
-    """矩形的四个角点，逆时针顺序，形状 (4, 2)。"""
     dx, dy = w / 2.0, h / 2.0
     local = np.array([[-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]], dtype=float)
     c, s = math.cos(theta), math.sin(theta)
@@ -23,7 +15,6 @@ def rect_corners(cx: float, cy: float, w: float, h: float, theta: float) -> np.n
     return local @ R.T + np.array([cx, cy])
 
 def convex_hull(pts: np.ndarray) -> np.ndarray:
-    """Andrew 单调链算法，返回逆时针顶点序列。"""
     pts = np.unique(np.round(np.asarray(pts, dtype=float), 9), axis=0)
     if len(pts) <= 2:
         return pts
@@ -46,19 +37,16 @@ def convex_hull(pts: np.ndarray) -> np.ndarray:
 
 
 def minkowski_sum(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    """两个凸多边形的 Minkowski 和，通过逐对点求和 + 凸包计算。"""
     pairwise = (A[:, None, :] + B[None, :, :]).reshape(-1, 2)
     return convex_hull(pairwise)
 
 
 def c_obstacle(shape_poly: np.ndarray, obs_corners_local: np.ndarray) -> np.ndarray:
-    """构型空间障碍物 = shape_poly (+) (-O_theta)。"""
     return minkowski_sum(shape_poly, -obs_corners_local)
 
 
 def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
                   margin: float = 0.0) -> np.ndarray:
-    """判断点是否在逆时针凸多边形内部（向外膨胀 margin） """
     poly = np.asarray(poly, dtype=float)
     n = len(poly)
     shape = np.broadcast(X, Y).shape
@@ -88,15 +76,6 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
 
 
 def offset_bbox(poly: np.ndarray, margin: float):
-    """`inside_convex(poly, ., ., margin)` 为真的那片凸区域的轴对齐包围盒。
-
-    该区域是各条边【外推 margin】之后的半平面交集，**不等于** poly 的包围盒外扩
-    margin：锐角顶点处外推后会伸得更远（边长为 1 的正菱形外推 m，顶点跑到距原顶点
-    √2·m 处，落在 bbox+m 之外）。按包围盒+margin 开窗会把本该判为"挡路"的格子漏掉。
-    这里直接解相邻两条外推直线的交点得到精确顶点，再取包围盒。
-
-    返回 (xmin, xmax, ymin, ymax)；无法可靠求解时返回 None（调用方应退回全网格）。
-    """
     poly = np.asarray(poly, dtype=float)
     n = len(poly)
     if n == 0:
@@ -134,7 +113,6 @@ def offset_bbox(poly: np.ndarray, margin: float):
 
 
 def mean_rotation_radius(w: float, h: float) -> float:
-    """矩形绕形心转动时的等效力矩臂r̄"""
     if w <= 0.0 or h <= 0.0:
         return 0.0
     s = math.hypot(w, h)
@@ -144,13 +122,11 @@ def mean_rotation_radius(w: float, h: float) -> float:
 
 
 def wrap_dtheta(a: float, b: float) -> float:
-    """角度在 [0, pi) 环上的最短有向旋转增量，范围 [-pi/2, pi/2)。"""
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
 
 # ============ SAT 碰撞检测 ============= #
 
 def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
-    """分离轴定理：判断两个凸多边形是否相交。"""
     for poly in (A, B):
         n = len(poly)
         for i in range(n):
@@ -168,7 +144,6 @@ def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
 
 @dataclass
 class PushPlanResult:
-    """单次推动路径规划的结果。"""
     success: bool
     reason: str = ""
     cost: float = float("nan")
@@ -178,29 +153,13 @@ class PushPlanResult:
     path: List[Tuple[float, float, float]] = field(default_factory=list)
 
 
-# 起点解卡时，间隙从完整 margin 起最多减半这么多次；再不行才退到"精确不相交"。
 _UNSTICK_RELAX_STEPS = 4
-
-# 起点位姿撞墙判定的容差。**必须是负数**：`sat_rect_intersect` 的 eps 语义是
-# "分离量超过 eps 才算不相交"，取正值会把【恰好贴合】也判成碰撞。
-#
-# 而 wall_polys 里除了真墙，还塞着其他已感知的可移动障碍物（见 geometry.py
-# _get_push_planner）。两个障碍物紧挨着摆本来就是常态——门障碍物更是贴着门框设计的
-# ——一旦相切，双方的起点检查会互相否决，两个都变成"永远推不动"，对应的边直接被
-# _edge_cost 判成 inf 从搜索图里删掉。inf 不参与和 λ 的竞争，于是 λ 调到多大都救不回来。
-# 取负值表示"必须真正重叠才算碰撞"，相切放行；哪些推动方向真的会顶进邻居，
-# 交给构型空间去禁，而不是在这里一票否决整次规划。
 _START_COLLISION_EPS = -1e-6
-
-# 走廊掩码的缓存（见 PushPlanner.set_corridor）。值是 packbits 压缩的窗口掩码，
-# 一条走廊约几 KB，故上限可以开得很大；仍按 LRU 淘汰以防长时间运行时无界增长。
 _CORRIDOR_MASK_CACHE: Dict[tuple, tuple] = {}
 _CORRIDOR_MASK_CACHE_MAX = 4096
 
 
 class PushPlanner:
-    """矩形障碍物的 SE2 最小推动路径规划器。"""
-
     _W_AXIS = 990
     _W_DIAG = 1400
     _W_KNIGHT = 2214
@@ -243,33 +202,16 @@ class PushPlanner:
         self.thetas = np.arange(n_theta) * (math.pi / n_theta)
         self.X, self.Y = np.meshgrid(self.xs, self.ys, indexing="ij")
 
-        # 代价参数。r_half_diag 只用于【几何】外延（膨胀量、解卡半径）；
-        # 旋转【代价】用的是力矩臂 r̄，两者相差约 1.9 倍，不可混用。
         self.r_half_diag = 0.5 * math.hypot(obstacle_w, obstacle_h)
         self.dtheta = math.pi / n_theta
         self.rot_weight = (mean_rotation_radius(obstacle_w, obstacle_h)
                            if rot_weight is None else float(rot_weight))
         self.rot_step_cost = self.rot_weight * self.dtheta
 
-        # 保守膨胀：0.1*cell 可减少靠墙障碍物的误判阻塞，
-        # 同时仍能防止大多数离散化伪影。
         self.bulge = self.r_half_diag * (1.0 - math.cos(self.dtheta / 2.0))
-        # 单个位姿自身的余量（不含任何运动）。
-        #
-        # 这里【不能】再加上"半个平移步长"去覆盖平移的扫掠区：那是各向同性膨胀，
-        # 会把垂直于推动方向的那一维也一起吃掉。门障碍物正是按门洞尺寸设计的
-        # （DOOR_CLEARANCE=0.2，每侧只剩 0.1），加半步长（约 0.16）直接把它们在
-        # 门洞里封死，整个 maze_doors_complex 会卡在 915 上报无解。
-        # 平移的扫掠安全性改由 push_plan_se2 的整条路径复核来保证。
         self.pose_margin = 0.1 * cell + self.bulge
         self.margin = self.pose_margin
-        # 起点被 _snap() 吸附到格心时的最大位姿误差：平移至多半个格对角线，
-        # 转角至多半个 theta 步（后者的径向位移就是 bulge）。走廊腾空判定必须按这个
-        # 量放大，否则会出现"真实位姿压着走廊、吸附后的格心不压"的错位——那会让
-        # plan_anywhere 直接把起点当成零代价目标返回，谎称"这个障碍物不用动"。
         self.snap_margin = 0.5 * math.hypot(cell, cell) + self.bulge
-
-        # 整数量化单位
         self.unit = cell / self._W_AXIS
         self.W_rot = int(round(self.rot_step_cost / self.unit))
 
@@ -298,14 +240,6 @@ class PushPlanner:
         mv.append((0, 0, -1, self.W_rot))
         self.moves = mv
 
-        # 按权重分组，组内保持 self.moves 的原始先后。_search 对一组里的所有方向
-        # 一次性广播展开：桶队列的前沿平均只有几个状态，逐个 move 调用 numpy 时
-        # 几乎全部时间都花在调用开销上，而不是真正的计算。
-        # 只有权重相同（= 落进同一个桶）的方向之间才可能出现"谁先定下 parent"的
-        # 竞争，所以按权重分组不会改变任何结果：跨组的先后由严格的 dist > nd 决定。
-        #
-        # 旋转不进分组：它要按【每个格子能不能转】单独放行（见 _build_cspace 的
-        # rot_ok），没法和平移一起做无差别的广播展开。
         groups: Dict[int, List[Tuple[int, int]]] = {}
         for di, dj, dk, w in mv:
             if dk == 0:
@@ -317,17 +251,6 @@ class PushPlanner:
 
     # ------------------------------------------------------------ 构型空间构建
     def _build_cspace(self) -> None:
-        """构建三个布尔网格：
-             free      — 位姿本身不与墙壁碰撞（已按 margin 覆盖一步平移的扫掠区）
-             in_disk   — 满足工作圆约束（精确判定）
-             rot_ok    — 在该格子上从 theta_k 转到 theta_(k+1) 的扫掠区不撞墙
-
-        平移的扫掠安全性靠 self.margin（半个步长）覆盖，旋转则不行：形心不动、
-        四角划过的弧长是 r_half_diag * dtheta，对一根 8 米长杆来说超过 1 米，
-        按同样的思路做成各向同性膨胀会把它彻底钉死。所以旋转单独建一层掩码——
-        用【首末两个朝向的凸包】当作扫掠足迹去算构型空间障碍物，只在真正会扫到
-        墙的格子上禁止旋转，平移不受影响。
-        """
         rx, ry = self.robot_pos
         R = self.work_radius
         w, h = self.obstacle_w, self.obstacle_h
@@ -348,9 +271,6 @@ class PushPlanner:
                 layer_b |= inside_convex(c_obstacle(wp, O), self.X, self.Y,
                                          margin=self.margin)
             blocked[:, :, k] = layer_b
-
-            # 旋转一步 (k -> k+1) 的扫掠足迹：两个朝向的凸包。真实扫掠区在这个凸包
-            # 外侧最多再鼓出 bulge，故按 pose_margin(= 0.1*cell + bulge) 膨胀。
             H = convex_hull(np.vstack([O, corners[(k + 1) % self.n_theta]]))
             layer_r = np.zeros((self.nx, self.ny), dtype=bool)
             for wp in self.wall_polys:
@@ -372,32 +292,16 @@ class PushPlanner:
         self.free = ~blocked
         self.in_disk = indisk
         self.allowed = self.free & self.in_disk
-        # rot_ok[i, j, k] == 能否在 (i, j) 处于 theta_k 与 theta_(k+1) 之间旋转。
         self.rot_ok = ~rot_blocked
         self._rot_ok_base = self.rot_ok.copy()
-        # 未经 _unstick_start 豁免的原始版本。规划器实例是跨调用缓存的，而
-        # _unstick_start() 会就地放开一小片格子——那是只对【某个起点】成立的豁免，
-        # 必须在【换起点】前还原，否则会永久累积成虚假的可通行区域。
-        # _unstuck_for 记住当前豁免是为哪个起点算的：起点没变时豁免依然成立，
-        # 可以原样留在 allowed 里复用（见 _unstick_start）。
-        self._allowed_base = self.allowed.copy()
         self._unstuck = False
         self._unstuck_for: Optional[Tuple[int, int, int]] = None
-
-        # 走廊掩码只存被挡格子的 (i, j) 外包窗口那一小块，不再物化整格布尔数组：
-        # 窗口通常只占全网格的百分之几，而 set_corridor 每轮规划要跑上百次。
-        # _route_window 为 None 表示没有任何格子被挡。
         self._route_window: Optional[Tuple[int, int, int, int]] = None
         self._route_mask: Optional[np.ndarray] = None
 
     # -------------------------------------------------- 起点解卡（离散化伪影修复）
     def _true_collision(self, pose: Tuple[float, float, float],
                         clearance: float = 1e-9) -> bool:
-        """用精确 SAT 判断该位姿是否与墙壁相交，且要求至少留出 `clearance` 的间隙。
-
-        `sat_rect_intersect` 的 eps 语义就是"必须分离超过 eps 才算不相交"，因此把
-        clearance 传给它等价于把矩形各向外膨胀 clearance 后再判交。
-        """
         O = rect_corners(0.0, 0.0, self.obstacle_w, self.obstacle_h, pose[2])
         corners = O + np.array([pose[0], pose[1]])
         for wp in self.wall_polys:
@@ -406,23 +310,16 @@ class PushPlanner:
         return False
 
     def _unstick_clearance(self, pose: Tuple[float, float, float]) -> Optional[float]:
-        """能让该位姿脱离碰撞的最大间隙；从完整 margin 起逐次减半，全都不行返回 None"""
         c = self.margin
         for _ in range(_UNSTICK_RELAX_STEPS):
             if not self._true_collision(pose, c):
                 return c
             c *= 0.5
-        # 每一档都不行：退回"精确不相交"这一原有行为，绝不比改动前更保守
         return None if self._true_collision(pose) else 0.0
 
     def _unstick_start(self, start_idx: Tuple[int, int, int]) -> int:
-        """优化器起点解卡：如果起点被膨胀障碍物阻塞，则在其附近搜索一小片可通行区域，豁免这些格子。"""
         if self._unstuck:
             if self._unstuck_for == start_idx:
-                # 同一个起点：上次算出的豁免依然成立，构型空间与上次调用完全一致。
-                # 直接复用，并且必须返回 0 —— 返回非零会让调用方作废 _cache，
-                # 于是同一份 Dijkstra 结果会被反复重算（起点被 margin 封死的
-                # 障碍物每轮要问上百次，那是纯粹的重复劳动）。
                 return 0
             np.copyto(self.allowed, self._allowed_base)   # 换起点了，还原旧豁免
             np.copyto(self.rot_ok, self._rot_ok_base)
@@ -435,8 +332,6 @@ class PushPlanner:
         clearance = self._unstick_clearance(self._pose(*start_idx))
         if clearance is None:
             return 0                      # 真的埋在墙里，不能豁免
-        # 只在起点附近搜索：脱困所需的位移是亚米级的，限制半径可避免
-        # 在真正被墙围死时退化成全图 BFS。
         max_cells = max(3, int(math.ceil(self.r_half_diag / self.cell)) + 2)
         si, sj, sk = start_idx
         stack = [start_idx]
@@ -446,9 +341,6 @@ class PushPlanner:
             i, j, k = stack.pop()
             if not self.allowed[i, j, k]:
                 self.allowed[i, j, k] = True
-                # 脱困通道上的格子同样解开旋转限制：这些格子已经逐个用精确 SAT
-                # 验过，且不解开的话被 margin 封死的障碍物会连转都不能转，等于
-                # 白解卡。真正不安全的路径由 push_plan_se2 的整条路径复核兜住。
                 self.rot_ok[i, j, k] = True
                 self.rot_ok[i, j, (k - 1) % self.n_theta] = True
                 freed += 1
@@ -465,8 +357,6 @@ class PushPlanner:
                 seen.add(nxt)
                 if not self.in_disk[nxt]:
                     continue
-                # 整条脱困通道统一用起点那一档间隙，而不是各自"不相交即可"：
-                # 否则通道中段会退化成零余量，规划器沿着它擦墙而过。
                 if self._true_collision(self._pose(*nxt), clearance):
                     continue              # 真实碰撞，保持占据
                 stack.append(nxt)
@@ -535,9 +425,6 @@ class PushPlanner:
                         continue
                     nidx = ((ni * ny + nj) * nT + np.broadcast_to(k, ni.shape))[ok]
                     src = np.broadcast_to(idx, ok.shape)[ok]
-                    # 组内不同方向可能落到同一个格子（如 +i 与 -i 来自相邻的两个
-                    # 前沿点）。保留首次出现，等价于原先"按 move 顺序逐个处理、
-                    # 先到者定下 parent"——ok 是按方向优先展平的，顺序天然一致。
                     nidx, first = np.unique(nidx, return_index=True)
                     src = src[first]
                     nd = b + w
@@ -552,8 +439,6 @@ class PushPlanner:
                         max_b = nd
 
                 # ---- 旋转 ----
-                # 逐方向处理：k -> k+1 查 rot_ok[.., k]，k -> k-1 查 rot_ok[.., k-1]，
-                # 也就是永远查【这一步跨越的那段夹角】。形心不动，所以 (i, j) 不变。
                 nd = b + self.W_rot
                 for dk in (1, -1):
                     kk = k if dk == 1 else (k - 1) % nT
@@ -584,8 +469,6 @@ class PushPlanner:
         chain.reverse()
         i, j, k = self._unflat(np.array(chain, dtype=np.int64))
         path = [self._pose(int(a), int(b_), int(c)) for a, b_, c in zip(i, j, k)]
-        # 路径的第一个点是【格心】，而障碍物真实待在 start_pose：两者最多差半个格。
-        # 不把这一跳补进路径，执行时就是一次既不做碰撞检测、也不计入做功的瞬移。
         if start_pose is not None and self._pose_gap(start_pose, path[0]) > 1e-9:
             path.insert(0, start_pose)
         return path
@@ -596,11 +479,6 @@ class PushPlanner:
 
     # ----------------------------------------------------------------- 规划
     def _build_corridor_mask(self, corridor_polys: List[np.ndarray]):
-        """把走廊栅格化成 (窗口, 窗口内的布尔掩码)；没有任何格子被挡时返回 (None, None)。
-
-        只在走廊的构型空间障碍物所覆盖的窗口里栅格化：一条边的走廊相对整张地图很小，
-        全网格逐 theta 扫描会把 99% 的算力花在必然为 False 的格子上。
-        """
         x0, y0, cell = float(self.xs[0]), float(self.ys[0]), self.cell
         layers = []                       # (k, i0, i1, j0, j1, layer)
         wi0, wi1, wj0, wj1 = self.nx, 0, self.ny, 0
@@ -635,18 +513,6 @@ class PushPlanner:
         return (wi0, wi1, wj0, wj1), mask
 
     def set_corridor(self, corridor_polys: List[np.ndarray]):
-        """设置障碍物必须腾空的走廊区域。
-
-        判定按 `snap_margin` 保守放大，作用是双向的：
-          * 起点侧——真实位姿压住走廊时，吸附后的格心必定也被标记为"仍挡路"，
-            于是 plan_anywhere 不可能把"原地不动"当成合法目标；
-          * 终点侧——选中的目标格心在真实几何下会以余量腾空走廊，而不是刚好擦过。
-
-        掩码只取决于走廊几何、障碍物尺寸和网格参数，这三者在整次运行中都不变，
-        而同一条边会被几十个重规划周期反复查询——所以直接把结果按走廊字节缓存。
-        存的是 packbits 压缩的窗口掩码（比整格布尔数组小两个数量级），命中时
-        只需一次 unpackbits，省掉 n_theta 次 Minkowski 和 + 凸包 + 栅格化。
-        """
         key = (self.obstacle_w, self.obstacle_h, self.n_theta, self.cell,
                self.nx, self.ny, float(self.xs[0]), float(self.ys[0]),
                round(self.snap_margin, 12),
@@ -672,19 +538,6 @@ class PushPlanner:
 
     # ------------------------------------------------- 落点偏好（顺推加价）
     def _forward_bias(self, start_pose: Tuple[float, float, float]):
-        """各落点的"顺推"加价，形状 (nx, ny)，单位与 dist 相同（整数量化单位）。
-
-        前进方向取【机器人 -> 障碍物】：机器人正是从这一侧靠上来的，顺着它把障碍物
-        推开就等于"顶着它往前走"——清掉了脚下这条边，却把它送到下一条边上，于是每轮
-        重规划再顶一段，一路推到底。
-
-        只对这个方向的位移分量加价，侧向和背后的分量不加价。因此它只改变【在若干个
-        同样合法的落点里选哪个】，不会让任何原本可行的推动变得不可行——这一点是刻意
-        的：先前用"必须让开加长走廊"的硬约束做同一件事，maze_doors 直接从成功变成了
-        跑满重规划次数。
-
-        与 theta 无关：只看形心位移，因此可以在 theta 维取完最小值之后再打分。
-        """
         if self.forward_penalty <= 0.0:
             return None
         fx = start_pose[0] - self.robot_pos[0]
@@ -700,20 +553,9 @@ class PushPlanner:
     def _select_goal(self, dist: np.ndarray,
                      start_pose: Tuple[float, float, float],
                      n_best: int = 1) -> Tuple[list, bool]:
-        """在能腾空走廊的可达位姿里挑落点，返回 (flat 索引列表, 是否真的可达)。
-
-        返回代价最小的前 `n_best` 个候选：最优的那个未必经得起
-        push_plan_se2 的整条路径扫掠复核，有备选才不至于一次不过就判该障碍物
-        不可推动。列表按代价从小到大。
-
-        可达性必须在走廊掩码还生效时判定：掩码一撤销，被挡住的格子就恢复成有限的
-        dist 值，再拿它判断会把"所有候选都被挡住"误判成有解。
-        """
         INF = np.int64(1) << 62
         nx, ny, nT = self.nx, self.ny, self.n_theta
         d3 = dist.reshape(nx, ny, nT)
-        # 不可达的格子在 dist 里已是 INF；被走廊挡住的格子全部落在 _route_window 内，
-        # 把窗口内被挡的那些临时抬到 INF，就能直接对整条 dist 取极值。
         win = self._route_window
         sub = saved = None
         if win is not None:
@@ -727,8 +569,6 @@ class PushPlanner:
                 score = np.where(dist >= INF, np.inf, dist.astype(float))
                 order = self._smallest(score, n_best)
                 return order, bool(order and score[order[0]] < np.inf)
-            # bias 与 theta 无关：先在 theta 维取最小，再在 (nx, ny) 上打分，
-            # 避免物化一个整格的三维浮点打分数组（这一步每轮规划要跑上百次）。
             kbest = d3.argmin(axis=2)
             dmin = np.take_along_axis(d3, kbest[:, :, None], axis=2)[:, :, 0]
             score = np.where(dmin >= INF, np.inf, dmin.astype(float))
@@ -758,18 +598,10 @@ class PushPlanner:
                       start_pose: Tuple[float, float, float],
                       validate=None,
                       n_candidates: int = 10) -> PushPlanResult:
-        """规划最小代价推动到【任意】满足腾空 set_corridor() 所设走廊的位姿
-
-        `validate(poses) -> bool` 是可选的路径复核回调（push_plan_se2 传入的是
-        按执行期口径做的扫掠检查）。代价最小的落点不一定过得了复核，所以按代价
-        升序最多试 `n_candidates` 个，返回第一个过关的。
-        """
         start_idx = self._snap(*start_pose)
 
         if not self.in_disk[start_idx]:
             return PushPlanResult(False, "起点在工作圆之外")
-        # 检查起点与墙壁的碰撞（不带 margin）：障碍物实际上已经在那里了。
-        # 相切放行，见 _START_COLLISION_EPS。
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
@@ -777,11 +609,9 @@ class PushPlanner:
                 wp, eps=_START_COLLISION_EPS):
                 return PushPlanResult(False, "起点与墙壁碰撞")
 
-        # 起点被吸附进墙 / 被 margin 封死时先解卡，否则搜索一步也走不出去
         if self._unstick_start(start_idx):
             self._cache = None            # 构型空间已变，作废上一次 Dijkstra 结果
 
-        # 如果障碍物位置改变了则重新运行 Dijkstra
         start_flat = int(self._flat(*start_idx))
         if self._cache is None or self._cache[2] != start_flat:
             self._cache = self._search(start_idx) + (start_flat,)
@@ -803,8 +633,6 @@ class PushPlanner:
             trans = sum(math.hypot(b[0] - a[0], b[1] - a[1])
                         for a, b in zip(poses, poses[1:]))
             rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
-            # 代价按【返回的这条路径】重算，而不是取 Dijkstra 的整数量化值：后者不含
-            # 起点吸附那一段，会与执行期 geometry.se2_path_cost() 的结算口径对不上。
             cost = trans + self.rot_weight * rot
             return PushPlanResult(True, "", cost, trans, rot, goal_pose, poses)
 
@@ -813,7 +641,6 @@ class PushPlanner:
     def plan_path(self,
                   start_pose: Tuple[float, float, float],
                   goal_pose: Tuple[float, float, float]) -> PushPlanResult:
-        """在 SE2 中规划从起始位姿到目标位姿的最小代价推动路径"""
         start_idx = self._snap(*start_pose)
         goal_idx = self._snap(*goal_pose)
 
@@ -833,11 +660,9 @@ class PushPlanner:
         if not self.in_disk[goal_idx]:
             return PushPlanResult(False, "目标位姿在机器人工作圆之外")
 
-        # 起点被吸附进墙 / 被 margin 封死时先解卡（与 plan_anywhere 同一处理）
         if self._unstick_start(start_idx):
             self._cache = None
 
-        # 如果障碍物位置改变了则重新运行 Dijkstra
         start_flat = int(self._flat(*start_idx))
         if self._cache is None or self._cache[2] != start_flat:
             self._cache = self._search(start_idx) + (start_flat,)
@@ -853,18 +678,11 @@ class PushPlanner:
         trans = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(poses, poses[1:]))
         rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
         cost = trans + self.rot_weight * rot     # 同 plan_anywhere：以路径为准
-
-        # goal 与 path 必须分别填对：漏掉 goal 会让 poses 落进 goal 字段、path 留空，
-        # 而调用方判的是 `if se2_feasible and se2_path`——空列表为假，于是明明规划
-        # 成功却被当成失败，该障碍物直接被判定为不可推动。
         return PushPlanResult(True, "", cost, trans, rot, self._pose(*goal_idx), poses)
 
 # ============ 工厂函数 ============= #
 def polygon_exterior_coords(polygon) -> np.ndarray:
-    """提取 shapely Polygon 的外边界顶点为 numpy 数组（去除闭合重复点）。"""
-    # shapely Polygon 的外边界坐标包含闭合重复点；将其去除
     coords = list(polygon.exterior.coords)
-    # 若坐标为 [(x0,y0), ..., (xn,yn), (x0,y0)]，若末尾回路则丢弃最后一点
     if len(coords) >= 2 and coords[0] == coords[-1]:
         coords = coords[:-1]
     return np.array(coords, dtype=float)
