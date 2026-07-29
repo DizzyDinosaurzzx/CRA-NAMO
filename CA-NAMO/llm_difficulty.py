@@ -55,8 +55,7 @@ MATERIAL_ALIASES: Dict[str, str] = {
     "foam": "foam_mat",
     "styrofoam": "styrofoam_box",
 }
-# 注入 LLM prompt 的标定锚点：跨越整个量级、彼此区分度高的少数几项。
-# 只用来对齐量纲——被查询的材质会在构造 prompt 时从中剔除，避免直接泄漏答案。
+# 提供给LLM的标定值
 PROMPT_ANCHORS = (
     "styrofoam_box",
     "cardboard_box",
@@ -68,8 +67,7 @@ PROMPT_ANCHORS = (
 
 _NON_WORD = re.compile(r"[^a-z0-9]+")
 
-def _normalise(name) -> str:
-    """'Wooden Crate' / 'wooden-crate' -> 'wooden_crate'。"""
+def _normalise(name) -> str: #名字规范化
     return _NON_WORD.sub("_", str(name).strip().lower()).strip("_")
 
 def material_density(name) -> float:

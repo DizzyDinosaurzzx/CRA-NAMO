@@ -1,28 +1,27 @@
-"""
-几何计算：
-1. push_plan()     : 环形采样放置位姿——推动距离、可行性与最终“放置位姿”
-2. push_plan_se2() : 在 SE2 全空间搜索能腾空走廊的最优位姿（首选路径）
-3. push_path_plan(): 给定放置位姿，规划到达它的连续推动路径（回退路径）
+"""仿真世界与 SE2 推动规划器之间的适配层。
+
+push_planner 是一个纯 numpy 的离散搜索引擎，只认识"矩形尺寸 + 墙体顶点数组 +
+网格参数"。本模块负责把 shapely / Config / MovableObstacle 翻译成它要的形式，
+把它给出的离散答案拿回真实几何复核，并把路径换算成做功：
+
+1. push_plan_se2()  : 唯一的推动规划入口——建/取规划器实例、设走廊、取最优位姿与
+                      到达它的连续路径，并用 shapely 复核该位姿真的腾空了走廊
+2. se2_path_cost()  : 一段 SE2 位姿序列的推动代价（口径与规划器内部一致）
+   push_work()      : 代价 x 难度 = 操作做功
+3. _swept_region()  : 矩形位姿间的扫掠区。供 planner.py 在【执行期】做真值碰撞
+                      校验，不参与推动规划本身
 """
 
 from __future__ import annotations
 import math
 from typing import Dict, Optional, Tuple
-from shapely.geometry import Polygon, LineString
+from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from obstacle import MovableObstacle
 from config import Config
 import push_planner
 
-
 # -------------计算器 1：推动规划--------------- #
-
-# 放置位姿的软偏好权重，单位是"等效推动米数"，直接加到推动距离上参与比较。
-# 障碍物可在可达范围内任意平移，只受墙体与其他障碍物约束
-
-W_ROUTE = 5.0     # 落点压在"障碍物->目标"直线走廊上：机器人下一段路会再被它挡住
-W_AVOID = 0.5     # 落点重新挡住了其他当前畅通的通道
-W_RESIDUAL = 1.0
 
 # 扫掠区离散化时允许的最大单步转角（15°）。步长越小越贴近真实扫掠区，
 # 代价是更多次 shapely 布尔运算。
@@ -31,22 +30,11 @@ _SWEPT_MAX_DTHETA = math.pi / 12.0
 
 def _swept_region(obs: MovableObstacle, nx: float, ny: float,
                   theta: Optional[float] = None) -> Polygon:
-    """矩形从当前位姿运动到 (nx, ny, theta) 所扫过的区域。
-
-    纯平移时首末位姿的凸包就是精确的扫掠区。**一旦带上旋转，凸包就不再是保守
-    近似**：长条绕形心转 90°，真实扫掠区是半径 L/2 的圆盘，会从首末位姿的凸包
-    里鼓出来（3.0x0.5 的长条转 90°，终点位姿有 83% 的面积落在凸包之外）。
-    漏掉的正是碰撞最可能发生的那一圈。
-
-    因此按 <=15° 的步长插出中间位姿，逐段取凸包再求并：每一小段的转角都很小，
-    分段凸包足够贴合，且始终把真实扫掠区包在里面。
-    """
+    """矩形从当前位姿运动到 (nx, ny, theta) 所扫过的区域"""
     start = obs.polygon
-    # 矩形是 pi 周期的，转角取 [-pi/2, pi/2) 上的最短有向增量
     dtheta = 0.0 if theta is None else push_planner.wrap_dtheta(obs.theta, theta)
     if abs(dtheta) < 1e-9:
         return unary_union([start, obs.polygon_at(nx, ny)]).convex_hull
-
     steps = max(2, int(math.ceil(abs(dtheta) / _SWEPT_MAX_DTHETA)))
     poses = [obs.polygon_at(obs.x + (nx - obs.x) * i / steps,
                             obs.y + (ny - obs.y) * i / steps,
@@ -54,111 +42,6 @@ def _swept_region(obs: MovableObstacle, nx: float, ny: float,
              for i in range(steps + 1)]
     return unary_union([unary_union([a, b]).convex_hull
                         for a, b in zip(poses, poses[1:])])
-
-
-def push_plan(
-    obs: MovableObstacle,
-    static_free,                       # 仅由墙壁界定的自由空间（prepared 几何，只用 contains）
-    must_clear: Optional[Polygon],     # 放置位姿【必须】腾空的通道（硬约束）
-    avoid: Optional[Polygon],          # 应避免重新阻挡的其他畅通通道（软约束）
-    cfg: Config,
-    others: Optional[Polygon] = None,  # 其他可移动障碍物当前占据的区域（硬约束：不得碰撞）
-    goal_xy: Optional[Tuple[float, float]] = None,   # 目标点：用于避开剩余路线
-    residual: Optional[Polygon] = None,  # 该障碍物当前阻挡的全部通道（软约束：尽量一并让开）
-    sample_thetas: Optional[list] = None,  # 额外采样的 theta 值；None=仅采样当前朝向
-) -> Tuple[bool, float, Optional[Tuple[float, float, float]]]:
-
-    """
-    为障碍物找到代价最小的可行重新放置方案
-
-    一个候选放置位姿为【可行】当且仅当：
-      * 它完全落在静态自由空间内（不撞墙）
-      * 到达该位姿的直线推动过程也始终处于静态自由空间内
-      * 它完全腾空 `must_clear`——即该障碍物当前挡住的通道（从而让“付费可解锁”的边真正被打通）
-      * 终点位姿与推动扫掠路径都不与其他可移动障碍物 `others` 相交（物体不能互相穿透/叠放）
-
-    障碍物在可达范围内自由平移：方向不受限（不区分推/拉），只要终点位姿与平移
-    扫掠区都不撞墙、不撞其他障碍物即可。移动过程中与机器人自身的碰撞不予考虑。
-
-    可行位姿按加权得分取最小：
-
-        score = 推动距离 + W_ROUTE * 挡住剩余路线 + W_AVOID * 挡住其他畅通通道
-
-    `route`（障碍物 -> 目标的直线走廊）这一项是关键：只用 `avoid` 时，密集路网让
-    走廊铺满自由空间，几乎每个候选都判为“挡住了别的路”，该项退化成常数，选择塌缩
-    成“最短距离 + 枚举顺序”，于是障碍物被顺着机器人的行进方向一路顶着走，每个
-    重规划周期再撞上、再推。用加权和而不是字典序，是因为 route 只是直线代理，在
-    迷宫里并不可靠；让它无条件压倒距离会把障碍物推到很远的糟糕位置。
-
-    返回 (feasible, push_distance, drop_pose)。push_distance 是障碍物中心的欧氏移动距离。
-    """
-
-    best = None                      # (score, distance, pose)
-    cx, cy = obs.x, obs.y
-
-    # 额外采样的 theta 值
-    thetas_to_try = [obs.theta]
-    if sample_thetas:
-        for th in sample_thetas:
-            th_wrapped = th % math.pi
-            if not any(abs(t - th_wrapped) < 1e-9 for t in thetas_to_try):
-                thetas_to_try.append(th_wrapped)
-
-    # 障碍物到目标的直线走廊：落在其中意味着机器人下一段路会再次被它挡住。
-    route = None
-    if goal_xy is not None:
-        route = LineString([(cx, cy), goal_xy]).buffer(cfg.robot_radius)
-
-    # 注意：曾尝试把枚举起点改成"背离机器人"的方向再向两侧展开。它只影响同分候选
-    # 之间的取舍，但实测会让 two_doors_hidden_c 与 maze_to_house 从成功变为失败
-    # （见提交说明的消融数据），因此保持固定的 0..2pi 顺序。
-    n = cfg.drop_ring_samples
-
-    for k in range(1, cfg.drop_radius_steps + 1):
-        r = cfg.R_push * k / cfg.drop_radius_steps
-        for a in range(n):
-            ang = 2.0 * math.pi * a / n
-            nx = round(cx + r * math.cos(ang), 3)
-            ny = round(cy + r * math.sin(ang), 3)
-
-            for th in thetas_to_try:
-                end_poly = obs.polygon_at(nx, ny, th)
-
-                if not static_free.contains(end_poly):
-                    continue
-                if must_clear is not None and end_poly.intersects(must_clear):
-                    continue
-                if others is not None and end_poly.intersects(others):
-                    continue                              # 终点压到了别的障碍物
-                swept = _swept_region(obs, nx, ny, th)
-                if not static_free.contains(swept):
-                    continue
-                if others is not None and swept.intersects(others):
-                    continue                              # 推动路径穿过了别的障碍物
-
-                blocks_route = 1 if (route is not None
-                                     and end_poly.intersects(route)) else 0
-                penalty = 1 if (avoid is not None and end_poly.intersects(avoid)) else 0
-                # 仍压在该障碍物原本阻挡的通道上的比例（0~1）。硬约束只保证腾空了当前
-                # 这一条边，这一项负责把"顺带让开其他通道"变成偏好，抑制反复推同一个
-                # 物体。用面积占比而非计数：一次相交运算即可，且天然归一化。
-                residual_frac = 0.0
-                if residual is not None:
-                    inter = end_poly.intersection(residual)
-                    if not inter.is_empty:
-                        residual_frac = inter.area / end_poly.area
-                dist = math.hypot(nx - cx, ny - cy)
-                # 加权求和而非字典序：各偏好都折算成"等效米数"叠加到推动距离上。
-                # 字典序会让任意一项无条件压倒距离，从而选出很远、很糟的落点——迷宫里
-                # route 只是直线代理、并不可靠，一旦让它独裁就会把障碍物推进真正的通道。
-                score = (dist + W_ROUTE * blocks_route + W_AVOID * penalty
-                         + W_RESIDUAL * residual_frac)
-                cand = (round(score, 3), round(dist, 3), (nx, ny, th))
-                if best is None or cand[:2] < best[:2]:
-                    best = cand
-    if best is None:
-        return (False, math.inf, None)
-    return (True, best[1], best[2])
 
 
 # ---------- 计算器 1b：SE2 推动路径规划 ---------- #
@@ -212,7 +95,7 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
                       bounds: Tuple[float, float, float, float],
                       robot_pos: Tuple[float, float], cfg: Config,
                       others_polys=None) -> push_planner.PushPlanner:
-    """取得（或构建）与这组参数对应的 PushPlanner，两条推动路径共用。"""
+    """取得（或构建）与这组参数对应的 PushPlanner。"""
     cell = _resolve_cell(bounds, cfg)
     # 工作圆半径 = 机器人到障碍物距离 + R_push（障碍物始终在圆内且有推送空间）
     dist_to_obs = math.hypot(robot_pos[0] - obs.x, robot_pos[1] - obs.y)
@@ -257,8 +140,9 @@ def push_plan_se2(
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
     """在 SE2 全空间搜索能腾空走廊的最省代价位姿。
 
-    与 push_plan() + push_path_plan() 的两步法不同，这里让旋转与不旋转的候选目标
-    在同一次 Dijkstra 里平等竞争。返回 (feasible, path, push_cost, goal_pose)。
+    位姿与到达它的路径由同一次 Dijkstra 一并给出，旋转与不旋转的候选目标平等竞争。
+    这是唯一的推动规划入口：搜不出来就是不可推动，不存在"瞬移到落点"的兜底。
+    返回 (feasible, path, push_cost, goal_pose)。
     """
     if not cfg.push_use_planner:
         return (False, None, math.inf, None)
@@ -271,46 +155,21 @@ def push_plan_se2(
         planner.set_corridor([c for c in corridor_verts if len(c) >= 3])
 
         result = planner.plan_anywhere((obs.x, obs.y, obs.theta))
-        if result.success:
-            return (True, result.path, result.cost, result.goal)
-        return (False, None, math.inf, None)
+        if not result.success:
+            return (False, None, math.inf, None)
+        # 精确几何复核：规划器是在离散构型空间里判断"腾空"的，起点还会被吸附到格心，
+        # 于是可能出现真实位姿压着走廊、格心却不压的错位——那样它会把"原地不动"当成
+        # 零代价解返回。搜索侧据此认定该障碍物免费让开，机器人过去执行一次零位移的
+        # 推动，走廊纹丝不动，下一轮再得出同样结论，就此无限空转。
+        # 这里用 shapely 按真实几何再判一次，通不过就判该障碍物本轮不可推动。
+        end_poly = obs.polygon_at(*result.goal)
+        if any(end_poly.intersects(p) for p in (must_clear_polys or [])):
+            cfg.log(f"[push_plan_se2] oid={obs.oid} 目标位姿实际未腾空走廊，判为无解")
+            return (False, None, math.inf, None)
+        return (True, result.path, result.cost, result.goal)
     except Exception as e:
         cfg.log(f"[push_plan_se2] error: {e}")
         return (False, None, math.inf, None)
-
-
-def push_path_plan(
-    obs: MovableObstacle,
-    drop_pose: Tuple[float, float, float],
-    static_obstacles,
-    bounds: Tuple[float, float, float, float],
-    robot_pos: Tuple[float, float],
-    cfg: Config,
-    others_polys=None,
-) -> Tuple[bool, Optional[list], float]:
-    """规划从障碍物当前位置到指定放置位姿的连续推动路径。
-
-    `others_polys` 必须与 push_plan() 用的是同一组：漏传会让这条回退路径规划出
-    穿过其他可移动障碍物的推动轨迹。
-    """
-    if not cfg.push_use_planner:
-        return (False, None, math.inf)
-    try:
-        start_pose = (obs.x, obs.y, obs.theta)
-        if (abs(start_pose[0] - drop_pose[0]) < 1e-6
-                and abs(start_pose[1] - drop_pose[1]) < 1e-6
-                and abs(push_planner.wrap_dtheta(start_pose[2], drop_pose[2])) < 1e-6):
-            return (True, [start_pose, drop_pose], 0.0)
-
-        planner = _get_push_planner(obs, static_obstacles, bounds, robot_pos,
-                                    cfg, others_polys)
-        result = planner.plan_path(start_pose, drop_pose)
-        if result.success:
-            return (True, result.path, result.cost)
-        return (False, None, math.inf)
-    except Exception as e:
-        cfg.log(f"[push_path_plan] SE2 planner error: {e}")
-        return (False, None, math.inf)
 
 
 # ---------- 计算器 1c：推动做功 ---------- #

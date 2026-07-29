@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import Dict, List, Set, Tuple
 from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import unary_union
 from obstacle import MovableObstacle
 from roadmap import Roadmap, EdgeKey
 from config import Config
@@ -62,10 +63,15 @@ class Belief:
 
     def _sync_pose(self, known: MovableObstacle, world_obs: MovableObstacle):
         """把已感知副本的位姿对齐到世界真实位姿。"""
+        old_footprint = known.polygon
         self._forget_edges(known.oid)
         known.x, known.y, known.theta = world_obs.x, world_obs.y, world_obs.theta
         known.removed = world_obs.removed
         self._update_edges_for(known)
+        # 机器人亲眼看到它已经不在原处了，压在【旧】footprint 上的匿名接触区随之作废。
+        # 这些 blob 多半就是当初撞到它时留下的记录；不清理的话，一个已经让开的障碍物
+        # 会在原地留下一堵永久的幽灵墙，把那条通道对所有后续规划封死。
+        self._clear_contacts_overlapping(old_footprint)
 
     # -------------------- 可见性（多点采样 + 墙体遮挡） ----------------------
     def _half_edge_samples(self, obs: MovableObstacle):
@@ -148,7 +154,15 @@ class Belief:
                 return
         if region.area <= 1e-9:      # 只剩浮点碎片
             return
-        self.contacts.append(region)
+        # 与已有接触区相接的并进去，不要另起一块。反复顶同一个未知物体会一次留下
+        # 一小片薄条，只追加的话 contacts 会无限增长：`_removal` 每次都要对它做
+        # unary_union，SE2 构型空间的缓存键（others 的 WKB）也每次都变、永不命中。
+        merged = [region]
+        rest = []
+        for c in self.contacts:
+            (merged if c.intersects(region) else rest).append(c)
+        rest.append(unary_union(merged) if len(merged) > 1 else region)
+        self.contacts = rest
 
     def _clear_contacts_overlapping(self, poly: Polygon):
         """某障碍物被完整感知后，删除与其重叠的匿名接触记录（已被真实 footprint 取代）。"""

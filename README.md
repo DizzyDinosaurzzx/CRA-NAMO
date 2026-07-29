@@ -32,7 +32,7 @@ A summary figure is written to `img/summary_<scenario>.png`.
 |---|---|---|
 | Cost function `J` | `config.py` (`lambda_d`, `lambda_w`) | weights set per platform |
 | Augmented roadmap (增广路网) | `roadmap.py` | built **once** on the static walls; movable obstacles only mark which edges are currently "pay-to-unlock", never change the graph |
-| Two geometry calculators (两个几何计算器) | `geometry.py` | `push_plan` = sampling-based relocation (feasibility + real push distance, non-backfiring drop); `walking_distance` = real travel distance through static free space |
+| Two geometry calculators (两个几何计算器) | `geometry.py` | `push_plan_se2` = SE2 relocation search (drop pose and the continuous push path to it come from one Dijkstra; no solution = not pushable); `walking_distance` = real travel distance through static free space |
 | LLM difficulty estimate | `llm_difficulty.py` | DeepSeek-V3 via the same API pattern as the base repo, or an offline `material-density x area` heuristic. Used **only to order the search** |
 | Perception + online replanning (感知与在线重规划) | `perception.py` | perception circle `R_perc`, occlusion so moving an obstacle reveals what was behind it, **incremental** edge updates, optimism about unexplored space |
 | Best-first `f=g+h` + branch & bound (搜索过程) | `search.py` | `g` = accumulated cost, admissible `h = lambda_d * Euclid-to-goal`, incumbent pruning; removal restricted to radius `R_push` |
@@ -69,7 +69,7 @@ is occluded by `A` until `A` is moved.
 ```
 config.py          all tunable parameters (lambda_d, lambda_w, R_perc, R_push, ...)
 obstacle.py        StaticObstacle / MovableObstacle (material + ground-truth difficulty)
-geometry.py        push_plan() and walking_distance() — the two geometry calculators
+geometry.py        push_plan_se2() and walking_distance() — the two geometry calculators
 roadmap.py         build-once augmented roadmap with pay-to-unlock edges
 llm_difficulty.py  DeepSeek difficulty estimate + offline heuristic fallback
 perception.py      perception circle, occlusion, incremental belief update
