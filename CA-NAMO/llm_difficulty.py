@@ -1,5 +1,3 @@
-"""使用LLM估计障碍物移动难度"""
-
 from __future__ import annotations
 import os
 import re

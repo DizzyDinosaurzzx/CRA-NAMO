@@ -5,8 +5,8 @@ from obstacle import MovableObstacle, StaticObstacle
 
 def create():
     workspace = box(0, 0, 30, 30)
-    t = 0.45
 
+    t = 0.45
     walls = [
         # ===== 外框 =====
         StaticObstacle(box(0.0, 0.0, 10.0, t), "outer_bottom_left"),
@@ -72,7 +72,6 @@ def create():
             difficulty=100,
             oid=1,
         ),
-
         # C：靠近左上目标区的岔路口。
         MovableObstacle(
             x=11,
@@ -84,7 +83,6 @@ def create():
             difficulty=15,
             oid=3,
         ),
-
          # D：靠近左上目标区的岔路口。
         MovableObstacle(
             x=13.5,
@@ -107,12 +105,23 @@ def create():
             difficulty=1,
             oid=5,
         ),
+        # F：靠近左上目标区的岔路口。
+        MovableObstacle(
+            x=9,
+            y=28.7,
+            l=1,
+            d=1,
+            theta=0.0,
+            material="styrofoam_box",   # 0.004 x 1.00 = 0.004
+            difficulty=0.004,
+            oid=6,
+        ),
     ]
+
     start = (12.5, 1.5)
     goal = (2.5, 28.0)
 
     return {
-        "name": "maze_three_b",
         "workspace": workspace,
         "static": walls,
         "movable": movable,

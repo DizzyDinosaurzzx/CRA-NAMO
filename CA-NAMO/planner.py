@@ -94,20 +94,11 @@ class OnlineNAMO:
 
     # 主感知循环
     def run(self) -> RunResult:
-        """
-        主循环（每一次重规划）：
-        1. 规划 — 在当前信念路网上搜索最优路径（含"绕路 vs 推开障碍物"的决策）
-        2. 执行 — 按规划的动作序列逐步推进（移动或推动）
-        3. 感知 — 每步后扫描可见区域，发现新障碍物则更新信念
-        4. 触碰 — 机器人碰到障碍物时揭示其真实 difficulty
-        5. 碰撞回退 — 移动/推动中撞上未知障碍物 → 更新信念 → 本轮终止
-        6. 若未到达目标 → 信念已更新 → 回到步骤 1 重规划
-        """
         cfg = self.cfg
         res = RunResult(success=False, llm_mode=self.estimator.mode)
         node = self.start_node                           # 机器人当前所在路网节点
         res.robot_track.append(self.roadmap.nodes[node])
-
+        
         # 初始感知：扫描起点周围的可见障碍物
         self.belief.perceive(self.world, self.roadmap.nodes[node])
         self._capture_frame(res, node, "start")

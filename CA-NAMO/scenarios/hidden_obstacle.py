@@ -7,8 +7,10 @@ def create():
     workspace = box(0, 0, 28, 40)
     walls = [
         StaticObstacle(box(0.0, 19.5, 3.0, 20.5), "wall_left"),
-        StaticObstacle(box(7.0, 19.5, 21.0, 20.5), "wall_mid"),
-        StaticObstacle(box(25.0, 19.5, 28.0, 20.5), "wall_right"),
+        # 远门（右侧门缝）由 4.0 加宽到 4.5：两侧各让 0.25，门缝中心仍在 x=23，
+        # 与 B / C 的中心对齐。
+        StaticObstacle(box(7.0, 19.5, 20.75, 20.5), "wall_mid"),
+        StaticObstacle(box(25.25, 19.5, 28.0, 20.5), "wall_right"),
     ]
 
     movable = [
@@ -19,8 +21,8 @@ def create():
             l=3.4,
             d=1.4,
             theta=0.0,
-            material="dizzydinosaur",  # 37.5 x 4.76 = 178.5
-            difficulty=2.5,
+            material="industrial_machines",  # 37.5 x 4.76 = 178.5
+            difficulty=180,
             oid=1,
         ),
         # B：堵住远门、位于 C 的上方，难度排名第三，B 的底部与 C 的顶部相接，但二者不重叠。
@@ -49,7 +51,6 @@ def create():
     ]
 
     return {
-        "name": "two_doors_hidden_c",
         "workspace": workspace,
         "static": walls,
         "movable": movable,

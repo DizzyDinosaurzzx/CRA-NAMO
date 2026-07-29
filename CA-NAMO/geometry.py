@@ -104,7 +104,8 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
 
     key = (obs.l, obs.d, bounds, robot_pos, round(work_radius, 6), cell,
            cfg.push_n_theta, cfg.push_connectivity, cfg.push_rot_weight,
-           cfg.push_containment, _geometry_signature(others_polys))
+           cfg.push_containment, cfg.push_forward_penalty,
+           _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
         _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # 标记为最近使用
@@ -121,6 +122,7 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
         connectivity=cfg.push_connectivity,
         rot_weight=cfg.push_rot_weight,
         containment=cfg.push_containment,
+        forward_penalty=cfg.push_forward_penalty,
         verbose=cfg.verbose,
     )
     _PLANNER_CACHE[key] = planner

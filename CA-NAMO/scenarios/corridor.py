@@ -26,7 +26,6 @@ def create():
     ]
 
     return {
-        "name": "corridor",
         "workspace": workspace,
         "static": walls,
         "movable": movable,

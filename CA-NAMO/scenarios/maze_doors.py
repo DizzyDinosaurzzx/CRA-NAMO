@@ -282,7 +282,6 @@ def create():
     ]
 
     return {
-        "name": "maze_to_house",
         "workspace": workspace,
         "static": walls,
         "movable": movable,

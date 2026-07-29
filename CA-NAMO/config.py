@@ -1,22 +1,19 @@
-"""CA-NAMO的全局配置"""
-
 from __future__ import annotations
 from dataclasses import dataclass
 
-
-def validate_lambda(value: float) -> float: #lambda_distance 负数检验
+def validate_lambda(value: float) -> float: #lambda_distance 正数检验
     value = float(value)
-    if value < 0:
-        raise ValueError("lambda_distance 必须为非负数")
+    if value <= 0:
+        raise ValueError("lambda_distance 必须为正数")
     return value
 
 @dataclass
 class Config:
     # -------- 机器人 -------- #
-    robot_radius: float = 0.35 # 机器人半径
+    robot_radius: float = 0.3    # 机器人半径
 
     # -------- 代价函数 J = lambda * D + W -------- #
-    lambda_distance: float = 1     # 移动做工系数
+    lambda_distance: float = 1    # 移动做工系数
 
     # -------- 感知 -------- #
     R_perc: float = 1000.0       # 感知半径
@@ -24,6 +21,7 @@ class Config:
 
     # -------- 操作 -------- #
     R_push: float = 5.0       # 障碍物只能在当前位姿周围的该半径内重新放置
+    push_forward_penalty: float = 2.0
     check_obstacle_collision: bool = True  # 障碍物之间碰撞检测
     full_reveal_on_contact: bool = False
 
@@ -37,12 +35,12 @@ class Config:
     push_max_frames_per_action: int = 30
 
     # -------- 路网（全图统一网格） -------- #
-    grid_step: float = 0.6    # 路网节点网格间距
-    conn_radius: float = 1.2  # 路网节点的连接半径
+    grid_step: float = 0.5    # 路网节点网格间距
+    conn_radius: float = 1  # 路网节点的连接半径
 
     # -------- 搜索 -------- #
     use_llm_ordering: bool = True
-    max_expansions: int = 100000    
+    max_expansions: int = 10000    
 
     # -------- 在线循环 -------- #
     step_execute_edges: int = 1     # 重新感知频率

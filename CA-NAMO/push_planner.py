@@ -206,10 +206,12 @@ class PushPlanner:
                  connectivity: int = 8,
                  rot_weight: Optional[float] = None,
                  containment: str = "centroid",
+                 forward_penalty: float = 0.0,
                  verbose: bool = False):
         assert connectivity in (8, 16), "connectivity supports only 8 or 16"
         assert containment in ("body", "centroid")
 
+        self.forward_penalty = float(forward_penalty)
         self.wall_polys = wall_polys
         self.obstacle_w = obstacle_w
         self.obstacle_h = obstacle_h
@@ -329,9 +331,12 @@ class PushPlanner:
         self.allowed = self.free & self.in_disk
         # 未经 _unstick_start 豁免的原始版本。规划器实例是跨调用缓存的，而
         # _unstick_start() 会就地放开一小片格子——那是只对【某个起点】成立的豁免，
-        # 必须在下次规划前还原，否则会永久累积成虚假的可通行区域。
+        # 必须在【换起点】前还原，否则会永久累积成虚假的可通行区域。
+        # _unstuck_for 记住当前豁免是为哪个起点算的：起点没变时豁免依然成立，
+        # 可以原样留在 allowed 里复用（见 _unstick_start）。
         self._allowed_base = self.allowed.copy()
         self._unstuck = False
+        self._unstuck_for: Optional[Tuple[int, int, int]] = None
 
         # 走廊掩码只存被挡格子的 (i, j) 外包窗口那一小块，不再物化整格布尔数组：
         # 窗口通常只占全网格的百分之几，而 set_corridor 每轮规划要跑上百次。
@@ -366,9 +371,16 @@ class PushPlanner:
 
     def _unstick_start(self, start_idx: Tuple[int, int, int]) -> int:
         """优化器起点解卡：如果起点被膨胀障碍物阻塞，则在其附近搜索一小片可通行区域，豁免这些格子。"""
-        if self._unstuck:                 # 还原上一个起点留下的豁免
-            np.copyto(self.allowed, self._allowed_base)
+        if self._unstuck:
+            if self._unstuck_for == start_idx:
+                # 同一个起点：上次算出的豁免依然成立，构型空间与上次调用完全一致。
+                # 直接复用，并且必须返回 0 —— 返回非零会让调用方作废 _cache，
+                # 于是同一份 Dijkstra 结果会被反复重算（起点被 margin 封死的
+                # 障碍物每轮要问上百次，那是纯粹的重复劳动）。
+                return 0
+            np.copyto(self.allowed, self._allowed_base)   # 换起点了，还原旧豁免
             self._unstuck = False
+            self._unstuck_for = None
         if self.allowed[start_idx]:
             return 0
         if not self.in_disk[start_idx]:
@@ -409,6 +421,7 @@ class PushPlanner:
 
         if freed:
             self._unstuck = True
+            self._unstuck_for = start_idx
             if self.verbose:
                 x, y, _ = self._pose(*start_idx)
                 print(f"[push] unstuck {freed} states at ({x:.1f}, {y:.1f}) "
@@ -584,6 +597,69 @@ class PushPlanner:
         while len(_CORRIDOR_MASK_CACHE) > _CORRIDOR_MASK_CACHE_MAX:
             _CORRIDOR_MASK_CACHE.pop(next(iter(_CORRIDOR_MASK_CACHE)))
 
+    # ------------------------------------------------- 落点偏好（顺推加价）
+    def _forward_bias(self, start_pose: Tuple[float, float, float]):
+        """各落点的"顺推"加价，形状 (nx, ny)，单位与 dist 相同（整数量化单位）。
+
+        前进方向取【机器人 -> 障碍物】：机器人正是从这一侧靠上来的，顺着它把障碍物
+        推开就等于"顶着它往前走"——清掉了脚下这条边，却把它送到下一条边上，于是每轮
+        重规划再顶一段，一路推到底。
+
+        只对这个方向的位移分量加价，侧向和背后的分量不加价。因此它只改变【在若干个
+        同样合法的落点里选哪个】，不会让任何原本可行的推动变得不可行——这一点是刻意
+        的：先前用"必须让开加长走廊"的硬约束做同一件事，maze_doors 直接从成功变成了
+        跑满重规划次数。
+
+        与 theta 无关：只看形心位移，因此可以在 theta 维取完最小值之后再打分。
+        """
+        if self.forward_penalty <= 0.0:
+            return None
+        fx = start_pose[0] - self.robot_pos[0]
+        fy = start_pose[1] - self.robot_pos[1]
+        n = math.hypot(fx, fy)
+        if n < 1e-9:            # 机器人与障碍物重合，方向无从谈起
+            return None
+        fx, fy = fx / n, fy / n
+        along = (self.X - start_pose[0]) * fx + (self.Y - start_pose[1]) * fy
+        # dist 以 self.unit 米为一个整数单位，加价必须换算到同一量纲
+        return np.maximum(along, 0.0) * (self.forward_penalty / self.unit)
+
+    def _select_goal(self, dist: np.ndarray,
+                     start_pose: Tuple[float, float, float]) -> Tuple[int, bool]:
+        """在能腾空走廊的可达位姿里挑落点，返回 (flat 索引, 是否真的可达)。
+
+        可达性必须在走廊掩码还生效时判定：掩码一撤销，被挡住的格子就恢复成有限的
+        dist 值，再拿它判断会把"所有候选都被挡住"误判成有解。
+        """
+        INF = np.int64(1) << 62
+        nx, ny, nT = self.nx, self.ny, self.n_theta
+        d3 = dist.reshape(nx, ny, nT)
+        # 不可达的格子在 dist 里已是 INF；被走廊挡住的格子全部落在 _route_window 内，
+        # 把窗口内被挡的那些临时抬到 INF，就能直接对整条 dist 取极值。
+        win = self._route_window
+        sub = saved = None
+        if win is not None:
+            i0, i1, j0, j1 = win
+            sub = d3[i0:i1, j0:j1, :]
+            saved = sub[self._route_mask]    # 缓存的 dist 是共享的，必须原样还原
+            sub[self._route_mask] = INF
+        try:
+            bias = self._forward_bias(start_pose)
+            if bias is None:
+                best = int(np.argmin(dist))
+                return best, bool(dist[best] < INF)
+            # bias 与 theta 无关：先在 theta 维取最小，再在 (nx, ny) 上打分，
+            # 避免物化一个整格的三维浮点打分数组（这一步每轮规划要跑上百次）。
+            kbest = d3.argmin(axis=2)
+            dmin = np.take_along_axis(d3, kbest[:, :, None], axis=2)[:, :, 0]
+            score = np.where(dmin >= INF, np.inf, dmin + bias)
+            i, j = np.unravel_index(int(np.argmin(score)), score.shape)
+            k = int(kbest[i, j])
+            return int((i * ny + j) * nT + k), bool(dmin[i, j] < INF)
+        finally:
+            if sub is not None:
+                sub[self._route_mask] = saved
+
     def plan_anywhere(self,
                       start_pose: Tuple[float, float, float]) -> PushPlanResult:
         """规划最小代价推动到【任意】满足腾空 set_corridor() 所设走廊的位姿"""
@@ -609,26 +685,8 @@ class PushPlanner:
             self._cache = self._search(start_idx) + (start_flat,)
         dist, parent, _cached_start = self._cache
 
-        INF = np.int64(1) << 62
-        # 选取代价最小的目标：不可达的格子在 dist 里已经是 INF，被走廊挡住的格子
-        # 全部落在 _route_window 内，于是把窗口内被挡的那些临时抬到 INF，直接对
-        # 整条 dist 取 argmin 即可。相比"构造 reachable / goals / float 打分数组"
-        # 少了三个整格临时数组——这一步每轮规划要跑上百次，分配开销就是主要成本。
-        win = self._route_window
-        if win is None:
-            best = int(np.argmin(dist))
-        else:
-            i0, i1, j0, j1 = win
-            sub = dist.reshape(self.nx, self.ny, self.n_theta)[i0:i1, j0:j1, :]
-            blk = self._route_mask
-            saved = sub[blk]                 # 缓存的 dist 是共享的，必须原样还原
-            sub[blk] = INF
-            try:
-                best = int(np.argmin(dist))
-            finally:
-                sub[blk] = saved
-
-        if dist[best] >= INF:
+        best, reachable = self._select_goal(dist, start_pose)
+        if not reachable:
             return PushPlanResult(False, "没有可达位姿能腾空该路径")
 
         nyT = self.ny * self.n_theta
@@ -715,6 +773,7 @@ def build_push_planner(wall_polys,             # shapely Polygon 列表 — 不�
                        connectivity: int = 8,
                        rot_weight: Optional[float] = None,
                        containment: str = "centroid",
+                       forward_penalty: float = 0.0,
                        verbose: bool = False) -> PushPlanner:
     """从 CA-NAMO 风格的数据构建 PushPlanner。"""
     wall_verts = [polygon_exterior_coords(p) for p in wall_polys]
@@ -731,5 +790,6 @@ def build_push_planner(wall_polys,             # shapely Polygon 列表 — 不�
         connectivity=connectivity,
         rot_weight=rot_weight,
         containment=containment,
+        forward_penalty=forward_penalty,
         verbose=verbose,
     )

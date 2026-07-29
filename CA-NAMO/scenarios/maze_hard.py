@@ -4,7 +4,7 @@ from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
-    """创建 maze_two_movable 场景。"""
+    """30x30 迷宫，3 个高难度障碍物（steel_shelf 15 / steel_safe 20 / concrete_block 100）。"""
     workspace = box(0, 0, 30, 30)
     t = 0.45
     walls = [
@@ -100,7 +100,6 @@ def create():
     goal= (2.5, 28.0)
 
     return {
-        "name": "maze_two_movable",
         "workspace": workspace,
         "static": walls,
         "movable": movable,

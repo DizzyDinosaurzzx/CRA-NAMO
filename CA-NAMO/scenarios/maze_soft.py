@@ -4,6 +4,7 @@ from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
+    """30x30 迷宫，3 个低难度障碍物（foam_mat 0.2 / foam_mat 0.5 / empty_shelf 1.5）。"""
     workspace = box(0, 0, 30, 30)
 
     t = 0.45
@@ -17,20 +18,15 @@ def create():
 
         # ===== 左上区域 =====
         # 顶部左侧的倒 L 形结构
-        #StaticObstacle(box(5.0, 25.5, 5.0 + t, 29.6), "lu_vertical"),
-        StaticObstacle(box(5.5, 25.5, 14.8, 25.5 + t), "lu_horizontal"),
+        StaticObstacle(box(5.0, 25.5, 5.0 + t, 29.6), "lu_vertical"),
+        StaticObstacle(box(5.0, 25.5, 14.8, 25.5 + t), "lu_horizontal"),
 
         # 左侧中上横墙
         StaticObstacle(box(0.0, 20.8, 10.0, 20.8 + t), "left_upper_horizontal"),
         StaticObstacle(box(5.0, 16.5, 5.0 + t, 20.8), "left_upper_vertical"),
 
         # 中上竖墙
-        StaticObstacle(box(14.5, 20.8, 14.5 + t, 28), "upper_mid_vertical"),
-        StaticObstacle(box(11.5, 28, 11.5 + t, 29.6), "upper_mid_vertical"),
-        StaticObstacle(box(9.5, 25.6, 9.5 + t, 28), "upper_mid_vertical"),
-        StaticObstacle(box(7.5, 28, 7.5 + t, 29.6), "upper_mid_vertical"),
-        StaticObstacle(box(5.5, 25.6, 5.5 + t, 28), "upper_mid_vertical"),
-        
+        StaticObstacle(box(14.5, 20.8, 14.5 + t, 29.6), "upper_mid_vertical"),
 
         # ===== 右上区域 =====
         # 右上房间的 U / Γ 形结构
@@ -54,9 +50,7 @@ def create():
 
         # ===== 左下区域 =====
         # 左下小房间
-        StaticObstacle(box(5.0, 0.0, 5.45, 7), "ll_vertical"),
-        StaticObstacle(box(7.0, 12, 7.45, 3), "ll_vertical"),
-        StaticObstacle(box(3.0, 12, 3.45, 3), "ll_vertical"),
+        StaticObstacle(box(5.0, 0.0, 5.45, 5.2), "ll_vertical"),
         #StaticObstacle(box(0.0, 9.5, 9.8, 9.95), "ll_top_horizontal"),
     ]
 
@@ -68,61 +62,39 @@ def create():
             l=2,
             d=2,
             theta=0.0,
-            material="concrete_block",  # 25.0 x 4.00 = 100.0
-            difficulty=100,
+            material="foam_mat",        # 0.05 x 4.00 = 0.20
+            difficulty=0.2,
             oid=1,
         ),
+
+        # B：迷宫中央左右分流处。
+        MovableObstacle(
+            x=19,
+            y=14.4,
+            l=3,
+            d=3.4,
+            theta=0.0,
+            material="foam_mat",        # 0.05 x 10.20 = 0.51
+            difficulty=0.5,
+            oid=2,
+        ),
+
         # C：靠近左上目标区的岔路口。
         MovableObstacle(
-            x=11,
+            x=12.2,
             y=21.8,
-            l=2,
+            l=4,
             d=1.8,
             theta=0.0,
-            material="steel_shelf",     # 4.20 x 3.60 = 15.1
-            difficulty=15,
+            material="empty_shelf",     # 0.21 x 7.20 = 1.51
+            difficulty=1.5,
             oid=3,
-        ),
-         # D：靠近左上目标区的岔路口。
-        MovableObstacle(
-            x=13.5,
-            y=23,
-            l=2,
-            d=1.8,
-            theta=0.0,
-            material="steel_shelf",     # 4.20 x 3.60 = 15.1
-            difficulty=15,
-            oid=4,
-        ),
-        # E：靠近左上目标区的岔路口。
-        MovableObstacle(
-            x=6,
-            y=28.7,
-            l=1,
-            d=1,
-            theta=0.0,
-            material="pallet",          # 1.00 x 1.00 = 1.0
-            difficulty=1,
-            oid=5,
-        ),
-        # F：靠近左上目标区的岔路口。
-        MovableObstacle(
-            x=9,
-            y=28.7,
-            l=1,
-            d=1,
-            theta=0.0,
-            material="styrofoam_box",   # 0.004 x 1.00 = 0.004
-            difficulty=0.004,
-            oid=6,
         ),
     ]
 
     start = (12.5, 1.5)
     goal = (2.5, 28.0)
-
     return {
-        "name": "maze_three_a",
         "workspace": workspace,
         "static": walls,
         "movable": movable,

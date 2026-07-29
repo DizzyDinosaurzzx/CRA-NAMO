@@ -58,7 +58,6 @@ def create():
     ]
 
     return {
-        "name": "two_doors",
         "workspace": workspace,
         "static": walls,
         "movable": movable,
