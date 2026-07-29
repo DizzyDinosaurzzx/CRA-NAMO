@@ -13,14 +13,14 @@ class Config:
     robot_radius: float = 0.3    # 机器人半径
 
     # -------- 代价函数 J = lambda * D + W -------- #
-    lambda_distance: float = 100000    # 移动做工系数
+    lambda_distance: float = 1    # 移动做工系数
 
     # -------- 感知 -------- #
-    R_perc: float = 1000.0       # 感知半径
+    R_perc: float = 10.0       # 感知半径
     sight_width: float = 0.2     # 视线宽度
 
     # -------- 操作 -------- #
-    R_push: float = 5.0       # 障碍物只能在当前位姿周围的该半径内重新放置
+    R_push: float = 100       # 障碍物只能在当前位姿周围的该半径内重新放置
     push_forward_penalty: float = 2.0
     check_obstacle_collision: bool = True  # 障碍物之间碰撞检测
     full_reveal_on_contact: bool = False

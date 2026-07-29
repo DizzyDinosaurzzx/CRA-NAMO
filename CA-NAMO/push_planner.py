@@ -181,6 +181,17 @@ class PushPlanResult:
 # 起点解卡时，间隙从完整 margin 起最多减半这么多次；再不行才退到"精确不相交"。
 _UNSTICK_RELAX_STEPS = 4
 
+# 起点位姿撞墙判定的容差。**必须是负数**：`sat_rect_intersect` 的 eps 语义是
+# "分离量超过 eps 才算不相交"，取正值会把【恰好贴合】也判成碰撞。
+#
+# 而 wall_polys 里除了真墙，还塞着其他已感知的可移动障碍物（见 geometry.py
+# _get_push_planner）。两个障碍物紧挨着摆本来就是常态——门障碍物更是贴着门框设计的
+# ——一旦相切，双方的起点检查会互相否决，两个都变成"永远推不动"，对应的边直接被
+# _edge_cost 判成 inf 从搜索图里删掉。inf 不参与和 λ 的竞争，于是 λ 调到多大都救不回来。
+# 取负值表示"必须真正重叠才算碰撞"，相切放行；哪些推动方向真的会顶进邻居，
+# 交给构型空间去禁，而不是在这里一票否决整次规划。
+_START_COLLISION_EPS = -1e-6
+
 # 走廊掩码的缓存（见 PushPlanner.set_corridor）。值是 packbits 压缩的窗口掩码，
 # 一条走廊约几 KB，故上限可以开得很大；仍按 LRU 淘汰以防长时间运行时无界增长。
 _CORRIDOR_MASK_CACHE: Dict[tuple, tuple] = {}
@@ -668,12 +679,13 @@ class PushPlanner:
 
         if not self.in_disk[start_idx]:
             return PushPlanResult(False, "起点在工作圆之外")
-        # 检查起点与墙壁的碰撞（不带 margin）：障碍物实际上已经在那里了
+        # 检查起点与墙壁的碰撞（不带 margin）：障碍物实际上已经在那里了。
+        # 相切放行，见 _START_COLLISION_EPS。
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
                 O_start + np.array([start_pose[0], start_pose[1]]),
-                wp, eps=1e-6):
+                wp, eps=_START_COLLISION_EPS):
                 return PushPlanResult(False, "起点与墙壁碰撞")
 
         # 起点被吸附进墙 / 被 margin 封死时先解卡，否则搜索一步也走不出去
@@ -713,12 +725,12 @@ class PushPlanner:
 
         if not self.in_disk[start_idx]:
             return PushPlanResult(False, "起始位姿在机器人工作圆之外")
-        # 检查起点与墙壁的碰撞（不带 margin）
+        # 检查起点与墙壁的碰撞（不带 margin）。相切放行，见 _START_COLLISION_EPS。
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
                 O_start + np.array([start_pose[0], start_pose[1]]),
-                wp, eps=1e-6):
+                wp, eps=_START_COLLISION_EPS):
                 return PushPlanResult(False, "起始位姿与墙壁碰撞")
 
         if not self.free[goal_idx]:

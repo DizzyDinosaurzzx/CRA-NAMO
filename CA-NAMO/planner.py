@@ -34,6 +34,10 @@ from llm_difficulty import DifficultyEstimator
 from search import Planner, push_signature
 import geometry
 
+# 执行期碰撞判据的面积阈值：相切的接触面积恰好是 0，真实穿模远大于这个数量级。
+# 见 _world_collision。
+_CONTACT_AREA_EPS = 1e-9
+
 # 仿真结果汇总
 @dataclass
 class RunResult:
@@ -222,23 +226,43 @@ class OnlineNAMO:
         return None
 
     def _world_collision(self, oid: int, nx: float, ny: float, theta: float):
-        """真实世界物理校验: 把 oid 推到 (nx, ny, theta) 是否撞上东西"""
+        """真实世界物理校验: 把 oid 推到 (nx, ny, theta) 是否撞上东西
+
+        判据是【重叠面积】而不是 shapely 的 `.intersects()`：后者对**恰好贴合**也返回
+        True，而扫掠区永远包含起点位姿，所以只要有邻居紧挨着当前障碍物，它的第一步
+        无论往哪个方向推都会被判成撞车（接触面积 0.0），于是这一对障碍物互相锁死、
+        谁也动不了。maze_doors 里 oid 7 和 8 就是这样一对（底边/顶边同为 y=4.05）。
+
+        这与 push_planner._START_COLLISION_EPS 是同一个取舍：相切不算碰撞，必须真正
+        重叠才算。真实的擦碰重叠面积远在阈值之上（实测撞墙那次是 0.0063 m²）。
+        """
         if not self.cfg.check_obstacle_collision:
             return []
         mover = self._world_obstacle(oid)
         end_poly = mover.polygon_at(nx, ny, theta)
         swept = geometry._swept_region(mover, nx, ny, theta)
         hits = []
+
+        def overlapping(poly):
+            """返回接触区；只贴合不重叠时返回 None。"""
+            contact = swept.intersection(poly)
+            if contact.area > _CONTACT_AREA_EPS:
+                return contact
+            # 扫掠区已经包含终点位姿，正常情况下不必再单独判 end_poly；这里兜住
+            # _swept_region 在退化输入下可能给出偏小几何的情形。
+            end_contact = end_poly.intersection(poly)
+            return end_contact if end_contact.area > _CONTACT_AREA_EPS else None
+
         for w in self.world:
             if w.oid == oid:
                 continue
-            wp = w.polygon
-            if end_poly.intersects(wp) or swept.intersects(wp):
-                contact = swept.intersection(wp)   # 只"摸到"接触重叠区，非整个障碍物
+            contact = overlapping(w.polygon)   # 只"摸到"接触重叠区，非整个障碍物
+            if contact is not None:
                 hits.append((w.oid, contact))
         for so in self.static_obstacles:
-            if end_poly.intersects(so.polygon) or swept.intersects(so.polygon):
-                hits.append((None, swept.intersection(so.polygon)))
+            contact = overlapping(so.polygon)
+            if contact is not None:
+                hits.append((None, contact))
         return hits
 
     def _handle_push_collision(self, res: RunResult, node: int, oid: int, hits):
