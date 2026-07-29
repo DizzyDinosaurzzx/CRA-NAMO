@@ -1,19 +1,10 @@
-"""根据用户提供的迷宫图片近似复刻的场景，含 2 个岔路口可移动障碍物。"""
 from __future__ import annotations
-
 from shapely.geometry import box
-
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
-
 def create():
-    """创建 maze_two_movable 场景。"""
     workspace = box(0, 0, 30, 30)
-
-    # 墙厚统一设为 0.45。
-    # 坐标系：左下角为 (0, 0)，右上角为 (30, 30)。
-    # 起点位于底部中央开口，目标位于左上区域。
     t = 0.45
 
     walls = [
@@ -95,27 +86,27 @@ def create():
         ),
 
          # D：靠近左上目标区的岔路口。
-                MovableObstacle(
-                    x=13.5,
-                    y=23,
-                    l=2,
-                    d=1.8,
-                    theta=0.0,
-                    material="steel_shelf",     # 4.20 x 3.60 = 15.1
-                    difficulty=15,
-                    oid=4,
-                ),
+        MovableObstacle(
+            x=13.5,
+            y=23,
+            l=2,
+            d=1.8,
+            theta=0.0,
+            material="steel_shelf",     # 4.20 x 3.60 = 15.1
+            difficulty=15,
+            oid=4,
+        ),
         # E：靠近左上目标区的岔路口。
-                MovableObstacle(
-                    x=6,
-                    y=28.7,
-                    l=1,
-                    d=1,
-                    theta=0.0,
-                    material="pallet",          # 1.00 x 1.00 = 1.0
-                    difficulty=1,
-                    oid=5,
-                ),
+        MovableObstacle(
+            x=6,
+            y=28.7,
+            l=1,
+            d=1,
+            theta=0.0,
+            material="pallet",          # 1.00 x 1.00 = 1.0
+            difficulty=1,
+            oid=5,
+        ),
     ]
     start = (12.5, 1.5)
     goal = (2.5, 28.0)

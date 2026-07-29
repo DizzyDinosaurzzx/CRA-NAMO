@@ -1,5 +1,3 @@
-"""Corridor scenario: start and goal in same corridor, separated by one movable obstacle."""
-
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
@@ -27,8 +25,6 @@ def create():
         ),
     ]
 
-    cfg = Config()
-
     return {
         "name": "corridor",
         "workspace": workspace,
@@ -36,5 +32,5 @@ def create():
         "movable": movable,
         "start": (4.0, 4.0),
         "goal": (36.0, 4.0),
-        "cfg": cfg,
+        "cfg": Config(),
     }

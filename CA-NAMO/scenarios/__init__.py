@@ -22,6 +22,7 @@ SCENARIOS: dict[str, str] = {
     "maze_three_a": "scenario_maze_three_a",
     "maze_three_b": "scenario_maze_three_b",
     "maze_four": "scenario_maze_four",
+    "maze_to_house": "scenario_maze_to_house",
 }
 REQUIRED_FIELDS = {
     "name",
