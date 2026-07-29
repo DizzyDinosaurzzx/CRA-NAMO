@@ -30,8 +30,8 @@ def create():
             l=3.8,
             d=1.8,
             theta=0.0,
-            material="cart",                # 0.30 x 6.84 = 2.05
-            difficulty=2.0,
+            material="styrofoam_box",                # 0.30 x 6.84 = 2.05
+            difficulty=0.03,
             oid=2,
         ),
         # C：从上方房间观察时被 B 完全遮挡，难度排名第一。

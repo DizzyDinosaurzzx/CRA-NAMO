@@ -1,13 +1,11 @@
-"""
-障碍物数据结构
-"""
+"""碍物数据结构"""
+
 from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Optional
 import numpy as np
 from shapely.geometry import Polygon
-
 
 def _rect_polygon(x: float, y: float, l: float, d: float, theta: float) -> Polygon:
     hl, hd = l / 2.0, d / 2.0

@@ -10,10 +10,10 @@ from config import Config
 
 # 材质 -> 单位底面积的操作难度系数，估计值 difficulty ~= density * (l * d)。
 MATERIAL_DENSITY: Dict[str, float] = {
-    # ---- 极轻：几乎没有阻力 ----
+    # ---- 极轻---- #
     "styrofoam_box": 0.004,
     "foam_mat": 0.05,
-    # ---- 轻：单手可推 ----
+    # ---- 轻 ---- #
     "cardboard_box": 0.07,
     "empty_cart": 0.08,
     "plastic_chair": 0.10,
@@ -22,7 +22,7 @@ MATERIAL_DENSITY: Dict[str, float] = {
     "chair": 0.20,
     "empty_shelf": 0.21,
     "cart": 0.30,
-    # ---- 中：需要身体发力 ----
+    # ---- 中---- #
     "wooden_table": 0.50,
     "wooden_crate": 0.75,
     "shelf": 0.80,
@@ -30,14 +30,14 @@ MATERIAL_DENSITY: Dict[str, float] = {
     "cabinet": 0.90,
     "pallet": 1.00,
     "loaded_pallet": 1.10,
-    # ---- 重：勉强推得动 ----
+    # ---- 重---- #
     "filing_cabinet": 2.50,
     "steel_shelf": 4.20,
     "steel_safe": 5.50,
-    # ---- 极重：实际上等同于墙 ----
+    # ---- 极重---- #
     "concrete_block": 25.0,
     "industrial_machine": 37.5,
-    # ---- 兜底 ----
+    # ---- 兜底 ---- #
     "unknown": 0.50,
 }
 # 同义词表格
@@ -70,16 +70,12 @@ _NON_WORD = re.compile(r"[^a-z0-9]+")
 def _normalise(name) -> str: #名字规范化
     return _NON_WORD.sub("_", str(name).strip().lower()).strip("_")
 
-def material_density(name) -> float:
-    """材质名 -> 难度系数：精确匹配 -> 别名 -> 词元匹配 -> unknown。"""
+def material_density(name) -> float: 
     key = _normalise(name)
     if key in MATERIAL_DENSITY:
         return MATERIAL_DENSITY[key]
     if key in MATERIAL_ALIASES:
         return MATERIAL_DENSITY[MATERIAL_ALIASES[key]]
-
-    # 组合词回退："reinforced_steel_safe" -> 命中 steel_safe。
-    # 取命中项里最重的一档：多出来的修饰词通常意味着更难推（loaded/steel/...）。
     tokens = set(key.split("_"))
     hits = [v for k, v in MATERIAL_DENSITY.items()
             if k != "unknown" and tokens & set(k.split("_"))]
@@ -96,8 +92,7 @@ class DifficultyEstimator:
         self.mode = "deepseek" if self.api_key else "heuristic"
 
     # -------------公共接口-------------- #
-    def estimate(self, obs_obs: dict) -> float:
-        """Return an estimated difficulty for a *perceived* obstacle observation."""
+    def estimate(self, obs_obs: dict) -> float: # 读取材质
         oid = obs_obs["oid"]
         if oid in self.cache:
             return self.cache[oid]
@@ -113,7 +108,6 @@ class DifficultyEstimator:
 
     # -------------启发式方法--------------- #
     def _heuristic(self, o: dict) -> float:
-        """difficulty ~= 材质系数 x 底面积。只依赖感知得到的材质标签与几何尺寸。"""
         density = material_density(o.get("material", "unknown"))
         area = o.get("area")
         if not area:
@@ -122,11 +116,6 @@ class DifficultyEstimator:
 
     # -------------LLM估计--------------- #
     def _build_prompt(self, o: dict) -> str:
-        """构造询问 prompt。
-
-        只给少量跨量级的标定锚点，用来对齐量纲；**被查询材质本身及与它共享词元的
-        材质会被剔除**，否则 LLM 只需查表相乘就能复现启发式，等于白问。
-        """
         asked = set(_normalise(o.get("material", "")).split("_"))
         anchors = "\n".join(
             f"  {name:<18s} {MATERIAL_DENSITY[name]:g}"
@@ -175,7 +164,6 @@ class DifficultyEstimator:
                 if r.status_code >= 400:
                     error = data.get("error", data) if isinstance(data, dict) else data
                     self.cfg.log(f"[LLM] HTTP {r.status_code}: {error}")
-                    # 参数、鉴权等 4xx 错误重复请求不会自行恢复；限流和超时除外。
                     retryable = r.status_code >= 500 or r.status_code in {408, 409, 429}
                     if not retryable:
                         return None
@@ -191,7 +179,7 @@ class DifficultyEstimator:
                 m = re.search(r"[-+]?\d*\.?\d+", text)
                 if m:
                     return float(m.group())
-            except Exception as e:            # noqa: BLE001 - 任意失败都回退
+            except Exception as e:           
                 self.cfg.log(f"[LLM] call failed ({attempt}): {e}")
                 if attempt < self.cfg.llm_max_retries:
                     time.sleep(2.0)

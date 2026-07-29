@@ -14,7 +14,6 @@ def validate_lambda(value: float) -> float: #lambda_distance 负数检验
 class Config:
     # -------- 机器人 -------- #
     robot_radius: float = 0.35 # 机器人半径
-    touch_margin: float = 0.15 # 触摸感知余量
 
     # -------- 代价函数 J = lambda * D + W -------- #
     lambda_distance: float = 1     # 移动做工系数
@@ -47,7 +46,7 @@ class Config:
 
     # -------- 在线循环 -------- #
     step_execute_edges: int = 1     # 重新感知频率
-    max_replans: int = 10000         
+    max_replans: int = 1000         
 
     # -------- LLM-------- #
     deepseek_api_key: str = ""     

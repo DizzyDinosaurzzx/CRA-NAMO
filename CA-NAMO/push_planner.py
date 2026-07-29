@@ -58,11 +58,7 @@ def c_obstacle(shape_poly: np.ndarray, obs_corners_local: np.ndarray) -> np.ndar
 
 def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
                   margin: float = 0.0) -> np.ndarray:
-    """判断点是否在逆时针凸多边形内部（向外膨胀 margin）
-
-    X 与 Y 只需可广播，不必是同形的 meshgrid：栅格化局部窗口时传 (di,1) 与 (1,dj)
-    两条坐标轴即可，省掉为每个窗口物化一对二维坐标网格的开销。
-    """
+    """判断点是否在逆时针凸多边形内部（向外膨胀 margin） """
     poly = np.asarray(poly, dtype=float)
     n = len(poly)
     shape = np.broadcast(X, Y).shape
@@ -359,13 +355,7 @@ class PushPlanner:
         return False
 
     def _unstick_clearance(self, pose: Tuple[float, float, float]) -> Optional[float]:
-        """能让该位姿脱离碰撞的最大间隙；从完整 margin 起逐次减半。全都不行返回 None。
-
-        豁免只放松到"刚好够把起点解出来"为止。原先直接用零间隙（eps=1e-9）一刀切，
-        等于把一整片贴着墙面、间隙为 0 的位姿放进搜索空间——规划器于是心安理得地
-        规划出擦着墙走的路径，而格点之间的连续运动没有任何余量可以吸收离散化误差，
-        障碍物就被推进了墙里。
-        """
+        """能让该位姿脱离碰撞的最大间隙；从完整 margin 起逐次减半，全都不行返回 None"""
         c = self.margin
         for _ in range(_UNSTICK_RELAX_STEPS):
             if not self._true_collision(pose, c):
