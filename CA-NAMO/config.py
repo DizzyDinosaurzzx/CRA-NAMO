@@ -48,7 +48,7 @@ class Config:
     max_replans: int = 10000
 
     # -------- LLM -------- #
-    deepseek_api_key: str = "sk-08760d6dfd7c46d6928bebd3689b25c7"
+    deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-pro"
     llm_timeout: float = 30.0
