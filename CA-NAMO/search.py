@@ -119,13 +119,31 @@ class Planner:
         blockers = self.belief.blockers_of(key)
         if not blockers:
             return base, []
+
+        # "shortest" — always push through blockers regardless of work cost.
+        # Push plans are still computed (needed for execution), but the work
+        # penalty is omitted from the edge cost so the search prefers the
+        # geometrically shortest path.
+        # "easiest"  — heavily penalise pushing so detours are preferred,
+        # but obstacles can still be pushed when no detour exists.
+        # "normal"   — full J = λ·D + W; both path length and push work matter.
+        if cfg.strategy == "shortest":
+            work_mult = 0.0
+            work_bias = 0.0
+        elif cfg.strategy == "easiest":
+            work_mult = 1.0
+            work_bias = 50.0    # per-obstacle surcharge — prefer any reasonable detour
+        else:
+            work_mult = 1.0
+            work_bias = 0.0
+
         removals = []
         extra = 0.0
         for oid in blockers:
             feasible, work, drop, push_dist, push_path = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
-            extra += work
+            extra += work * work_mult + work_bias
             removals.append((oid, drop, push_dist, work, push_path))
         return base + extra, removals
 

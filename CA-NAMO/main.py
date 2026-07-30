@@ -157,9 +157,10 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     # assemble title info. In maps like maze_doors, moved may have dozens of ids;
     # listing them all would span many lines, so only report the count when long.
     push_mode = "SE2" if sim.cfg.push_use_planner else "teleport"
+    strategy = sim.cfg.strategy
     moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
              else (str(res.removed) if res.removed else "none"))
-    title = (f"{res.message}  |  J={res.J} "
+    title = (f"[{strategy}] {res.message}  |  J={res.J} "
              f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
              f"moved={moved}  |  push={push_mode}  |  LLM={res.llm_mode}")
     _finish_ax(ax, sim, title)
@@ -202,7 +203,7 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
     ax.plot(rx, ry, marker="o", color="darkred", ms=4, zorder=8, label="robot")
 
     # title: step N / total | action label | cumulative cost
-    title = f"step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
+    title = f"[{sim.cfg.strategy}] step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
     _finish_ax(ax, sim, title)
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -231,11 +232,20 @@ def main():
                     help="Disable LLM-based intelligent ordering of obstacle processing")
     ap.add_argument("--frames", action="store_true",
                     help="Save per-step frame images of robot motion to img/frames_<map_name>/")
+    ap.add_argument("--strategy", default=None,
+                    choices=["normal", "shortest", "easiest"],
+                    help="Planning strategy: normal (optimal J=λD+W), "
+                         "shortest (minimise path, ignore W), "
+                         "easiest (detour around all obstacles)")
     args = ap.parse_args()
 
     # load scenario
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
+
+    # command-line override of strategy
+    if args.strategy is not None:
+        cfg.strategy = args.strategy
 
     # command-line override of λ in config
     if args.lambda_distance is not None:
@@ -260,7 +270,7 @@ def main():
     
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
-    print(f"Scenario: {s['name']}   {sim.roadmap}")
+    print(f"Scenario: {s['name']}   strategy={cfg.strategy}   {sim.roadmap}")
     print(f"Difficulty estimator: {sim.estimator.mode}"
           + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
     print("-" * 60)
@@ -281,13 +291,14 @@ def main():
     print(f"{'LLM calls':<{W}} : {res.llm_calls}  (mode={res.llm_mode})")
 
     # render summary plot
-    out = os.path.join(cfg.out_dir, f"summary_{s['name']}.png")
+    strategy_suffix = f"_{cfg.strategy}" if cfg.strategy != "normal" else ""
+    out = os.path.join(cfg.out_dir, f"summary_{s['name']}{strategy_suffix}.png")
     visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
 
     # render every motion frame
     if cfg.save_frames:
-        frames_dir = os.path.join(cfg.out_dir, f"frames_{s['name']}")
+        frames_dir = os.path.join(cfg.out_dir, f"frames_{s['name']}{strategy_suffix}")
         n = render_sequence(sim, res, original_poses, frames_dir)
         print(f"Saved {n} step frames -> {frames_dir}/step_000.png ... "
               f"step_{n - 1:03d}.png")

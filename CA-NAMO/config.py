@@ -39,6 +39,7 @@ class Config:
     conn_radius: float = 2  # roadmap node connection radius
 
     # -------- Search -------- #
+    strategy: str = "normal"    # "normal" | "shortest" | "easiest"
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
