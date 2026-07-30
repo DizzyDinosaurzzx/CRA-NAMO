@@ -6,12 +6,12 @@ from typing import Dict
 import requests
 from config import Config
 
-# Estimate: difficulty ~= density * (l * d).
+# 材质 -> 单位底面积的操作难度系数，估计值 difficulty ~= density * (l * d)。
 MATERIAL_DENSITY: Dict[str, float] = {
-    # ---- very light ---- #
+    # ---- 极轻---- #
     "styrofoam_box": 0.004,
     "foam_mat": 0.05,
-    # ---- light ---- #
+    # ---- 轻 ---- #
     "cardboard_box": 0.07,
     "empty_cart": 0.08,
     "plastic_chair": 0.10,
@@ -20,7 +20,7 @@ MATERIAL_DENSITY: Dict[str, float] = {
     "chair": 0.20,
     "empty_shelf": 0.21,
     "cart": 0.30,
-    # ---- medium ---- #
+    # ---- 中---- #
     "wooden_table": 0.50,
     "wooden_crate": 0.75,
     "shelf": 0.80,
@@ -28,17 +28,17 @@ MATERIAL_DENSITY: Dict[str, float] = {
     "cabinet": 0.90,
     "pallet": 1.00,
     "loaded_pallet": 1.10,
-    # ---- heavy ---- #
+    # ---- 重---- #
     "filing_cabinet": 2.50,
     "steel_shelf": 4.20,
     "steel_safe": 5.50,
-    # ---- very heavy ---- #
+    # ---- 极重---- #
     "concrete_block": 25.0,
     "industrial_machine": 37.5,
-    # ---- fallback ---- #
-    "unknown": 1,
+    # ---- 兜底 ---- #
+    "unknown": 0.50,
 }
-# Synonym table
+# 同义词表格
 MATERIAL_ALIASES: Dict[str, str] = {
     "box": "cardboard_box",
     "carton": "cardboard_box",
@@ -53,14 +53,36 @@ MATERIAL_ALIASES: Dict[str, str] = {
     "foam": "foam_mat",
     "styrofoam": "styrofoam_box",
 }
-PROMPT_ANCHORS = tuple(
-    name for name in sorted(MATERIAL_DENSITY, key=lambda k: MATERIAL_DENSITY[k])
-    if name != "unknown"
+# 提供给LLM的标定值
+PROMPT_ANCHORS = (
+    "styrofoam_box",
+    "foam_mat",
+  #  "cardboard_box",
+    "empty_cart",
+    "plastic_chair",
+   # "trash_bin",
+    "stool",
+   # "chair",
+    "empty_shelf",
+    "cart",
+    "wooden_table",
+    #"wooden_crate",
+    "shelf",
+    "sofa",
+  #  "cabinet",
+    "pallet",
+    "loaded_pallet",
+    "filing_cabinet",
+  #  "steel_shelf",
+    "steel_safe",
+   # "concrete_block",
+    "industrial_machine",
+    #"unknown",
 )
 
 _NON_WORD = re.compile(r"[^a-z0-9]+")
 
-def _normalise(name) -> str:  # normalise material name
+def _normalise(name) -> str: #名字规范化
     return _NON_WORD.sub("_", str(name).strip().lower()).strip("_")
 
 
@@ -72,13 +94,15 @@ def _canonical_anchor(name) -> str | None:
     alias_target = MATERIAL_ALIASES.get(key)
     return alias_target if alias_target in anchor_names else None
 
+
 def _footprint_area(o: dict) -> float:
     area = o.get("area")
     if not area:
         area = float(o["l"]) * float(o["d"])
     return float(area)
 
-def material_density(name) -> float:
+
+def material_density(name) -> float: 
     key = _normalise(name)
     if key in MATERIAL_DENSITY:
         return MATERIAL_DENSITY[key]
@@ -105,8 +129,8 @@ class DifficultyEstimator:
         self.calls = 0
         self.mode = "deepseek" if self.api_key else "heuristic"
 
-    # ------------- Public interface -------------- #
-    def estimate(self, obs_obs: dict) -> float:  # estimate difficulty from perceived material
+    # -------------公共接口-------------- #
+    def estimate(self, obs_obs: dict) -> float: # 读取材质
         oid = obs_obs["oid"]
         if oid in self.cache:
             self.object_cache_hits += 1
@@ -143,12 +167,12 @@ class DifficultyEstimator:
         self.cache[oid] = difficulty
         return difficulty
 
-    # ------------- Heuristic method --------------- #
+    # -------------启发式方法--------------- #
     def _heuristic(self, o: dict) -> float:
         density = material_density(o.get("material", "unknown"))
         return density * _footprint_area(o)
 
-    # ------------- LLM density estimation --------------- #
+    # -------------LLM估计 density--------------- #
     def _build_prompt(self, o: dict) -> str:
         material = _normalise(o.get("material", "unknown"))
         canonical = _canonical_anchor(material)
@@ -215,7 +239,7 @@ class DifficultyEstimator:
             "max_tokens": 32,
             "temperature": 0.0,
             "stream": False,
-            "thinking": {"type": "enabled"},
+            "thinking": {"type": "disabled"},
         }
         for attempt in range(self.cfg.llm_max_retries + 1):
             try:
@@ -252,7 +276,7 @@ class DifficultyEstimator:
                     f"(finish_reason={choice.get('finish_reason')!r}, text={text!r})")
                 if attempt < self.cfg.llm_max_retries:
                     time.sleep(2.0)
-            except Exception as e:
+            except Exception as e:           
                 self.cfg.log(f"[LLM] call failed ({attempt}): {e}")
                 if attempt < self.cfg.llm_max_retries:
                     time.sleep(2.0)
