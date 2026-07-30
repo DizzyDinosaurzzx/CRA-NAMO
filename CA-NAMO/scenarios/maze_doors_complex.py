@@ -135,7 +135,7 @@ def create():
     ]
 
     start = (28, 2)
-    goal = (4.5, 11)
+    goal = (23,15)
 
     manual_obstacles = [
         MovableObstacle(
@@ -238,7 +238,7 @@ def create():
             material="wooden_crate", difficulty=2.28, oid=25,
         ),
         MovableObstacle(
-            x=22.5, y=12.3, l=8.3, d=0.7, theta=1.07,
+            x=22.5, y=12.3, l=8.25, d=0.7, theta=1.07,
             material="wooden_crate", difficulty=4.62, oid=26,
         ),
         MovableObstacle(

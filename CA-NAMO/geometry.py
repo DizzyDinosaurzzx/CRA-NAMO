@@ -12,7 +12,8 @@ import push_planner
 
 # ------------- Calculator 1: push planning --------------- #
 
-_SWEPT_MAX_DTHETA = math.pi / 12.0
+_SWEPT_MAX_DTHETA = math.pi / 12.0  # baseline for a ~1 m² obstacle (half-diag ≈ 0.5 m)
+_SWEPT_REF_HALF_DIAG = 0.5
 
 def _swept_between(obs: MovableObstacle, a, b) -> Polygon:
     ax, ay, ath = a
@@ -21,14 +22,15 @@ def _swept_between(obs: MovableObstacle, a, b) -> Polygon:
     if abs(dtheta) < 1e-9:
         return unary_union([obs.polygon_at(ax, ay, ath),
                             obs.polygon_at(bx, by, ath)]).convex_hull
-    steps = max(2, int(math.ceil(abs(dtheta) / _SWEPT_MAX_DTHETA)))
+    half_diag = 0.5 * math.hypot(obs.l, obs.d)
+    max_dtheta = _SWEPT_MAX_DTHETA * _SWEPT_REF_HALF_DIAG / max(half_diag, _SWEPT_REF_HALF_DIAG)
+    steps = max(2, int(math.ceil(abs(dtheta) / max_dtheta)))
     poses = [obs.polygon_at(ax + (bx - ax) * i / steps,
                             ay + (by - ay) * i / steps,
                             ath + dtheta * i / steps)
              for i in range(steps + 1)]
     return unary_union([unary_union([p, q]).convex_hull
                         for p, q in zip(poses, poses[1:])])
-
 
 def _swept_region(obs: MovableObstacle, nx: float, ny: float,
                   theta: Optional[float] = None) -> Polygon:
@@ -101,7 +103,7 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
         _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # evict least recently used
     return planner
 
-_PATH_CONTACT_AREA_EPS = 1e-9
+_PATH_CONTACT_AREA_EPS = 1e-6
 
 def _path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
     if not path or len(path) < 2 or not blockers:
