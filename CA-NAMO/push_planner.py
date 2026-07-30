@@ -392,7 +392,10 @@ class PushPlanner:
         return i, j, rem - j * nT
 
     # ------------------------------------------------- Dial-bucket Dijkstra
-    def _search(self, start_idx: Tuple[int, int, int]):
+    def _search(self, start_idx: Tuple[int, int, int], max_bucket: int | None = None):
+        """Dial-bucket Dijkstra. If *max_bucket* is given, stop expanding once the
+        current bucket exceeds that value — states beyond that distance are unreachable
+        in practice and skipping them saves the majority of the search time."""
         N = self.nx * self.ny * self.n_theta
         allowed = self.allowed.reshape(-1)
         rot_ok = self.rot_ok
@@ -455,6 +458,8 @@ class PushPlanner:
                     if nd > max_b:
                         max_b = nd
             b += 1
+            if max_bucket is not None and b > max_bucket:
+                break
 
         return dist, parent
 
@@ -612,9 +617,19 @@ class PushPlanner:
         if self._unstick_start(start_idx):
             self._cache = None            # C-space changed, invalidate previous Dijkstra result
 
+        # Cap the Dijkstra search radius to the corridor extent + obstacle size.
+        # An obstacle never needs to be pushed farther than this to clear the corridor;
+        # exploring beyond it wastes time on unreachable / irrelevant states.
+        max_bucket = None
+        if self._route_window is not None:
+            i0, i1, j0, j1 = self._route_window
+            corridor_diag = math.hypot((i1 - i0) * self.cell, (j1 - j0) * self.cell)
+            max_push = (corridor_diag + self.r_half_diag * 2.0) * 1.5
+            max_bucket = int(max_push / self.unit)
+
         start_flat = int(self._flat(*start_idx))
         if self._cache is None or self._cache[2] != start_flat:
-            self._cache = self._search(start_idx) + (start_flat,)
+            self._cache = self._search(start_idx, max_bucket=max_bucket) + (start_flat,)
         dist, parent, _cached_start = self._cache
 
         candidates, reachable = self._select_goal(

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import numpy as np
 from shapely.geometry import Polygon, Point
+from shapely.strtree import STRtree
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
@@ -198,7 +199,8 @@ class OnlineNAMO:
                 return w
         return None
 
-    def _world_collision(self, oid: int, nx: float, ny: float, theta: float):
+    def _world_collision(self, oid: int, nx: float, ny: float, theta: float,
+                         tree=None, tree_items=None):
         if not self.cfg.check_obstacle_collision:
             return []
         mover = self._world_obstacle(oid)
@@ -210,15 +212,24 @@ class OnlineNAMO:
             contact = swept.intersection(poly)
             if contact.area > _CONTACT_AREA_EPS:
                 return contact
-            # swept region already contains the goal pose; normally no separate end_poly check needed
-            # _swept_region can produce slightly undersized geometry on degenerate input.
             end_contact = end_poly.intersection(poly)
             return end_contact if end_contact.area > _CONTACT_AREA_EPS else None
+
+        if tree is not None and tree_items is not None:
+            candidates = tree.query(swept)
+            for idx in candidates:
+                oid_hit, poly = tree_items[idx]
+                if oid_hit == oid:
+                    continue
+                contact = overlapping(poly)
+                if contact is not None:
+                    hits.append((oid_hit, contact))
+            return hits
 
         for w in self.world:
             if w.oid == oid:
                 continue
-            contact = overlapping(w.polygon)   # only "touch" the contact overlap region, not the whole obstacle
+            contact = overlapping(w.polygon)
             if contact is not None:
                 hits.append((w.oid, contact))
         for so in self.static_obstacles:
@@ -258,10 +269,28 @@ class OnlineNAMO:
         n = len(push_path)
         last_i = 0
 
+        # Build STRtree once for all steps in this push — avoids O(N) polygon
+        # scans on every sub-step of the push trajectory.
+        tree = None
+        tree_items = None
+        if cfg.check_obstacle_collision:
+            polys = []
+            items = []
+            for w in self.world:
+                if w.oid != oid:
+                    polys.append(w.polygon)
+                    items.append((w.oid, w.polygon))
+            for so in self.static_obstacles:
+                polys.append(so.polygon)
+                items.append((None, so.polygon))
+            if polys:
+                tree = STRtree(polys)
+                tree_items = items
+
         for i in range(1, n):
             wx, wy, wth = push_path[i]
             if cfg.check_obstacle_collision:
-                hits = self._world_collision(oid, wx, wy, wth)
+                hits = self._world_collision(oid, wx, wy, wth, tree=tree, tree_items=tree_items)
                 if hits:
                     # obstacle was pushed to push_path[last_i] before being stopped; belief must sync to that actual pose
                     if last_i != 0:
