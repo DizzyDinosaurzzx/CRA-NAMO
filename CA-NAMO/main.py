@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 import argparse
-import glob
+import io
 import os
 import textwrap
 import matplotlib
-matplotlib.use("Agg") 
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from PIL import Image
 from shapely.geometry import LineString, Point
 import config
 import scenarios
@@ -24,11 +25,18 @@ def _plot_poly(ax, poly, **kw):  # draw basic polygon
             ax.fill(xs, ys, **kw)
 
 
-def _obstacle_label(oid: int, estimates) -> str:
-    """Obstacle ID, plus the difficulty estimate the planner actually used."""
-    if oid not in estimates:
-        return str(oid)
-    return f"{oid}\nest={estimates[oid]:g}"
+def _obstacle_label(oid: int, estimates, touched=None) -> str:
+    """Obstacle ID, plus estimated / true difficulty when available."""
+    est = estimates.get(oid) if estimates else None
+    true = touched.get(oid) if touched else None
+    parts = [str(oid)]
+    if est is not None:
+        parts.append(f"est={est:g}")
+    if true is not None:
+        parts.append(f"true={true:g}")
+        if est is not None and abs(est - true) > 1e-6:
+            parts[-1] = f"T={true:g}"  # highlight mismatch with estimate
+    return "\n".join(parts)
 
 
 def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):  # draw flag marker
@@ -150,8 +158,9 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     for w in sim.world:
         col = "orange" if w.removed else "crimson"
         _plot_poly(ax, w.polygon, color=col, alpha=0.6, zorder=3)
-        # label obstacle centroid with its ID and the difficulty estimate the planner used
-        ax.text(w.x, w.y, _obstacle_label(w.oid, sim.estimator.cache),
+        # label obstacle centroid with ID, estimate, and true difficulty if known
+        ax.text(w.x, w.y, _obstacle_label(w.oid, sim.estimator.cache,
+                                           sim.belief.touched_difficulty),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4)
 
     # draw robot motion trail corridor:
@@ -176,9 +185,9 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     plt.close(fig)
 
 
-def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
+def render_frame(sim: OnlineNAMO, frame, original_poses,
                  idx: int, total: int, cur_node: int | None = None):
-    """Render a single frame from the simulation"""
+    """Render a single frame from the simulation; returns the figure (caller closes it)"""
     fig, ax = _new_canvas(sim)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim, cur_node=cur_node)
@@ -194,7 +203,8 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
         _plot_poly(ax, poly, color=col, alpha=0.6, zorder=3)
         cx, cy = poly.centroid.x, poly.centroid.y
         estimates = frame.get("estimated_difficulty", {})
-        ax.text(cx, cy, _obstacle_label(oid, estimates),
+        touched = frame.get("touched_difficulty", {})
+        ax.text(cx, cy, _obstacle_label(oid, estimates, touched),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4)
 
     # draw robot motion trail up to this frame (semi-transparent blue corridor)
@@ -215,19 +225,52 @@ def render_frame(sim: OnlineNAMO, frame, original_poses, out_path: str,
     # title: step N / total | action label | cumulative cost
     title = f"[{sim.cfg.strategy}] step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
     _finish_ax(ax, sim, title)
-    fig.savefig(out_path, dpi=130)
-    plt.close(fig)
+    return fig
 
 
-def render_sequence(sim: OnlineNAMO, res, original_poses, frames_dir: str):
-    os.makedirs(frames_dir, exist_ok=True) 
-    for old in glob.glob(os.path.join(frames_dir, "step_*.png")):
-        os.remove(old)  # clear old images
+def _shared_palette(buffers, colors: int = 255):
+    """One palette for the whole animation, sampled from start / middle / end.
+
+    Frames sharing a palette let Pillow store only the pixels that changed
+    between them, which matters here: the roadmap background is redrawn
+    identically every step and dominates the file size otherwise.
+    """
+    picks = sorted({0, len(buffers) // 2, len(buffers) - 1})
+    tiles = [Image.open(buffers[i]).convert("RGB") for i in picks]
+    w, h = tiles[0].size
+    montage = Image.new("RGB", (w, h * len(tiles)))
+    for k, tile in enumerate(tiles):
+        montage.paste(tile, (0, h * k))
+    return montage.quantize(colors=colors, method=Image.MEDIANCUT)
+
+
+def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
+    """Render every motion frame into one animated GIF"""
+    cfg = sim.cfg
     total = len(res.frames)
+    if total == 0:
+        return 0
+    # keep the frames as encoded PNG bytes rather than decoded bitmaps: a long
+    # run on a large map would otherwise hold hundreds of MB of pixels at once
+    buffers = []
     for i, frame in enumerate(res.frames):
-        out = os.path.join(frames_dir, f"step_{i:03d}.png")
-        render_frame(sim, frame, original_poses, out, i, total,
-                     cur_node=frame.get("node"))
+        fig = render_frame(sim, frame, original_poses, i, total,
+                           cur_node=frame.get("node"))
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=cfg.gif_dpi)
+        plt.close(fig)
+        buf.seek(0)
+        buffers.append(buf)
+
+    palette = _shared_palette(buffers)
+    images = [Image.open(b).convert("RGB").quantize(palette=palette,
+                                                    dither=Image.NONE)
+              for b in buffers]
+    step_ms = max(20, int(round(1000.0 / cfg.gif_fps)))
+    durations = [step_ms] * len(images)
+    durations[-1] = max(step_ms, int(cfg.gif_end_hold_s * 1000))  # pause on the result
+    images[0].save(gif_path, save_all=True, append_images=images[1:],
+                   duration=durations, loop=0, optimize=True)
     return total
 
 # ---------------- main function ---------------- #
@@ -241,7 +284,8 @@ def main():
     ap.add_argument("--no-llm-order", action="store_true",
                     help="Disable LLM-based intelligent ordering of obstacle processing")
     ap.add_argument("--frames", action="store_true",
-                    help="Save per-step frame images of robot motion to img/frames_<map_name>/")
+                    help="Save the per-step robot motion as an animated GIF: "
+                         "img/frames_<map_name>.gif")
     ap.add_argument("--strategy", default=None,
                     choices=["normal", "shortest", "easiest"],
                     help="Planning strategy: normal (optimal J=λD+W), "
@@ -306,12 +350,11 @@ def main():
     visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
 
-    # render every motion frame
+    # render every motion frame into one animation
     if cfg.save_frames:
-        frames_dir = os.path.join(cfg.out_dir, f"frames_{s['name']}{strategy_suffix}")
-        n = render_sequence(sim, res, original_poses, frames_dir)
-        print(f"Saved {n} step frames -> {frames_dir}/step_000.png ... "
-              f"step_{n - 1:03d}.png")
+        gif_path = os.path.join(cfg.out_dir, f"frames_{s['name']}{strategy_suffix}.gif")
+        n = render_sequence(sim, res, original_poses, gif_path)
+        print(f"Saved {n}-frame animation ({cfg.gif_fps:g} fps) -> {gif_path}")
     return res
 
 if __name__ == "__main__":

@@ -15,5 +15,8 @@ scipy>=1.9
 # Visualisation: summary plots + per-step frame rendering (main.py)
 matplotlib>=3.5
 
+# GIF assembly: per-step frames -> img/frames_<map>.gif (main.py)
+pillow>=9.0
+
 # HTTP client: LLM difficulty estimation via DeepSeek API (llm_difficulty.py)
 requests>=2.28

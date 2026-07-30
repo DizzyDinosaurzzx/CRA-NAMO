@@ -113,9 +113,14 @@ class OnlineNAMO:
             for act in plan.actions:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
-                    # pre-push touch sensing: learn the true difficulty of this obstacle
+                    # pre-push touch sensing: learn the true difficulty of this obstacle.
+                    # Pushing is itself contact, so the pushed obstacle is always revealed —
+                    # proximity sampling at the current node would miss it, because the robot
+                    # stays on its node while the obstacle is moved.
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
+                    if self.belief.reveal_by_interaction(act["oid"], self.world):
+                        touched.append(act["oid"])
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
@@ -338,12 +343,11 @@ class OnlineNAMO:
             "track": list(res.robot_track),
             "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],
             "perceived": perceived,
-            # Only record estimates the planner actually requested by this frame;
-            # drawing will not trigger additional LLM calls.
             "estimated_difficulty": {
                 oid: value for oid, value in self.estimator.cache.items()
                 if oid in perceived
             },
+            "touched_difficulty": dict(self.belief.touched_difficulty),
             "J": round(res.J, 4),
             "label": label,
         })

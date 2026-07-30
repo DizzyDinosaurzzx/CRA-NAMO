@@ -231,16 +231,25 @@ class Belief:
                 revealed.append(w.oid)
         return revealed
 
+    def reveal_by_interaction(self, oid: int,
+                              world_obstacles: List[MovableObstacle]) -> bool:
+        """Any physical interaction reveals the true difficulty, not only collisions.
+
+        Pushing requires contact by definition, so the robot cannot have moved an
+        obstacle while still being ignorant of how hard it was to move.
+        """
+        if oid in self.touched:
+            return False
+        for w in world_obstacles:
+            if w.oid == oid:
+                self.touched.add(oid)
+                self.touched_difficulty[oid] = w.difficulty
+                return True
+        return False
+
     def get_difficulty(self, oid: int, estimator) -> float:  # return formal difficulty, preserving any previously known true value
         if oid in self.touched_difficulty:
-            val = self.touched_difficulty[oid]
-            # Also populate the estimator cache so the visualisation can show the
-            # value that was actually used for cost accounting.
-            if oid not in estimator.cache:
-                estimator.cache[oid] = val
-                estimator.source_cache[oid] = "touch"
-                estimator.density_cache[oid] = 0.0
-            return val
+            return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
 
     # -------------------- Query ----------------------

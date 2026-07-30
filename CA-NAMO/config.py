@@ -17,10 +17,10 @@ class Config:
 
     # -------- Perception -------- #
     R_perc: float = 10.0       # perception radius
-    sight_width: float = 0.2     # line-of-sight width
+    sight_width: float = 0.1     # line-of-sight width
 
     # -------- Manipulation -------- #
-    R_push: float = 100       # obstacles can only be relocated within this radius around current pose
+    R_push: float = 5.0       # obstacles can only be relocated within this radius around current pose
     push_forward_penalty: float = 2.0
     check_obstacle_collision: bool = True  # collision detection between obstacles
     full_reveal_on_contact: bool = False
@@ -35,8 +35,8 @@ class Config:
     push_max_frames_per_action: int = 30
 
     # -------- Roadmap -------- #
-    grid_step: float = 1    # roadmap node grid spacing
-    conn_radius: float = 2  # roadmap node connection radius
+    grid_step: float = 0.3    # roadmap node grid spacing
+    conn_radius: float =0.6   # roadmap node connection radius
 
     # -------- Search -------- #
     strategy: str = "normal"    # "normal" | "shortest" | "easiest"
@@ -57,7 +57,10 @@ class Config:
     # -------- Other -------- #
     rng_seed: int = 0
     out_dir: str = "img"
-    save_frames: bool = True   # whether to save per-step frames
+    save_frames: bool = True   # whether to save the per-step animation (GIF)
+    gif_fps: float = 5.0       # animation speed, frames per second
+    gif_end_hold_s: float = 2  # hold the last frame this long before looping
+    gif_dpi: int = 300         # per-frame render resolution inside the GIF
     verbose: bool = True
 
     def __post_init__(self):

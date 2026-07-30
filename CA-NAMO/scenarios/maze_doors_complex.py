@@ -135,7 +135,7 @@ def create():
     ]
 
     start = (28, 2)
-    goal = (23,15)
+    goal = (2,27)
 
     manual_obstacles = [
         MovableObstacle(

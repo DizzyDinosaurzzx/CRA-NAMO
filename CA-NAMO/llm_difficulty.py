@@ -215,7 +215,7 @@ class DifficultyEstimator:
             "max_tokens": 32,
             "temperature": 0.0,
             "stream": False,
-            "thinking": {"type": "enabled"},
+            "thinking": {"type": "disabled"},
         }
         for attempt in range(self.cfg.llm_max_retries + 1):
             try:

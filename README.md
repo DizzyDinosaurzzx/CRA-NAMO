@@ -33,7 +33,7 @@ python main.py --strategy easiest     # 尽量绕路，少搬东西
 # 启用 LLM 难度估计（需要 DeepSeek API Key）
 DEEPSEEK_API_KEY=sk-xxxx python main.py
 ```
-汇总图输出到 `img/summary_<场景名>.png`，逐帧图输出到 `img/frames_<场景名>/`。
+汇总图输出到 `img/summary_<场景名>.png`，逐帧过程动图输出到 `img/frames_<场景名>.gif`。
 非 `normal` 策略会在文件名加后缀，如 `summary_two_doors_shortest.png`。
 ## 系统架构
 ```
@@ -164,7 +164,7 @@ python main.py [--scenario NAME] [--lambda VALUE] [--strategy NAME]
 | `--lambda` | 运动代价 λ 权重（默认 1.0），越大越倾向推开障碍物 |
 | `--strategy` | 规划策略：`normal`（默认）/ `shortest` / `easiest` |
 | `--no-llm-order` | 禁用 LLM 排序（纯启发式展开） |
-| `--frames` | 保存每一步运动的逐帧图片 |
+| `--frames` | 把每一步运动保存为动图 `img/frames_<场景名>.gif`（速度由 `Config.gif_fps` 控制） |
 
 ## 输出指标
 运行结束后打印：
