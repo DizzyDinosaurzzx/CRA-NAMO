@@ -1,0 +1,19 @@
+# CA-NAMO requirements
+# Python >= 3.9
+
+# Geometry engine: free-space computation, collision detection,
+# swept-volume construction, STRtree spatial indexing
+shapely>=2.0
+
+# Numerical arrays: configuration-space grids, vectorised Dijkstra,
+# Minkowski sums (push_planner.py)
+numpy>=1.22
+
+# Spatial indexing: KDTree for roadmap nearest-neighbour queries (roadmap.py)
+scipy>=1.9
+
+# Visualisation: summary plots + per-step frame rendering (main.py)
+matplotlib>=3.5
+
+# HTTP client: LLM difficulty estimation via DeepSeek API (llm_difficulty.py)
+requests>=2.28
