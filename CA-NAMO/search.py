@@ -35,6 +35,7 @@ class Planner:
         self.cfg = cfg
         self.failed_pushes = set() if failed_pushes is None else failed_pushes
         self._robot_pos: Tuple[float, float] = (0.0, 0.0)
+        self._persistent_removal_cache: Dict[tuple, tuple] = {}
 
     # ------------------------------------------------------------------ planning
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
@@ -42,9 +43,12 @@ class Planner:
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
         self._robot_pos = rm.nodes[start_node]
-        self._removal_cache: Dict[
-            Tuple[int, EdgeKey], Tuple[bool, float, Optional[tuple], float, Optional[list]]
-        ] = {}
+
+        # Clear persistent cache if new obstacles were revealed since the last
+        # plan call — that changes the others_polys geometry for every removal
+        # and would invalidate previously cached push plans.
+        if self.belief.newly_revealed:
+            self._persistent_removal_cache.clear()
 
         def h(node):
             x, y = rm.nodes[node]
@@ -127,13 +131,13 @@ class Planner:
 
     def _removal(self, oid: int, key: EdgeKey):
         """Compute work and drop pose needed to push an obstacle aside, also plan SE2 push path"""
-        cache_key = (oid, key)
-        if cache_key in self._removal_cache:
-            return self._removal_cache[cache_key]
         obs = self.belief.obstacle(oid)
-        if (push_signature(obs), key) in self.failed_pushes:
+        cache_key = (push_signature(obs), key)
+        if cache_key in self._persistent_removal_cache:
+            return self._persistent_removal_cache[cache_key]
+        if cache_key in self.failed_pushes:
             res = (False, math.inf, None, 0.0, None)
-            self._removal_cache[cache_key] = res
+            self._persistent_removal_cache[cache_key] = res
             return res
         clear_polys = [self.roadmap.edge_corridor[key]]
         others = None
@@ -172,7 +176,7 @@ class Planner:
             work = geometry.push_work(estimated_diff, push_dist)
 
         res = (feasible, work, drop, push_dist, push_path)
-        self._removal_cache[cache_key] = res
+        self._persistent_removal_cache[cache_key] = res
         return res
 
     def _llm_bias(self, removals) -> float:

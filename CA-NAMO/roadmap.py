@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 from shapely.geometry import Point, Polygon, LineString
 from shapely.ops import unary_union
 from shapely.prepared import prep
+from scipy.spatial import KDTree
 from config import Config
 EdgeKey = Tuple[int, int]
 
@@ -23,7 +24,9 @@ class Roadmap:
         self.adj: Dict[int, List[int]] = {}
         self.edge_len: Dict[EdgeKey, float] = {}
         self.edge_corridor: Dict[EdgeKey, Polygon] = {}
+        self._kdtree: KDTree | None = None
         self._build()
+        self._rebuild_kdtree()
 
     # ------------------ Construction ---------------- #
     def _build(self):
@@ -76,13 +79,17 @@ class Roadmap:
             key = (u, v) if u < v else (v, u)
             yield v, key, self.edge_len[key]
 
+    def _rebuild_kdtree(self):
+        if self.nodes:
+            self._kdtree = KDTree(self.nodes)
+        else:
+            self._kdtree = None
+
     def nearest_node(self, p: Tuple[float, float]) -> int:
-        best, bd = -1, math.inf
-        for nid, (x, y) in enumerate(self.nodes):
-            d = (x - p[0]) ** 2 + (y - p[1]) ** 2
-            if d < bd:
-                bd, best = d, nid
-        return best
+        if self._kdtree is None:
+            return 0
+        _, idx = self._kdtree.query(p)
+        return int(idx)
 
     def add_terminal(self, p: Tuple[float, float]) -> int:
         cfg = self.cfg
@@ -100,6 +107,7 @@ class Roadmap:
                 self.edge_corridor[key] = seg.buffer(cfg.robot_radius, cap_style=2)
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
+        self._rebuild_kdtree()
         return nid
 
     def __repr__(self):
