@@ -6,12 +6,12 @@ from typing import Dict
 import requests
 from config import Config
 
-# 材质 -> 单位底面积的操作难度系数，估计值 difficulty ~= density * (l * d)。
+# material -> difficulty coefficient per unit footprint area; estimate difficulty ~= density * (l * d).
 MATERIAL_DENSITY: Dict[str, float] = {
-    # ---- 极轻---- #
+    # ---- very light ---- #
     "styrofoam_box": 0.004,
     "foam_mat": 0.05,
-    # ---- 轻 ---- #
+    # ---- light ---- #
     "cardboard_box": 0.07,
     "empty_cart": 0.08,
     "plastic_chair": 0.10,
@@ -20,7 +20,7 @@ MATERIAL_DENSITY: Dict[str, float] = {
     "chair": 0.20,
     "empty_shelf": 0.21,
     "cart": 0.30,
-    # ---- 中---- #
+    # ---- medium ---- #
     "wooden_table": 0.50,
     "wooden_crate": 0.75,
     "shelf": 0.80,
@@ -28,17 +28,17 @@ MATERIAL_DENSITY: Dict[str, float] = {
     "cabinet": 0.90,
     "pallet": 1.00,
     "loaded_pallet": 1.10,
-    # ---- 重---- #
+    # ---- heavy ---- #
     "filing_cabinet": 2.50,
     "steel_shelf": 4.20,
     "steel_safe": 5.50,
-    # ---- 极重---- #
+    # ---- very heavy ---- #
     "concrete_block": 25.0,
     "industrial_machine": 37.5,
-    # ---- 兜底 ---- #
+    # ---- fallback ---- #
     "unknown": 0.50,
 }
-# 同义词表格
+# Synonym table
 MATERIAL_ALIASES: Dict[str, str] = {
     "box": "cardboard_box",
     "carton": "cardboard_box",
@@ -53,7 +53,7 @@ MATERIAL_ALIASES: Dict[str, str] = {
     "foam": "foam_mat",
     "styrofoam": "styrofoam_box",
 }
-# 提供给LLM的标定值
+# Calibration anchors provided to the LLM
 PROMPT_ANCHORS = (
     "styrofoam_box",
     "cardboard_box",
@@ -65,7 +65,7 @@ PROMPT_ANCHORS = (
 
 _NON_WORD = re.compile(r"[^a-z0-9]+")
 
-def _normalise(name) -> str: #名字规范化
+def _normalise(name) -> str:  # normalise material name
     return _NON_WORD.sub("_", str(name).strip().lower()).strip("_")
 
 def material_density(name) -> float: 
@@ -89,14 +89,14 @@ class DifficultyEstimator:
         self.calls = 0
         self.mode = "deepseek" if self.api_key else "heuristic"
 
-    # -------------公共接口-------------- #
-    def estimate(self, obs_obs: dict) -> float: # 读取材质
+    # ------------- Public interface -------------- #
+    def estimate(self, obs_obs: dict) -> float:  # estimate from perceived material
         oid = obs_obs["oid"]
         if oid in self.cache:
             return self.cache[oid]
         if self.api_key:
             val = self._deepseek(obs_obs)
-            if val is None:                       # 失败回退
+            if val is None:                       # fallback on failure
                 val = self._heuristic(obs_obs)
         else:
             val = self._heuristic(obs_obs)
@@ -104,7 +104,7 @@ class DifficultyEstimator:
         self.cache[oid] = val
         return val
 
-    # -------------启发式方法--------------- #
+    # ------------- Heuristic method --------------- #
     def _heuristic(self, o: dict) -> float:
         density = material_density(o.get("material", "unknown"))
         area = o.get("area")
@@ -112,7 +112,7 @@ class DifficultyEstimator:
             area = o["l"] * o["d"]
         return density * float(area)
 
-    # -------------LLM估计--------------- #
+    # ------------- LLM estimation --------------- #
     def _build_prompt(self, o: dict) -> str:
         asked = set(_normalise(o.get("material", "")).split("_"))
         anchors = "\n".join(

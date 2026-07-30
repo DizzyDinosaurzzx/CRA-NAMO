@@ -4,7 +4,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-# ---- 默认地图 ---- #
+# ---- Default map ---- #
 DEFAULT_SCENARIO = "two_doors"
 REQUIRED_FIELDS = {
     "workspace",
@@ -18,7 +18,7 @@ REQUIRED_FIELDS = {
 _PKG_DIR = Path(__file__).resolve().parent
 _PACKAGE = __name__.rpartition(".")[0] or "scenarios"
 
-# -------- 加载地图 -------- #
+# -------- Load map -------- #
 
 def names() -> tuple[str, ...]:
     return tuple(sorted(
@@ -29,28 +29,28 @@ def load(name: str | None = None) -> dict[str, Any]:
     selected = name or DEFAULT_SCENARIO
     available = names()
     if selected not in available:
-        raise ValueError(f"未知地图 {selected!r}；可选地图：{', '.join(available)}")
+        raise ValueError(f"Unknown map {selected!r}; available: {', '.join(available)}")
 
     module = import_module(f".{selected}", package=_PACKAGE)
     create = getattr(module, "create", None)
     if not callable(create):
-        raise TypeError(f"地图模块 {selected!r} 必须提供无参数的 create() 函数")
+        raise TypeError(f"Map module {selected!r} must provide a parameterless create() function")
 
     scenario = create()
     if not isinstance(scenario, dict):
-        raise TypeError(f"{selected}.create() 必须返回 dict")
+        raise TypeError(f"{selected}.create() must return a dict")
 
-    # 检查必填字段
+    # Check required fields
     missing = REQUIRED_FIELDS.difference(scenario)
     if missing:
         fields = ", ".join(sorted(missing))
-        raise ValueError(f"地图 {selected!r} 缺少字段：{fields}")
+        raise ValueError(f"Map {selected!r} is missing fields: {fields}")
 
-    # 起点/终点标准化为浮点坐标
+    # Normalise start/goal to float coordinates
     for field in ("start", "goal"):
         point = scenario[field]
         if len(point) != 2:
-            raise ValueError(f"地图 {selected!r} 的 {field} 必须是 (x, y) 单点")
+            raise ValueError(f"Map {selected!r}: {field} must be a single (x, y) point")
         scenario[field] = (float(point[0]), float(point[1]))
 
     scenario["name"] = selected

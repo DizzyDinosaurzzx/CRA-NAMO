@@ -1,4 +1,4 @@
-"""CA-NAMO的在线"规划-执行-感知-重规划"循环"""
+"""CA-NAMO online "plan–execute–perceive–replan" loop"""
 
 from __future__ import annotations
 import time
@@ -16,32 +16,32 @@ import geometry
 
 _CONTACT_AREA_EPS = 1e-9
 
-# 仿真结果汇总
+# Simulation result summary
 @dataclass
 class RunResult:
-    success: bool                           # 是否到达目标
-    J: float = 0.0                          # 总代价 = walk_cost + work_cost
-    walk_cost: float = 0.0                  # 运动代价 = λ × 总行驶距离
-    work_cost: float = 0.0                  # 操作代价 = Σ(真实difficulty × 推动距离)
-    cycles: int = 0                         # 重规划循环次数
-    plan_time: float = 0.0                  # 总规划耗时（秒）
-    first_plan_time: float = 0.0            # 首次规划耗时（秒）—— 衡量冷启动代价
-    total_expansions: int = 0               # A* 搜索节点扩展总数（所有轮合计）
-    llm_calls: int = 0                      # LLM API 调用次数
-    llm_mode: str = "heuristic"             # LLM 模式：heuristic / deepseek
-    removed: List[int] = field(default_factory=list)    # 被移开的障碍物 ID 列表
-    robot_track: List[Tuple[float, float]] = field(     # 机器人途经的节点坐标序列
+    success: bool                           # whether goal was reached
+    J: float = 0.0                          # total cost = walk_cost + work_cost
+    walk_cost: float = 0.0                  # motion cost = λ × total travel distance
+    work_cost: float = 0.0                  # manipulation cost = Σ(true difficulty × push distance)
+    cycles: int = 0                         # number of replan cycles
+    plan_time: float = 0.0                  # total planning time (seconds)
+    first_plan_time: float = 0.0            # first plan time (seconds) — cold-start cost measure
+    total_expansions: int = 0               # total A* node expansions (all rounds combined)
+    llm_calls: int = 0                      # LLM API call count
+    llm_mode: str = "heuristic"             # LLM mode: heuristic / deepseek
+    removed: List[int] = field(default_factory=list)    # list of moved obstacle IDs
+    robot_track: List[Tuple[float, float]] = field(     # robot node coordinate sequence
         default_factory=list)
-    frames: List[dict] = field(default_factory=list)    # 逐帧快照（供 render_sequence 用）
-    message: str = ""                       # 结果描述信息
+    frames: List[dict] = field(default_factory=list)    # per-frame snapshots (for render_sequence)
+    message: str = ""                       # result description
 
-# 在线仿真器
+# Online simulator
 class OnlineNAMO:
     """
-    维护两套世界模型：
-    - self.world(现实世界)
-    - self.belief(机器人信念)
-    规划器只能基于信念搜索，不能访问真实世界
+    Maintains two world models:
+    - self.world (real world)
+    - self.belief (robot belief)
+    The planner searches against belief only and cannot access the real world
     """
     def __init__(self, workspace: Polygon,
                  static_obstacles: List[StaticObstacle],
@@ -62,27 +62,27 @@ class OnlineNAMO:
         self.start_point = self.roadmap.nodes[self.start_node]
         self.goal_point = self.roadmap.nodes[self.goal_node]
 
-        self.estimator = DifficultyEstimator(cfg)   # 障碍物难度估算器
-        self.belief = Belief(self.roadmap, cfg)     # 机器人的部分可观测信念
-        self._plan_paths: List[dict] = []           # 当前规划出的所有路径（供逐帧可视化）
+        self.estimator = DifficultyEstimator(cfg)   # obstacle difficulty estimator
+        self.belief = Belief(self.roadmap, cfg)     # robot partial-observability belief
+        self._plan_paths: List[dict] = []           # all currently planned paths (for per-frame visualisation)
         self.failed_pushes: set = set()
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
-        # 把起点/终点插入路网；该点放不下机器人圆盘时退化到最近的合法节点
+        # insert start/goal into roadmap; snap to nearest valid node when the robot disc does not fit
         cfg = self.cfg
         if not self.roadmap.free_eroded_prep.contains(Point(p)):
-            # 点在墙内或贴墙太近 -> 退化到最近的合法路网节点
+            # point is inside a wall or too close -> degrade to nearest valid roadmap node
             p = self.roadmap.nodes[self.roadmap.nearest_node(p)]
         return self.roadmap.add_terminal(p)
 
-    # 主感知循环
+    # Main perception–action loop
     def run(self) -> RunResult:
         cfg = self.cfg
         res = RunResult(success=False, llm_mode=self.estimator.mode)
-        node = self.start_node                           # 机器人当前所在路网节点
+        node = self.start_node                           # robot current roadmap node
         res.robot_track.append(self.roadmap.nodes[node])
         
-        # 初始感知：扫描起点周围的可见障碍物
+        # initial perception: scan visible obstacles around start
         self.belief.perceive(self.world, self.roadmap.nodes[node])
         self._capture_frame(res, node, "start")
 
@@ -106,22 +106,22 @@ class OnlineNAMO:
             if node == self.goal_node:
                 break
 
-            # ---- 执行规划的前置边（包括对应的障碍物移除）----
+            # ---- execute the planned lead edges (including corresponding obstacle removals) ----
             moves_done = 0
             reached_goal = False
             for act in plan.actions:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
-                    # 推动前触摸感知: 获知该障碍物的真实 difficulty
+                    # pre-push touch sensing: learn the true difficulty of this obstacle
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
-                    # 逐步执行 SE2 推动路径
+                    # step through SE2 push path
                     push_success, hits, executed_dist = self._execute_push_path(
                         act["oid"], obs, act["push_path"], res, node, cfg)
-                    # 按实际推动的那一段结算，difficulty 取真实值
+                    # charge only for the segment actually pushed, using the true difficulty
                     if executed_dist > 0.0:
                         true_diff = self._world_obstacle(act["oid"]).difficulty
                         executed_work = geometry.push_work(true_diff, executed_dist)
@@ -132,25 +132,25 @@ class OnlineNAMO:
                     elif not push_success:
                         self.failed_pushes.add((push_signature(obs), act["key"]))
                     if not push_success:
-                        # 撞上了，作废本次放置并重规划换位置
+                        # collision — invalidate this placement and replan a new location
                         self._handle_push_collision(res, node, act["oid"], hits)
                         break
                 elif act["type"] == "move":
-                    prev_node = node    # 需求3: 记录移动前位置
+                    prev_node = node    # req 3: record position before move
                     from_pos = self.roadmap.nodes[prev_node]
                     to_pos = self.roadmap.nodes[act["v"]]
-                    # 需求3: 碰撞感知
+                    # req 3: collision sensing
                     hit_oids, t_contact = self.belief.check_robot_collision(
                         from_pos, to_pos, self.world, cfg)
                     if hit_oids:
                         contact_pos = (
                             from_pos[0] + (to_pos[0] - from_pos[0]) * t_contact,
                             from_pos[1] + (to_pos[1] - from_pos[1]) * t_contact)
-                        # 推进到接触点再退回之前节点，这一去一回的路程照实计费
+                        # advance to contact point then retreat to previous node; charge both legs
                         blocked_dist = 2.0 * t_contact * act["dist"]
                         res.walk_cost += cfg.lambda_distance * blocked_dist
                         res.J += cfg.lambda_distance * blocked_dist
-                        # 撞上就是物理接触，被撞者的真实difficulty随之暴露
+                        # collision is physical contact; the true difficulty of the hit object is revealed
                         self.belief.touch_check(contact_pos, self.world, cfg)
                         self.belief.perceive(self.world, from_pos)
                         self._capture_frame(
@@ -161,13 +161,13 @@ class OnlineNAMO:
                     node = act["v"]
                     res.robot_track.append(self.roadmap.nodes[node])
                     moves_done += 1
-                    # 触摸感知: 获知被触碰障碍物的真实 difficulty
+                    # touch sensing: learn true difficulty of touched obstacles
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
-                    # 每次实际移动后感知（揭示被暴露的障碍物）
+                    # perceive after each actual move (reveals exposed obstacles)
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
                     self._capture_frame(res, node, f"move to node {node}")
                     if node == self.goal_node:
@@ -210,15 +210,15 @@ class OnlineNAMO:
             contact = swept.intersection(poly)
             if contact.area > _CONTACT_AREA_EPS:
                 return contact
-            # 扫掠区已经包含终点位姿，正常情况下不必再单独判 end_poly；这里兜住
-            # _swept_region 在退化输入下可能给出偏小几何的情形。
+            # swept region already contains the goal pose; normally no separate end_poly check needed
+            # _swept_region can produce slightly undersized geometry on degenerate input.
             end_contact = end_poly.intersection(poly)
             return end_contact if end_contact.area > _CONTACT_AREA_EPS else None
 
         for w in self.world:
             if w.oid == oid:
                 continue
-            contact = overlapping(w.polygon)   # 只"摸到"接触重叠区，非整个障碍物
+            contact = overlapping(w.polygon)   # only "touch" the contact overlap region, not the whole obstacle
             if contact is not None:
                 hits.append((w.oid, contact))
         for so in self.static_obstacles:
@@ -231,7 +231,7 @@ class OnlineNAMO:
         cfg = self.cfg
         for oid_hit, region in hits:
             if oid_hit is None:
-                continue      # 撞墙：墙体本就是已知的静态几何，没有新信息可登记
+                continue      # hit wall: walls are known static geometry, no new info to register
             if cfg.full_reveal_on_contact:
                 self.belief.force_reveal(self._world_obstacle(oid_hit))
             else:
@@ -263,7 +263,7 @@ class OnlineNAMO:
             if cfg.check_obstacle_collision:
                 hits = self._world_collision(oid, wx, wy, wth)
                 if hits:
-                    # 障碍物已经被推到 push_path[last_i] 才撞停，信念必须同步到该实际位姿：否则世界里它在半路、信念以为它没动过
+                    # obstacle was pushed to push_path[last_i] before being stopped; belief must sync to that actual pose
                     if last_i != 0:
                         self.belief.relocate(obs, *push_path[last_i])
                     return (False, hits,
@@ -272,7 +272,7 @@ class OnlineNAMO:
             last_i = i
             if i in frame_at:
                 self._capture_frame(res, node, f"push {oid} step {i}/{n - 1}")
-        # 更新信念中的最终位姿
+        # update belief with final pose
         self.belief.relocate(obs, *push_path[-1])
         return (True, [], geometry.se2_path_cost(obs, push_path, cfg))
 
@@ -303,7 +303,7 @@ class OnlineNAMO:
             return
         res.frames.append({
             "node": node,
-            "plan_paths": list(self._plan_paths),   # 该帧时刻正在执行的规划路径
+            "plan_paths": list(self._plan_paths),   # planned paths being executed at this frame
             "robot": self.roadmap.nodes[node],
             "track": list(res.robot_track),
             "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],

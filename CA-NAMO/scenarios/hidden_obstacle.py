@@ -7,44 +7,38 @@ def create():
     workspace = box(0, 0, 28, 40)
     walls = [
         StaticObstacle(box(0.0, 19.5, 3.0, 20.5), "wall_left"),
-        # 远门（右侧门缝）由 4.0 加宽到 4.5：两侧各让 0.25，门缝中心仍在 x=23，
-        # 与 B / C 的中心对齐。
         StaticObstacle(box(7.0, 19.5, 20.75, 20.5), "wall_mid"),
         StaticObstacle(box(25.25, 19.5, 28.0, 20.5), "wall_right"),
     ]
 
     movable = [
-        # A：堵住近门，难度排名第二（略低于 C）。
         MovableObstacle(
             x=5.0,
             y=20.0,
             l=3.4,
             d=1.4,
             theta=0.0,
-            material="industrial_machines",  # 37.5 x 4.76 = 178.5
+            material="industrial_machines",
             difficulty=180,
             oid=1,
         ),
-        # B：堵住远门、位于 C 的上方，难度排名第三，B 的底部与 C 的顶部相接，但二者不重叠。
         MovableObstacle(
             x=23.0,
             y=20.5,
             l=3.8,
             d=1.8,
             theta=0.0,
-            material="styrofoam_box",                # 0.30 x 6.84 = 2.05
+            material="styrofoam_box",
             difficulty=0.03,
             oid=2,
         ),
-        # C：从上方房间观察时被 B 完全遮挡，难度排名第一。
-        # C 的顶部与墙体底面相接，移开 B 后无法从细缝绕过 C。
         MovableObstacle(
             x=23.0,
             y=18.8,
             l=3.8,
             d=1.4,
             theta=0.0,
-            material="industrial_machine",  # 37.5 x 5.32 = 199.5
+            material="industrial_machine",
             difficulty=200.0,
             oid=3,
         ),

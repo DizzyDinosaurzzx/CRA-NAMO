@@ -1,4 +1,4 @@
-"""仿真世界与 SE2 推动规划器之间的适配层
+"""Adaptation layer between the simulated world and the SE2 push planner
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from obstacle import MovableObstacle
 from config import Config
 import push_planner
 
-# -------------计算器 1：推动规划--------------- #
+# ------------- Calculator 1: push planning --------------- #
 
 _SWEPT_MAX_DTHETA = math.pi / 12.0
 
@@ -36,7 +36,7 @@ def _swept_region(obs: MovableObstacle, nx: float, ny: float,
                           (nx, ny, obs.theta if theta is None else theta))
 
 
-# ---------- 计算器 1b：SE2 推动路径规划 ---------- #
+# ---------- Calculator 1b: SE2 push path planning ---------- #
 
 _MAX_PUSH_STATES = 200_000
 _PLANNER_CACHE: Dict[tuple, push_planner.PushPlanner] = {}
@@ -78,10 +78,10 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
            _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
-        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # 标记为最近使用
+        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # mark as most recently used
         return planner
 
-    # 静态墙体 + 其他可移动障碍物，一起作为不可穿越区域
+    # static walls + other movable obstacles, together as impassable region
     walls = [so.polygon for so in static_obstacles] + _polygon_parts(others_polys)
     planner = push_planner.build_push_planner(
         wall_polys=walls,
@@ -98,7 +98,7 @@ def _get_push_planner(obs: MovableObstacle, static_obstacles,
     )
     _PLANNER_CACHE[key] = planner
     while len(_PLANNER_CACHE) > _PLANNER_CACHE_MAX:
-        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # 淘汰最久未用的
+        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # evict least recently used
     return planner
 
 _PATH_CONTACT_AREA_EPS = 1e-9
@@ -124,19 +124,19 @@ def _blocker_index(static_obstacles, others_polys):
 
 def push_plan_se2(
     obs: MovableObstacle,
-    must_clear_polys,                   # 必须被腾空的走廊多边形
-    static_obstacles,                   # StaticObstacle 列表
+    must_clear_polys,                   # corridor polygons that must be cleared
+    static_obstacles,                   # list of StaticObstacle
     bounds: Tuple[float, float, float, float],
     robot_pos: Tuple[float, float],
     cfg: Config,
-    others_polys=None,                  # 需要避开的其他可移动障碍物
+    others_polys=None,                  # other movable obstacles to avoid
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
     if not cfg.push_use_planner:
         return (False, None, math.inf, None)
     try:
         planner = _get_push_planner(obs, static_obstacles, bounds, robot_pos,
                                     cfg, others_polys)
-        # 每次都要重设走廊：被阻挡的边逐周期不同
+        # reset corridor every time: the blocked edge differs per cycle
         corridor_verts = [push_planner.polygon_exterior_coords(p)
                           for p in must_clear_polys] if must_clear_polys else []
         planner.set_corridor([c for c in corridor_verts if len(c) >= 3])
@@ -153,14 +153,14 @@ def push_plan_se2(
             return (False, None, math.inf, None)
         end_poly = obs.polygon_at(*result.goal)
         if any(end_poly.intersects(p) for p in (must_clear_polys or [])):
-            cfg.log(f"[push_plan_se2] oid={obs.oid} 目标位姿实际未腾空走廊，判为无解")
+            cfg.log(f"[push_plan_se2] oid={obs.oid} target pose does not actually clear the corridor – no solution")
             return (False, None, math.inf, None)
         return (True, result.path, result.cost, result.goal)
     except Exception as e:
         cfg.log(f"[push_plan_se2] error: {e}")
         return (False, None, math.inf, None)
     
-# ---------- 计算器 1c：推动做功 ---------- #
+# ---------- Calculator 1c: push work ---------- #
 
 def se2_path_cost(obs: MovableObstacle, poses, cfg: Config) -> float:
     if poses is None or len(poses) < 2:

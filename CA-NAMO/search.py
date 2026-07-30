@@ -1,4 +1,4 @@
-"""在增广路网上使用分支限界的最佳优先搜索"""
+"""Branch-and-bound best-first search on the augmented roadmap"""
 
 from __future__ import annotations
 import heapq
@@ -17,7 +17,7 @@ import geometry
 class Plan:
     cost: float
     node_path: List[int]
-    actions: List[dict]                  # 有序的 'move' / 'remove' 动作序列
+    actions: List[dict]                  # ordered sequence of 'move' / 'remove' actions
     expansions: int
 
 
@@ -36,7 +36,7 @@ class Planner:
         self.failed_pushes = set() if failed_pushes is None else failed_pushes
         self._robot_pos: Tuple[float, float] = (0.0, 0.0)
 
-    # ------------------------------------------------------------------ 规划
+    # ------------------------------------------------------------------ planning
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
         rm = self.roadmap
         cfg = self.cfg
@@ -61,7 +61,7 @@ class Planner:
         while open_heap:
             f, bias, _, node = heapq.heappop(open_heap)
             g = g_best.get(node, math.inf)
-            if f > incumbent + 1e-9:            # 分支限界剪枝
+            if f > incumbent + 1e-9:            # branch-and-bound pruning
                 continue
             if node == goal_node:
                 incumbent = g
@@ -108,7 +108,7 @@ class Planner:
         return Plan(cost=round(incumbent, 4), node_path=node_path,
                     actions=actions, expansions=expansions)
 
-    # ------------------------------------------------------------- 边代价
+    # ------------------------------------------------------------- edge cost
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
         cfg = self.cfg
         base = cfg.lambda_distance * self.roadmap.edge_len[key]
@@ -126,7 +126,7 @@ class Planner:
         return base + extra, removals
 
     def _removal(self, oid: int, key: EdgeKey):
-        """计算把障碍物推开所需的做功和放置位姿，同时规划 SE2 推动路径"""
+        """Compute work and drop pose needed to push an obstacle aside, also plan SE2 push path"""
         cache_key = (oid, key)
         if cache_key in self._removal_cache:
             return self._removal_cache[cache_key]

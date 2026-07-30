@@ -1,4 +1,4 @@
-"""增广路网的构建（全图统一网格）"""
+"""Augmented roadmap construction (uniform grid across the entire map)"""
 
 from __future__ import annotations
 import math
@@ -14,7 +14,7 @@ class Roadmap:
         self.cfg = cfg
         self.workspace = workspace
         polys = [so.polygon for so in static_obstacles]
-        self.static_obstacles = static_obstacles  # 供推动规划器使用
+        self.static_obstacles = static_obstacles  # for use by the push planner
         self.static_free = workspace.difference(unary_union(polys)) if polys else workspace
         self.static_free_prep = prep(self.static_free)
         self.free_eroded = self.static_free.buffer(-cfg.robot_radius, quad_segs=16)
@@ -25,14 +25,14 @@ class Roadmap:
         self.edge_corridor: Dict[EdgeKey, Polygon] = {}
         self._build()
 
-    # ------------------ 构建 ---------------- #
+    # ------------------ Construction ---------------- #
     def _build(self):
-        """全图统一间距的网格"""
+        """Uniform grid across the entire map"""
         cfg = self.cfg
         assert cfg.grid_step > 0 and cfg.conn_radius > 0
         minx, miny, maxx, maxy = self.workspace.bounds
         step = cfg.grid_step
-        # 在网格上采样节点，仅保留机器人圆盘能够放入的位置
+        # sample nodes on a grid, keeping only positions where the robot disc fits
         buckets: Dict[Tuple[int, int], List[int]] = {}
         for iy in range(int((maxy - miny) / step) + 1):
             y = miny + iy * step
@@ -45,8 +45,8 @@ class Roadmap:
                 self.adj[nid] = []
                 b = (int(x // cfg.conn_radius), int(y // cfg.conn_radius))
                 buckets.setdefault(b, []).append(nid)
-        # 连接相近且膨胀后的线段不与墙体相交的节点。桶边长取连接半径
-        #    cfg.conn_radius，因此 3x3 邻域仍能覆盖任意一对可连边的节点。
+        # connect nearby nodes whose inflated segment does not intersect walls. bucket size = conn_radius
+        #    so a 3×3 neighbourhood still covers every connectable pair.
         for nid, (x, y) in enumerate(self.nodes):
             bx, by = int(x // cfg.conn_radius), int(y // cfg.conn_radius)
             for dbx in (-1, 0, 1):
@@ -70,7 +70,7 @@ class Roadmap:
         self.adj[u].append(v)
         self.adj[v].append(u)
 
-    # ------------------ 查询 ---------------- #
+    # ------------------ Query ---------------- #
     def neighbors(self, u: int):
         for v in self.adj[u]:
             key = (u, v) if u < v else (v, u)

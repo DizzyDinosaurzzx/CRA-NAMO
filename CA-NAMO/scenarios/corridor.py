@@ -3,7 +3,6 @@ from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
-
 def create():
     workspace = box(0, 0, 40, 8)
     t = 0.5
