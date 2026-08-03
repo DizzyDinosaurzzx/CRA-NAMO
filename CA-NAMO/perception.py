@@ -1,6 +1,7 @@
 """Perception and belief state maintenance and update"""
 
 from __future__ import annotations
+import math
 from typing import Dict, List, Set, Tuple
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
@@ -19,6 +20,7 @@ class Belief:
         self.contacts: List[Polygon] = []  # obstacles known only through push collision
         self.touched: Set[int] = set()
         self.touched_difficulty: Dict[int, float] = {}  # obstacle true difficulties obtained via touch
+        self.push_dir: Dict[int, Tuple[float, float]] = {}  # last push direction per obstacle
 
     # -------------------- Perception ----------------------
     def perceive(self, world_obstacles: List[MovableObstacle],
@@ -84,9 +86,10 @@ class Belief:
         # wall occlusion: a ray is blocked once it leaves the static free space (= workspace minus walls)
         if not self.roadmap.static_free_prep.contains(sight):
             return False
-        # occlusion by other movable obstacles
+        # occlusion by other movable obstacles; a blocker no taller than half the
+        # target still leaves the target's upper half exposed, so it does not occlude
         for w in world_obstacles:
-            if w.oid == target.oid:
+            if w.oid == target.oid or w.h <= target.h / 2.0 + 1e-9:
                 continue
             if sight.intersects(w.polygon):
                 return False
@@ -155,6 +158,13 @@ class Belief:
     def _forget_edges(self, oid: int):  # forget edge-blocking info for this obstacle
         for blockers in self.edge_blockers.values():
             blockers.discard(oid)
+
+    def record_push_direction(self, oid: int, from_xy, to_xy):
+        """Remember which way this obstacle was last pushed (pure rotations keep the old direction)"""
+        dx, dy = to_xy[0] - from_xy[0], to_xy[1] - from_xy[1]
+        n = math.hypot(dx, dy)
+        if n > 1e-3:
+            self.push_dir[oid] = (dx / n, dy / n)
 
     def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):  # update obstacle blocking info after relocation
         self._forget_edges(obs.oid)

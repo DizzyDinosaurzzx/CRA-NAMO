@@ -21,6 +21,9 @@ class Plan:
     expansions: int
 
 
+_PUSH_DIR_EPS = 1e-3    # below this displacement a drop pose carries no push direction
+
+
 def push_signature(obs) -> tuple:
     return (obs.oid, round(obs.x, 3), round(obs.y, 3), round(obs.theta, 4))
 
@@ -181,7 +184,8 @@ class Planner:
         if self.cfg.push_use_planner:
             se2_feasible, se2_path, se2_cost, se2_goal = geometry.push_plan_se2(
                 obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
-                robot_pos, self.cfg, others_polys=others)
+                robot_pos, self.cfg, others_polys=others,
+                goal_accept=self._goal_filter(obs))
             if se2_feasible and se2_path:
                 feasible = True
                 push_path = se2_path
@@ -196,6 +200,24 @@ class Planner:
         res = (feasible, work, drop, push_dist, push_path)
         self._persistent_removal_cache[cache_key] = res
         return res
+
+    def _goal_filter(self, obs):
+        """Reject drop poses that leave the obstacle blocking more edges than it does
+        now, or that reverse the direction this obstacle was last pushed in."""
+        base_blocked = self.roadmap.count_blocked_edges(obs.polygon)
+        last_dir = self.belief.push_dir.get(obs.oid)
+
+        def accept(goal):
+            if self.roadmap.count_blocked_edges(obs.polygon_at(*goal)) > base_blocked:
+                return False
+            if last_dir is None:
+                return True
+            dx, dy = goal[0] - obs.x, goal[1] - obs.y
+            if math.hypot(dx, dy) <= _PUSH_DIR_EPS:     # pure rotation has no direction
+                return True
+            return dx * last_dir[0] + dy * last_dir[1] >= 0.0
+
+        return accept
 
     def _llm_bias(self, removals) -> float:
         if not self.cfg.use_llm_ordering or not removals:

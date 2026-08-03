@@ -17,7 +17,7 @@ def create():
     movable = [
         MovableObstacle(
             x=20.0, y=4.0,
-            l=0.7, d=6, theta=0.0,
+            l=0.7, d=6, h=1, theta=0.0,
             material="wooden_crate",
             difficulty=3.15,
             oid=1,

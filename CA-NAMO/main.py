@@ -200,12 +200,15 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
             continue
         # perceived: colour by whether it has been moved
         col = "orange" if removed else "crimson"
-        _plot_poly(ax, poly, color=col, alpha=0.6, zorder=3)
+        # the obstacle being pushed sits above the robot, so a piece carried past
+        # the robot is not hidden by it; on collisions the robot stays on top
+        z = 8.5 if oid == frame.get("push_oid") else 3
+        _plot_poly(ax, poly, color=col, alpha=0.6, zorder=z)
         cx, cy = poly.centroid.x, poly.centroid.y
         estimates = frame.get("estimated_difficulty", {})
         touched = frame.get("touched_difficulty", {})
         ax.text(cx, cy, _obstacle_label(oid, estimates, touched),
-                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4)
+                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=z + 1)
 
     # draw robot motion trail up to this frame (semi-transparent blue corridor)
     track = frame["track"]
@@ -216,11 +219,11 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     # draw all paths given by the planner at this frame (blue lines)
     _draw_plan_paths(ax, frame)
 
-    # draw current robot position (filled red circle + dark red centre dot)
+    # draw current robot position (filled green circle + dark green centre dot)
     rx, ry = frame["robot"]
     robot_circle = Point(rx, ry).buffer(sim.cfg.robot_radius)
-    _plot_poly(ax, robot_circle, color="red", alpha=0.7, zorder=7)
-    ax.plot(rx, ry, marker="o", color="darkred", ms=4, zorder=8, label="robot")
+    _plot_poly(ax, robot_circle, color="limegreen", alpha=0.85, zorder=7)
+    ax.plot(rx, ry, marker="o", color="darkgreen", ms=4, zorder=8, label="robot")
 
     # title: step N / total | action label | cumulative cost
     title = f"[{sim.cfg.strategy}] step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"

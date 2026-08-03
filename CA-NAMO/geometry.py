@@ -132,6 +132,7 @@ def push_plan_se2(
     robot_pos: Tuple[float, float],
     cfg: Config,
     others_polys=None,                  # other movable obstacles to avoid
+    goal_accept=None,                   # (goal_pose) -> bool, filters candidate drop poses
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
     if not cfg.push_use_planner:
         return (False, None, math.inf, None)
@@ -149,7 +150,7 @@ def push_plan_se2(
             return _path_is_clear_against(obs, poses, blockers)
 
         result = planner.plan_anywhere((obs.x, obs.y, obs.theta),
-                                       validate=_validate)
+                                       validate=_validate, goal_accept=goal_accept)
         if not result.success:
             cfg.log(f"[push_plan_se2] oid={obs.oid} {result.reason}")
             return (False, None, math.inf, None)

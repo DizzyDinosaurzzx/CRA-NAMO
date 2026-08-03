@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 from shapely.geometry import Point, Polygon, LineString
 from shapely.ops import unary_union
 from shapely.prepared import prep
+from shapely.strtree import STRtree
 from scipy.spatial import KDTree
 from config import Config
 EdgeKey = Tuple[int, int]
@@ -25,6 +26,7 @@ class Roadmap:
         self.edge_len: Dict[EdgeKey, float] = {}
         self.edge_corridor: Dict[EdgeKey, Polygon] = {}
         self._kdtree: KDTree | None = None
+        self._corridor_tree: STRtree | None = None
         self._build()
         self._rebuild_kdtree()
 
@@ -79,6 +81,12 @@ class Roadmap:
             key = (u, v) if u < v else (v, u)
             yield v, key, self.edge_len[key]
 
+    def count_blocked_edges(self, poly: Polygon) -> int:
+        """How many edge corridors this footprint would block"""
+        if self._corridor_tree is None:
+            self._corridor_tree = STRtree(list(self.edge_corridor.values()))
+        return len(self._corridor_tree.query(poly, predicate="intersects"))
+
     def _rebuild_kdtree(self):
         if self.nodes:
             self._kdtree = KDTree(self.nodes)
@@ -107,6 +115,7 @@ class Roadmap:
                 self.edge_corridor[key] = seg.buffer(cfg.robot_radius, cap_style=2)
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
+        self._corridor_tree = None      # new corridors, index is stale
         self._rebuild_kdtree()
         return nid
 

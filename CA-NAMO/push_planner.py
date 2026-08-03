@@ -602,7 +602,8 @@ class PushPlanner:
     def plan_anywhere(self,
                       start_pose: Tuple[float, float, float],
                       validate=None,
-                      n_candidates: int = 10) -> PushPlanResult:
+                      n_candidates: int = 10,
+                      goal_accept=None) -> PushPlanResult:
         start_idx = self._snap(*start_pose)
 
         if not self.in_disk[start_idx]:
@@ -632,12 +633,14 @@ class PushPlanner:
             self._cache = self._search(start_idx, max_bucket=max_bucket) + (start_flat,)
         dist, parent, _cached_start = self._cache
 
+        one_shot = validate is None and goal_accept is None
         candidates, reachable = self._select_goal(
-            dist, start_pose, n_best=1 if validate is None else n_candidates)
+            dist, start_pose, n_best=1 if one_shot else n_candidates)
         if not reachable:
             return PushPlanResult(False, "no reachable pose can clear the path")
 
         nyT = self.ny * self.n_theta
+        fallback = None
         for best in candidates:
             goal_idx = (best // nyT, (best % nyT) // self.n_theta,
                         best % self.n_theta)
@@ -649,7 +652,15 @@ class PushPlanner:
                         for a, b in zip(poses, poses[1:]))
             rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
             cost = trans + self.rot_weight * rot
-            return PushPlanResult(True, "", cost, trans, rot, goal_pose, poses)
+            result = PushPlanResult(True, "", cost, trans, rot, goal_pose, poses)
+            # candidates come in cost order, so the first accepted one is the
+            # cheapest acceptable drop pose; keep the cheapest overall as fallback
+            if goal_accept is None or goal_accept(goal_pose):
+                return result
+            if fallback is None:
+                fallback = result
+        if fallback is not None:
+            return fallback
 
         return PushPlanResult(False, "all candidate push paths failed swept-volume validation")
 

@@ -273,6 +273,7 @@ class OnlineNAMO:
                                               cfg.push_max_frames_per_action))
         n = len(push_path)
         last_i = 0
+        start_xy = (obs.x, obs.y)
 
         # Build STRtree once for all steps in this push — avoids O(N) polygon
         # scans on every sub-step of the push trajectory.
@@ -300,14 +301,17 @@ class OnlineNAMO:
                     # obstacle was pushed to push_path[last_i] before being stopped; belief must sync to that actual pose
                     if last_i != 0:
                         self.belief.relocate(obs, *push_path[last_i])
+                        self.belief.record_push_direction(oid, start_xy, push_path[last_i])
                     return (False, hits,
                             geometry.se2_path_cost(obs, push_path[:last_i + 1], cfg))
             self._relocate_world(oid, wx, wy, wth)
             last_i = i
             if i in frame_at:
-                self._capture_frame(res, node, f"push {oid} step {i}/{n - 1}")
+                self._capture_frame(res, node, f"push {oid} step {i}/{n - 1}",
+                                    push_oid=oid)
         # update belief with final pose
         self.belief.relocate(obs, *push_path[-1])
+        self.belief.record_push_direction(oid, start_xy, push_path[-1])
         return (True, [], geometry.se2_path_cost(obs, push_path, cfg))
 
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
@@ -332,12 +336,14 @@ class OnlineNAMO:
                 paths.append({"kind": "push", "oid": act["oid"], "pts": pts})
         return paths
 
-    def _capture_frame(self, res: RunResult, node: int, label: str):
+    def _capture_frame(self, res: RunResult, node: int, label: str,
+                       push_oid: Optional[int] = None):
         if not self.cfg.save_frames:
             return
         perceived = set(self.belief.perceived.keys())
         res.frames.append({
             "node": node,
+            "push_oid": push_oid,   # obstacle currently being pushed (drawn above the robot)
             "plan_paths": list(self._plan_paths),   # planned paths being executed at this frame
             "robot": self.roadmap.nodes[node],
             "track": list(res.robot_track),

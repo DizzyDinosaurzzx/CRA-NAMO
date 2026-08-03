@@ -6,7 +6,7 @@ from typing import Dict
 import requests
 from config import Config
 
-# Estimate: difficulty ~= density * (l * d).
+# Estimate: difficulty ~= density * volume (l * d * h).
 MATERIAL_DENSITY: Dict[str, float] = {
     # ---- very light ---- #
     "styrofoam_box": 0.004,
@@ -37,6 +37,32 @@ MATERIAL_DENSITY: Dict[str, float] = {
     "industrial_machine": 37.5,
     # ---- fallback ---- #
     "unknown": 1,
+}
+# Typical height per material, used as the ground-truth h in the scenarios.
+MATERIAL_HEIGHT: Dict[str, float] = {
+    "styrofoam_box": 1.0,
+    "foam_mat": 0.1,
+    "cardboard_box": 0.8,
+    "empty_cart": 1.0,
+    "plastic_chair": 0.9,
+    "trash_bin": 1.0,
+    "stool": 0.5,
+    "chair": 0.9,
+    "empty_shelf": 1.8,
+    "cart": 1.1,
+    "wooden_table": 0.75,
+    "wooden_crate": 1.0,
+    "shelf": 1.8,
+    "sofa": 0.85,
+    "cabinet": 1.8,
+    "pallet": 0.15,
+    "loaded_pallet": 1.2,
+    "filing_cabinet": 1.3,
+    "steel_shelf": 2.0,
+    "steel_safe": 1.5,
+    "concrete_block": 1.0,
+    "industrial_machine": 1.6,
+    "unknown": 1.0,
 }
 # Synonym table
 MATERIAL_ALIASES: Dict[str, str] = {
@@ -72,24 +98,30 @@ def _canonical_anchor(name) -> str | None:
     alias_target = MATERIAL_ALIASES.get(key)
     return alias_target if alias_target in anchor_names else None
 
-def _footprint_area(o: dict) -> float:
-    area = o.get("area")
-    if not area:
-        area = float(o["l"]) * float(o["d"])
-    return float(area)
+def _volume(o: dict) -> float:
+    volume = o.get("volume")
+    if not volume:
+        volume = float(o["l"]) * float(o["d"]) * float(o.get("h", 1.0))
+    return float(volume)
+
+def _lookup(table: Dict[str, float], name) -> float:
+    key = _normalise(name)
+    if key in table:
+        return table[key]
+    if key in MATERIAL_ALIASES:
+        return table[MATERIAL_ALIASES[key]]
+    tokens = set(key.split("_"))
+    hits = [v for k, v in table.items()
+            if k != "unknown" and tokens & set(k.split("_"))]
+    hits += [table[canon] for alias, canon in MATERIAL_ALIASES.items()
+             if tokens & set(alias.split("_"))]
+    return max(hits) if hits else table["unknown"]
 
 def material_density(name) -> float:
-    key = _normalise(name)
-    if key in MATERIAL_DENSITY:
-        return MATERIAL_DENSITY[key]
-    if key in MATERIAL_ALIASES:
-        return MATERIAL_DENSITY[MATERIAL_ALIASES[key]]
-    tokens = set(key.split("_"))
-    hits = [v for k, v in MATERIAL_DENSITY.items()
-            if k != "unknown" and tokens & set(k.split("_"))]
-    hits += [MATERIAL_DENSITY[canon] for alias, canon in MATERIAL_ALIASES.items()
-             if tokens & set(alias.split("_"))]
-    return max(hits) if hits else MATERIAL_DENSITY["unknown"]
+    return _lookup(MATERIAL_DENSITY, name)
+
+def material_height(name) -> float:
+    return _lookup(MATERIAL_HEIGHT, name)
 
 class DifficultyEstimator:
     def __init__(self, cfg: Config):
@@ -137,7 +169,7 @@ class DifficultyEstimator:
             self.material_source_cache[material] = source
 
         density = max(0.0, float(density))
-        difficulty = max(0.01, round(density * _footprint_area(obs_obs), 3))
+        difficulty = max(0.01, round(density * _volume(obs_obs), 3))
         self.density_cache[oid] = round(density, 6)
         self.source_cache[oid] = source
         self.cache[oid] = difficulty
@@ -146,7 +178,7 @@ class DifficultyEstimator:
     # ------------- Heuristic method --------------- #
     def _heuristic(self, o: dict) -> float:
         density = material_density(o.get("material", "unknown"))
-        return density * _footprint_area(o)
+        return density * _volume(o)
 
     # ------------- LLM density estimation --------------- #
     def _build_prompt(self, o: dict) -> str:
@@ -184,8 +216,8 @@ class DifficultyEstimator:
                 "raw physical units. Do not copy a convenient midpoint or generic "
                 "fallback. In particular, return 0.5 only when the object is "
                 "independently judged comparable to wooden_table.\n"
-                "4. Return ONE size-independent density coefficient. Footprint area "
-                "must not affect it; Python will multiply density by area later."
+                "4. Return ONE size-independent density coefficient. Object volume "
+                "must not affect it; Python will multiply density by volume later."
             )
 
         return (
@@ -193,13 +225,17 @@ class DifficultyEstimator:
             "a mobile robot moving an obstacle aside.\n"
             "Use this project-specific calibrated scale, even when it differs from "
             "ordinary physical density. The caller will calculate:\n\n"
-            "    difficulty = density * footprint_area\n\n"
-            "`density` is a per-material coefficient (difficulty per square metre). "
+            "    difficulty = density * volume        # volume = l * d * h\n\n"
+            "`density` is a per-material coefficient (difficulty per cubic metre). "
             "The following PROMPT_ANCHORS values are DENSITIES, not final "
             "difficulties:\n\n"
             f"{anchors}\n\n"
             f"{material_instruction}\n\n"
-            f"Unknown obstacle label: '{o.get('material')}'.\n"
+            f"Obstacle label: '{o.get('material')}', measured size "
+            f"l x d x h = {float(o['l']):g} x {float(o['d']):g} x "
+            f"{float(o.get('h', 1.0)):g} m (volume = {_volume(o):g} m^3). "
+            "The size tells you what kind of object this is; the density you "
+            "return must still be size-independent.\n"
             "Output ONLY the density number, no words or units."
         )
 

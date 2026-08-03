@@ -26,6 +26,7 @@ class MovableObstacle:
     y: float
     l: float
     d: float
+    h: float = 1.0                 # height, used for volume and occlusion reasoning
     theta: float = 0.0
     material: str = "unknown"      # semantic label for LLM reasoning
     difficulty: float = 1.0        # true work coefficient per unit push distance
@@ -46,13 +47,17 @@ class MovableObstacle:
     def area(self) -> float:
         return self.l * self.d
 
+    @property
+    def volume(self) -> float:
+        return self.l * self.d * self.h
+
     def center(self):
         return (self.x, self.y)
 
     def perceived_copy(self) -> "MovableObstacle":
         """Return a copy for Belief tracking, with difficulty set to NaN"""
         return MovableObstacle(
-            x=self.x, y=self.y, l=self.l, d=self.d, theta=self.theta,
+            x=self.x, y=self.y, l=self.l, d=self.d, h=self.h, theta=self.theta,
             material=self.material, difficulty=math.nan, oid=self.oid,
         )
 
@@ -66,11 +71,12 @@ class MovableObstacle:
         return {
             "oid": self.oid,
             "x": round(self.x, 2), "y": round(self.y, 2),
-            "l": self.l, "d": self.d, "theta": round(self.theta, 3),
+            "l": self.l, "d": self.d, "h": self.h, "theta": round(self.theta, 3),
             "area": round(self.area, 2),
+            "volume": round(self.volume, 2),
             "material": self.material,
         }
 
     def __repr__(self):
         return (f"Obs#{self.oid}({self.material}, c=({self.x:.1f},{self.y:.1f}), "
-                f"{self.l}x{self.d}, diff={self.difficulty})")
+                f"{self.l}x{self.d}x{self.h}, diff={self.difficulty})")

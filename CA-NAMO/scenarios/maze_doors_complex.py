@@ -1,7 +1,7 @@
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
-from llm_difficulty import material_density
+from llm_difficulty import material_density, material_height
 from obstacle import MovableObstacle, StaticObstacle
 
 DOOR_OID_BASE = 900
@@ -16,13 +16,15 @@ def _door_blocker(label: str, x: float, y: float, l: float, d: float,
         l -= DOOR_CLEARANCE
     else:
         d -= DOOR_CLEARANCE
+    h = material_height(material)
     if difficulty is None:
-        difficulty = round(material_density(material) * l * d, 3)
+        difficulty = round(material_density(material) * l * d * h, 3)
     return MovableObstacle(
         x=x,
         y=y,
         l=l,
         d=d,
+        h=h,
         theta=0.0,
         material=material,
         difficulty=difficulty,
@@ -143,146 +145,147 @@ def create():
             y=13.5,
             l=2.0,
             d=2.0,
+            h=1,
             theta=0.0,
             material="concrete_block",
-            difficulty=100.0,
+            difficulty=100,
             oid=1,
         ),
         MovableObstacle(
-            x=12.8, y=11, l=4.6, d=6.6, theta=0.0,
-            material="industrial_machine", difficulty=37.5, oid=2,
+            x=12.8, y=11, l=4.6, d=6.6, h=1.6, theta=0.0,
+            material="industrial_machine", difficulty=1821.6, oid=2,
         ),
         MovableObstacle(
-            x=17.7, y=11.5, l=2.0, d=3.8, theta=0.0,
+            x=17.7, y=11.5, l=2.0, d=3.8, h=1, theta=0.0,
             material="wooden_crate", difficulty=5.7, oid=3,
         ),
         MovableObstacle(
-            x=12.0, y=6.65, l=1.6, d=1.2, theta=0.0,
+            x=12.0, y=6.65, l=1.6, d=1.2, h=1, theta=0.0,
             material="wooden_crate", difficulty=1.44, oid=4,
         ),
         MovableObstacle(
-            x=12.0, y=3.25, l=1.5, d=2.0, theta=0.0,
+            x=12.0, y=3.25, l=1.5, d=2.0, h=1, theta=0.0,
             material="wooden_crate", difficulty=2.25, oid=5,
         ),
         MovableObstacle(
-            x=13.8, y=5.2, l=0.8, d=1.0, theta=0.0,
+            x=13.8, y=5.2, l=0.8, d=1.0, h=1, theta=0.0,
             material="wooden_crate", difficulty=0.6, oid=6,
         ),
         MovableObstacle(
-            x=18.9, y=4.7, l=1.2, d=1.3, theta=0.0,
+            x=18.9, y=4.7, l=1.2, d=1.3, h=1, theta=0.0,
             material="wooden_crate", difficulty=1.17, oid=7,
         ),
         MovableObstacle(
-            x=18.9, y=3.4, l=1.2, d=1.3, theta=0.0,
+            x=18.9, y=3.4, l=1.2, d=1.3, h=1, theta=0.0,
             material="wooden_crate", difficulty=1.17, oid=8,
         ),
         MovableObstacle(
-            x=27.75, y=6.7, l=1.4, d=1.2, theta=0.0,
-            material="cardboard_box", difficulty=0.118, oid=10,
+            x=27.75, y=6.7, l=1.4, d=1.2, h=0.8, theta=0.0,
+            material="cardboard_box", difficulty=0.094, oid=10,
         ),
         MovableObstacle(
-            x=13.05, y=27.7, l=1.2, d=1.2, theta=0.0,
+            x=13.05, y=27.7, l=1.2, d=1.2, h=1, theta=0.0,
             material="wooden_crate", difficulty=1.08, oid=11,
         ),
         MovableObstacle(
-            x=23.75, y=27.75, l=4.5, d=3.5, theta=0.0,
+            x=23.75, y=27.75, l=4.5, d=3.5, h=1, theta=0.0,
             material="wooden_crate", difficulty=11.812, oid=12,
         ),
         MovableObstacle(
-            x=10.25, y=24.3, l=4.5, d=2.1, theta=0.0,
+            x=10.25, y=24.3, l=4.5, d=2.1, h=1, theta=0.0,
             material="wooden_crate", difficulty=7.088, oid=13,
         ),
         MovableObstacle(
-            x=23.0, y=23.05, l=1.1, d=3.0, theta=0.0,
+            x=23.0, y=23.05, l=1.1, d=3.0, h=1, theta=0.0,
             material="wooden_crate", difficulty=2.475, oid=14,
         ),
 
         MovableObstacle(
-            x=14.0, y=18.7, l=2.5, d=2.3, theta=0.0,
+            x=14.0, y=18.7, l=2.5, d=2.3, h=1, theta=0.0,
             material="wooden_crate", difficulty=4.312, oid=16,
         ),
         MovableObstacle(
-            x=28.0, y=16.75, l=1.8, d=2.8, theta=0.0,
+            x=28.0, y=16.75, l=1.8, d=2.8, h=1, theta=0.0,
             material="wooden_crate", difficulty=3.78, oid=17,
         ),
         MovableObstacle(
-            x=3.8, y=13.5, l=1.8, d=1.6, theta=0.0,
+            x=3.8, y=13.5, l=1.8, d=1.6, h=1, theta=0.0,
             material="wooden_crate", difficulty=2.16, oid=18,
         ),
         MovableObstacle(
-            x=6.6, y=7.4, l=5.0, d=1.4, theta=0.53,
+            x=6.6, y=7.4, l=5.0, d=1.4, h=1, theta=0.53,
             material="wooden_crate", difficulty=5.25, oid=19,
         ),
         MovableObstacle(
-            x=2.6, y=3.1, l=1.6, d=1.5, theta=0.0,
+            x=2.6, y=3.1, l=1.6, d=1.5, h=1, theta=0.0,
             material="wooden_crate", difficulty=1.8, oid=20,
         ),
         MovableObstacle(
-            x=6.9, y=1.5, l=2.2, d=1.8, theta=0.0,
+            x=6.9, y=1.5, l=2.2, d=1.8, h=1, theta=0.0,
             material="wooden_crate", difficulty=2.97, oid=21,
         ),
         MovableObstacle(
-            x=17.1, y=27.5, l=3.0, d=0.75, theta=0.92,
+            x=17.1, y=27.5, l=3.0, d=0.75, h=1, theta=0.92,
             material="wooden_crate", difficulty=1.688, oid=22,
         ),
         MovableObstacle(
-            x=6.4, y=23.7, l=4.4, d=0.75, theta=-0.65,
+            x=6.4, y=23.7, l=4.4, d=0.75, h=1, theta=-0.65,
             material="wooden_crate", difficulty=2.475, oid=23,
         ),
         MovableObstacle(
-            x=17.2, y=22.8, l=2.7, d=0.85, theta=-0.82,
+            x=17.2, y=22.8, l=2.7, d=0.85, h=1, theta=-0.82,
             material="wooden_crate", difficulty=1.721, oid=24,
         ),
         MovableObstacle(
-            x=7.5, y=14.6, l=3.8, d=0.8, theta=-0.91,
+            x=7.5, y=14.6, l=3.8, d=0.8, h=1, theta=-0.91,
             material="wooden_crate", difficulty=2.28, oid=25,
         ),
         MovableObstacle(
-            x=22.5, y=12.3, l=8.25, d=0.7, theta=1.07,
-            material="wooden_crate", difficulty=4.62, oid=26,
+            x=22.5, y=12.3, l=8.25, d=0.7, h=1, theta=1.07,
+            material="wooden_crate", difficulty=4.331, oid=26,
         ),
         MovableObstacle(
-            x=3.8, y=9.5, l=4.3, d=0.75, theta=-1.05,
+            x=3.8, y=9.5, l=4.3, d=0.75, h=1, theta=-1.05,
             material="wooden_crate", difficulty=2.419, oid=27,
         ),
         MovableObstacle(
-            x=23.0, y=4.0, l=3.8, d=0.9, theta=-0.7,
-            material="wooden_crate", difficulty=2.22, oid=28,
+            x=23.0, y=4.0, l=3.8, d=0.9, h=1, theta=-0.7,
+            material="wooden_crate", difficulty=2.565, oid=28,
         ),
         MovableObstacle(
-            x=15, y=2.0, l=4.6, d=0.75, theta=-0.45,
-            material="wooden_crate", difficulty=2.025, oid=29,
+            x=15, y=2.0, l=4.6, d=0.75, h=1, theta=-0.45,
+            material="wooden_crate", difficulty=2.587, oid=29,
         ),
         MovableObstacle(
-            x=28.1, y=23.2, l=0.5, d=0.5, theta=0.00,
+            x=28.1, y=23.2, l=0.5, d=0.5, h=1, theta=0.00,
             material="wooden_crate", difficulty=0.188, oid=30,
         ),
         MovableObstacle(
-            x=26.2, y=23.2, l=0.5, d=0.5, theta=0.17,
+            x=26.2, y=23.2, l=0.5, d=0.5, h=1, theta=0.17,
             material="wooden_crate", difficulty=0.188, oid=31,
         ),
         MovableObstacle(
-            x=27, y=23.2, l=0.5, d=0.5, theta=0.35,
+            x=27, y=23.2, l=0.5, d=0.5, h=1, theta=0.35,
             material="wooden_crate", difficulty=0.188, oid=32,
         ),
         MovableObstacle(
-            x=26.5, y=22, l=0.5, d=0.5, theta=0.52,
+            x=26.5, y=22, l=0.5, d=0.5, h=1, theta=0.52,
             material="wooden_crate", difficulty=0.188, oid=33,
         ),
         MovableObstacle(
-            x=27.3, y=22.2, l=0.5, d=0.5, theta=0.70,
+            x=27.3, y=22.2, l=0.5, d=0.5, h=1, theta=0.70,
             material="wooden_crate", difficulty=0.188, oid=34,
         ),
         MovableObstacle(
-            x=27.9, y=22, l=0.5, d=0.5, theta=0.87,
+            x=27.9, y=22, l=0.5, d=0.5, h=1, theta=0.87,
             material="wooden_crate", difficulty=0.188, oid=35,
         ),
         MovableObstacle(
-            x=27, y=24, l=0.5, d=0.5, theta=1.05,
+            x=27, y=24, l=0.5, d=0.5, h=1, theta=1.05,
             material="wooden_crate", difficulty=0.188, oid=36,
         ),
         MovableObstacle(
-            x=28, y=24, l=0.5, d=0.5, theta=1.22,
+            x=28, y=24, l=0.5, d=0.5, h=1, theta=1.22,
             material="wooden_crate", difficulty=0.188, oid=37,
         ),
 
