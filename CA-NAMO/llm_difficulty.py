@@ -6,37 +6,79 @@ from typing import Dict
 import requests
 from config import Config
 
-# Estimate: difficulty ~= density * volume (l * d * h).
-MATERIAL_DENSITY: Dict[str, float] = {
+# Difficulty is the sliding friction force that resists pushing the obstacle:
+#
+#     difficulty = f = mu * m * g = (mu * rho) * V * g        [N]
+#
+# with V = l * d * h the bounding-box volume. Because V is the bounding box and
+# not the solid volume, rho is a *bulk* density (total mass / bounding volume),
+# so a mostly-empty shelf is much lighter per cubic metre than solid concrete.
+# Wheeled objects use an effective rolling-resistance coefficient for mu, which
+# is why a cart is far easier to move than its mass alone suggests.
+G = 9.81                       # gravitational acceleration [m/s^2]
+
+# Sliding friction coefficient against the floor (rolling resistance if wheeled).
+MATERIAL_MU: Dict[str, float] = {
+    "styrofoam_box": 0.35,
+    "foam_mat": 0.50,
+    "cardboard_box": 0.35,
+    "empty_cart": 0.02,        # wheels
+    "plastic_chair": 0.40,
+    "trash_bin": 0.40,
+    "stool": 0.40,
+    "chair": 0.45,
+    "empty_shelf": 0.45,
+    "cart": 0.03,              # wheels, loaded
+    "wooden_table": 0.40,
+    "wooden_crate": 0.45,
+    "shelf": 0.45,
+    "sofa": 0.50,
+    "cabinet": 0.45,
+    "pallet": 0.40,
+    "loaded_pallet": 0.40,
+    "filing_cabinet": 0.45,
+    "steel_shelf": 0.50,
+    "steel_safe": 0.50,
+    "concrete_block": 0.60,
+    "industrial_machine": 0.50,
+    "unknown": 0.40,
+}
+# Bulk density [kg/m^3] = total mass / bounding-box volume (l * d * h).
+MATERIAL_RHO: Dict[str, float] = {
     # ---- very light ---- #
-    "styrofoam_box": 0.004,
-    "foam_mat": 0.05,
+    "styrofoam_box": 15.0,     # EPS foam
+    "plastic_chair": 22.0,
+    "wooden_table": 26.0,
+    "foam_mat": 30.0,
+    "chair": 31.0,
     # ---- light ---- #
-    "cardboard_box": 0.07,
-    "empty_cart": 0.08,
-    "plastic_chair": 0.10,
-    "trash_bin": 0.15,
-    "stool": 0.18,
-    "chair": 0.20,
-    "empty_shelf": 0.21,
-    "cart": 0.30,
+    "empty_shelf": 35.0,
+    "cardboard_box": 40.0,
+    "trash_bin": 42.0,
+    "empty_cart": 50.0,
+    "stool": 50.0,
+    "sofa": 52.0,
+    "wooden_crate": 60.0,
     # ---- medium ---- #
-    "wooden_table": 0.50,
-    "wooden_crate": 0.75,
-    "shelf": 0.80,
-    "sofa": 0.85,
-    "cabinet": 0.90,
-    "pallet": 1.00,
-    "loaded_pallet": 1.10,
+    "cabinet": 100.0,
+    "cart": 150.0,             # loaded
+    "shelf": 167.0,            # loaded
+    "pallet": 174.0,
     # ---- heavy ---- #
-    "filing_cabinet": 2.50,
-    "steel_shelf": 4.20,
-    "steel_safe": 5.50,
+    "steel_shelf": 300.0,      # loaded
+    "filing_cabinet": 308.0,
+    "loaded_pallet": 434.0,
+    "industrial_machine": 700.0,
+    "steel_safe": 800.0,
     # ---- very heavy ---- #
-    "concrete_block": 25.0,
-    "industrial_machine": 37.5,
+    "concrete_block": 2400.0,  # solid concrete
     # ---- fallback ---- #
-    "unknown": 1,
+    "unknown": 100.0,
+}
+# mu * rho [kg/m^3] -- the per-material coefficient the estimator works with.
+MATERIAL_MU_RHO: Dict[str, float] = {
+    name: round(MATERIAL_MU[name] * MATERIAL_RHO[name], 4)
+    for name in MATERIAL_RHO
 }
 # Typical height per material, used as the ground-truth h in the scenarios.
 MATERIAL_HEIGHT: Dict[str, float] = {
@@ -80,7 +122,7 @@ MATERIAL_ALIASES: Dict[str, str] = {
     "styrofoam": "styrofoam_box",
 }
 PROMPT_ANCHORS = tuple(
-    name for name in sorted(MATERIAL_DENSITY, key=lambda k: MATERIAL_DENSITY[k])
+    name for name in sorted(MATERIAL_MU_RHO, key=lambda k: MATERIAL_MU_RHO[k])
     if name != "unknown"
 )
 
@@ -117,19 +159,29 @@ def _lookup(table: Dict[str, float], name) -> float:
              if tokens & set(alias.split("_"))]
     return max(hits) if hits else table["unknown"]
 
-def material_density(name) -> float:
-    return _lookup(MATERIAL_DENSITY, name)
+def material_mu(name) -> float:
+    return _lookup(MATERIAL_MU, name)
+
+def material_rho(name) -> float:
+    return _lookup(MATERIAL_RHO, name)
+
+def material_mu_rho(name) -> float:
+    return _lookup(MATERIAL_MU_RHO, name)
 
 def material_height(name) -> float:
     return _lookup(MATERIAL_HEIGHT, name)
+
+def friction_force(mu_rho: float, volume: float) -> float:
+    """f = mu * rho * V * g  [N] -- the push resistance charged per metre."""
+    return mu_rho * volume * G
 
 class DifficultyEstimator:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.api_key = cfg.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
         self.cache: Dict[int, float] = {}
-        self.density_cache: Dict[int, float] = {}
-        self.material_density_cache: Dict[str, float] = {}
+        self.mu_rho_cache: Dict[int, float] = {}
+        self.material_mu_rho_cache: Dict[str, float] = {}
         self.material_source_cache: Dict[str, str] = {}
         self.source_cache: Dict[int, str] = {}
         self.object_cache_hits = 0
@@ -147,96 +199,102 @@ class DifficultyEstimator:
         material = _normalise(obs_obs.get("material", "unknown"))
         canonical = _canonical_anchor(material)
         if canonical is not None:
-            density = MATERIAL_DENSITY[canonical]
+            mu_rho = MATERIAL_MU_RHO[canonical]
             source = "anchor"
-        elif material in self.material_density_cache:
-            density = self.material_density_cache[material]
+        elif material in self.material_mu_rho_cache:
+            mu_rho = self.material_mu_rho_cache[material]
             source = f"{self.material_source_cache[material]}-cache"
             self.material_cache_hits += 1
         elif self.api_key:
-            density = self._deepseek(obs_obs)
-            if density is None:
-                density = material_density(material)
+            mu_rho = self._deepseek(obs_obs)
+            if mu_rho is None:
+                mu_rho = material_mu_rho(material)
                 source = "heuristic-fallback"
             else:
                 source = "deepseek"
-            self.material_density_cache[material] = density
+            self.material_mu_rho_cache[material] = mu_rho
             self.material_source_cache[material] = source
         else:
-            density = material_density(material)
+            mu_rho = material_mu_rho(material)
             source = "heuristic"
-            self.material_density_cache[material] = density
+            self.material_mu_rho_cache[material] = mu_rho
             self.material_source_cache[material] = source
 
-        density = max(0.0, float(density))
-        difficulty = max(0.01, round(density * _volume(obs_obs), 3))
-        self.density_cache[oid] = round(density, 6)
+        mu_rho = max(0.0, float(mu_rho))
+        difficulty = max(0.01, round(friction_force(mu_rho, _volume(obs_obs)), 3))
+        self.mu_rho_cache[oid] = round(mu_rho, 6)
         self.source_cache[oid] = source
         self.cache[oid] = difficulty
         return difficulty
 
     # ------------- Heuristic method --------------- #
     def _heuristic(self, o: dict) -> float:
-        density = material_density(o.get("material", "unknown"))
-        return density * _volume(o)
+        mu_rho = material_mu_rho(o.get("material", "unknown"))
+        return friction_force(mu_rho, _volume(o))
 
-    # ------------- LLM density estimation --------------- #
+    # ------------- LLM mu*rho estimation --------------- #
     def _build_prompt(self, o: dict) -> str:
         material = _normalise(o.get("material", "unknown"))
         canonical = _canonical_anchor(material)
 
         anchors = "\n".join(
-            f"  {name:<18s} {MATERIAL_DENSITY[name]:g}"
-            for name in sorted(PROMPT_ANCHORS, key=lambda k: MATERIAL_DENSITY[k])
+            f"  {name:<18s} mu={MATERIAL_MU[name]:<5g} rho={MATERIAL_RHO[name]:<7g} "
+            f"mu*rho={MATERIAL_MU_RHO[name]:g}"
+            for name in sorted(PROMPT_ANCHORS, key=lambda k: MATERIAL_MU_RHO[k])
             if name != "unknown"
         )
 
         if canonical is not None:
-            density = MATERIAL_DENSITY[canonical]
+            mu_rho = MATERIAL_MU_RHO[canonical]
             material_instruction = (
                 f"The input label '{material}' is an exact calibrated match for "
-                f"'{canonical}'. You MUST use density={density:g}; do not replace "
+                f"'{canonical}'. You MUST use mu*rho={mu_rho:g}; do not replace "
                 "it with real-world intuition or another reference value.\n"
-                f"Return exactly {density:g}."
+                f"Return exactly {mu_rho:g}."
             )
         else:
             material_instruction = (
                 f"The input label '{material}' is NOT in PROMPT_ANCHORS. Infer its "
-                "project-scale density by combining the PROMPT_ANCHORS table with "
-                "ordinary real-world knowledge about this object.\n"
+                "mu and rho by combining the PROMPT_ANCHORS table with ordinary "
+                "real-world knowledge about this object.\n"
                 "Internally follow these rules:\n"
                 "1. Infer the likely object category, construction, filled/empty "
-                "state, mass, floor contact, wheels, and pushing friction from the "
-                "label. Brand or product names must be interpreted as their actual "
-                "real-world object type.\n"
-                "2. Select 2 to 4 anchors with the closest expected pushing "
-                "resistance. Use their numeric values to bracket and interpolate. "
-                "Extrapolate only when the object is clearly outside that bracket.\n"
-                "3. PROMPT_ANCHORS define the numeric scale and take priority over "
-                "raw physical units. Do not copy a convenient midpoint or generic "
-                "fallback. In particular, return 0.5 only when the object is "
-                "independently judged comparable to wooden_table.\n"
-                "4. Return ONE size-independent density coefficient. Object volume "
-                "must not affect it; Python will multiply density by volume later."
+                "state, total mass, floor contact and wheels from the label. Brand "
+                "or product names must be interpreted as their actual real-world "
+                "object type.\n"
+                "2. Estimate rho as total mass divided by the BOUNDING-BOX volume, "
+                "not the density of the raw material: a shelf is mostly air, so its "
+                "bulk rho is far below the density of steel or wood.\n"
+                "3. Estimate mu as the friction coefficient against a hard floor. "
+                "If the object rolls on wheels or castors, use an effective rolling "
+                "resistance coefficient (~0.02-0.05) instead.\n"
+                "4. Select 2 to 4 anchors with the closest expected mu*rho and use "
+                "their numbers to bracket and interpolate. Extrapolate only when "
+                "the object is clearly outside that bracket.\n"
+                "5. Return ONE size-independent number: the product mu*rho in "
+                "kg/m^3. Object volume must not affect it; Python multiplies by "
+                "volume and g later."
             )
 
         return (
-            "Estimate a project-specific pushing-resistance density coefficient for "
-            "a mobile robot moving an obstacle aside.\n"
-            "Use this project-specific calibrated scale, even when it differs from "
-            "ordinary physical density. The caller will calculate:\n\n"
-            "    difficulty = density * volume        # volume = l * d * h\n\n"
-            "`density` is a per-material coefficient (difficulty per cubic metre). "
-            "The following PROMPT_ANCHORS values are DENSITIES, not final "
-            "difficulties:\n\n"
+            "Estimate the pushing-resistance coefficient mu*rho for a mobile robot "
+            "sliding an obstacle aside. The push resistance is the sliding friction "
+            "force, so the caller will calculate:\n\n"
+            "    difficulty = mu * m * g = (mu * rho) * volume * g   # [N]\n"
+            "    volume = l * d * h (bounding box), g = 9.81 m/s^2\n\n"
+            "`mu` is the floor friction coefficient (dimensionless) and `rho` is the "
+            "BULK density in kg/m^3, i.e. total mass divided by the bounding-box "
+            "volume. The following PROMPT_ANCHORS list mu, rho and their product; "
+            "the value you return is the PRODUCT mu*rho in kg/m^3, not a final "
+            "difficulty in newtons:\n\n"
             f"{anchors}\n\n"
             f"{material_instruction}\n\n"
             f"Obstacle label: '{o.get('material')}', measured size "
             f"l x d x h = {float(o['l']):g} x {float(o['d']):g} x "
             f"{float(o.get('h', 1.0)):g} m (volume = {_volume(o):g} m^3). "
-            "The size tells you what kind of object this is; the density you "
+            "The size tells you what kind of object this is; the mu*rho you "
             "return must still be size-independent.\n"
-            "Output ONLY the density number, no words or units."
+            "Output ONLY the mu*rho number, no words or units."
         )
 
     def _deepseek(self, o: dict):
@@ -280,11 +338,11 @@ class DifficultyEstimator:
                     text,
                 )
                 if m:
-                    density = float(m.group())
-                    if density >= 0:
-                        return density
+                    mu_rho = float(m.group())
+                    if mu_rho >= 0:
+                        return mu_rho
                 self.cfg.log(
-                    "[LLM] no valid density in response "
+                    "[LLM] no valid mu*rho in response "
                     f"(finish_reason={choice.get('finish_reason')!r}, text={text!r})")
                 if attempt < self.cfg.llm_max_retries:
                     time.sleep(2.0)

@@ -13,7 +13,12 @@ class Config:
     robot_radius: float = 0.3    # robot radius
 
     # -------- Cost function J = lambda * D + W -------- #
-    lambda_distance: float = 1    # motion work coefficient
+    # Obstacle difficulty is a real friction force f = mu*rho*V*g [N], so W is in
+    # joules and lambda_distance is the equivalent driving resistance [N] the robot
+    # pays per metre travelled. It is calibrated (not the robot's bare rolling
+    # resistance) so that the detour-vs-push trade-off stays in a regime where
+    # pushing light obstacles is still worthwhile.
+    lambda_distance: float = 350.0   # equivalent driving resistance [N]
 
     # -------- Perception -------- #
     R_perc: float = 10.0       # perception radius
@@ -50,7 +55,7 @@ class Config:
     # -------- LLM -------- #
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
-    deepseek_model: str = "deepseek-v4-pro"
+    deepseek_model: str = "deepseek-v4-flash" 
     llm_timeout: float = 30.0
     llm_max_retries: int = 2
 

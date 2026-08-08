@@ -20,7 +20,7 @@ def create():
             h=2,
             theta=0.0,
             material="steel_shelf",
-            difficulty=39.984,
+            difficulty=14008.7,
             oid=1,
         ),
         MovableObstacle(
@@ -31,7 +31,7 @@ def create():
             h=1,
             theta=0.0,
             material="styrofoam_box",
-            difficulty=0.027,
+            difficulty=352.277,
             oid=2,
         ),
         MovableObstacle(
@@ -42,7 +42,7 @@ def create():
             h=1.6,
             theta=0.0,
             material="industrial_machine",
-            difficulty=319.2,
+            difficulty=29226,
             oid=3,
         ),
     ]
@@ -53,5 +53,5 @@ def create():
         "movable": movable,
         "start": (5.0, 35.0),
         "goal": (5.0, 5.0),
-        "cfg": Config(lambda_distance=1.0),
+        "cfg": Config(),
     }

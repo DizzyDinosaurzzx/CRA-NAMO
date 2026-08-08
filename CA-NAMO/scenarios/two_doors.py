@@ -20,7 +20,7 @@ def create():
             h=1,
             theta=0.0,
             material="empty_cart",
-            difficulty=0.291,
+            difficulty=35.708,
             oid=1,
         ),
         MovableObstacle(
@@ -31,7 +31,7 @@ def create():
             h=0.1,
             theta=0.0,
             material="foam_mat",
-            difficulty=0.014,
+            difficulty=42.379,
             oid=2,
         ),
         MovableObstacle(
@@ -42,7 +42,7 @@ def create():
             h=0.9,
             theta=0.0,
             material="plastic_chair",
-            difficulty=0.36,
+            difficulty=310.781,
             oid=3,
         ),
         MovableObstacle(
@@ -53,7 +53,7 @@ def create():
             h=0.8,
             theta=0.0,
             material="cardboard_box",
-            difficulty=0.168,
+            difficulty=329.616,
             oid=4,
         ),
     ]

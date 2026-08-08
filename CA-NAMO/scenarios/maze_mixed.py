@@ -53,7 +53,7 @@ def create():
             h=1,
             theta=0.0,
             material="concrete_block",
-            difficulty=100,
+            difficulty=56505.6,
             oid=1,
         ),
         MovableObstacle(
@@ -64,7 +64,7 @@ def create():
             h=2,
             theta=0.0,
             material="steel_shelf",
-            difficulty=30.24,
+            difficulty=10594.8,
             oid=3,
         ),
         MovableObstacle(
@@ -75,7 +75,7 @@ def create():
             h=2,
             theta=0.0,
             material="steel_shelf",
-            difficulty=30.24,
+            difficulty=10594.8,
             oid=4,
         ),
         MovableObstacle(
@@ -86,7 +86,7 @@ def create():
             h=0.15,
             theta=0.0,
             material="pallet",
-            difficulty=0.15,
+            difficulty=102.416,
             oid=5,
         ),
         MovableObstacle(
@@ -97,7 +97,7 @@ def create():
             h=1,
             theta=0.0,
             material="styrofoam_box",
-            difficulty=0.01,
+            difficulty=51.503,
             oid=6,
         ),
     ]

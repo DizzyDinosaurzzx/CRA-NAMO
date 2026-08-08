@@ -29,7 +29,7 @@ class MovableObstacle:
     h: float = 1.0                 # height, used for volume and occlusion reasoning
     theta: float = 0.0
     material: str = "unknown"      # semantic label for LLM reasoning
-    difficulty: float = 1.0        # true work coefficient per unit push distance
+    difficulty: float = 1.0        # true push resistance f = mu*rho*V*g [N]; W = difficulty * push distance [J]
     oid: int = -1
 
     # runtime flags

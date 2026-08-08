@@ -2,13 +2,14 @@
 
 本仓库实现了 *Cost-Aware Online Navigation Among Movable Obstacles* 的参考原型。机器人在线地将行驶距离与操作做功统一为一个代价函数，利用 LLM（带离线启发式回退）估计每个障碍物的推动难度，从而在"绕路"与"推开"之间做定量的权衡决策——全程在线运行，感知到新障碍物后即时重规划。
 ```
-J = λ × D + W
+J = λ × D + W          [J]
 
 其中：
-  λ = lambda_distance（运动代价权重）
-  D = 总行驶距离
-  W = Σ(真实 difficulty × 实际推动距离)（操作做功）
+  λ = lambda_distance（机器人等效行进阻力，单位 N）
+  D = 总行驶距离（m）
+  W = Σ(真实 difficulty × 实际推动距离)（操作做功，J）
 ```
+`difficulty` 就是推动该障碍物所需克服的滑动摩擦力 `f = μmg = (μρ)·V·g`（单位 N），因此 `W = f × 推动距离` 是真正的焦耳，`λ` 与 `difficulty` 同为力的量纲，`J` 全式量纲一致。
 **估计值用于决策，真值用于结算**：规划时用估计难度算 W，执行时一旦与障碍物发生物理接触（碰撞或推动）就换成真实难度重新结算，并在后续重规划中沿用真值。
 ## 快速开始
 ```bash
@@ -20,8 +21,8 @@ python main.py
 # 切换场景
 python main.py --scenario maze_doors
 
-# 调大 λ 使机器人更倾向推开障碍物而非绕路（λ 越大，绕路越"贵"）
-python main.py --lambda 5.0
+# 调大 λ 使机器人更倾向推开障碍物而非绕路（λ 越大，绕路越"贵"；默认 350）
+python main.py --lambda 1750
 
 # 三种规划策略
 python main.py --strategy normal      # 最优 J = λD + W（默认）
@@ -56,7 +57,7 @@ python main.py --frames
 
 ## 代码与算法对照
 ### 代价函数 `J = λ × D + W`
-- **`config.py`**：`lambda_distance` 权重
+- **`config.py`**：`lambda_distance`（机器人等效行进阻力 [N]，默认 350）。它是标定值而非机器人裸滚阻，取 350 是为了让"绕路 vs 推开"的性价比落在合理区间：障碍物 difficulty 现在是真实牛顿量级（几十 N 到几万 N），若 λ 仍取 1，绕几百米也比推一米便宜，NAMO 就退化成纯路径规划
 - 运动代价 `λ × D`：在 `planner.py` 执行阶段累加真实行驶距离
 - 操作代价 `W`：在 `planner.py` 执行阶段用**真实 difficulty** × 实际推动距离结算（`planner.py — _world_obstacle(...).difficulty`），只对**实际推完的那一段**计费；推到一半撞上东西，只结算已推距离
 - J 的计算公式在三种策略下不变，策略只影响搜索决策
@@ -67,7 +68,7 @@ python main.py --frames
 |---|---|---|---|
 | **normal** | `normal`（默认） | 完整 `J = λD + W`，平衡路径长度与操作代价 | 最优决策 |
 | **shortest** | `shortest` | 搜索时忽略 W（`work_mult=0`），始终选几何最短路径 | 对比基线：不绕路 |
-| **easiest** | `easiest` | 每个障碍物加 +50 惩罚（`work_bias=50`），倾向绕路但不禁止推动 | 对比基线：尽量不搬 |
+| **easiest** | `easiest` | 每个障碍物加 `work_bias = 50 × λ` 的惩罚（相当于额外绕 50 m），倾向绕路但不禁止推动 | 对比基线：尽量不搬 |
 > J 的计算公式在三种策略下完全一致，策略只改变 A* 搜索时对边代价的计算方式。执行阶段始终按真实物理代价结算。
 
 ### 增广路网（`roadmap.py`）
@@ -137,11 +138,45 @@ steps      = ceil(|Δθ| / max_dtheta)
 
 ### 难度估计（`llm_difficulty.py`）
 ```
-difficulty = density(material) × footprint_area
+difficulty = f = μ·m·g = (μ·ρ) × V × g        [N]
+             V = l × d × h（包围盒体积），g = 9.81 m/s²
 ```
-- **锚点表**：22 种材质（styrofoam_box 0.004 → industrial_machine 37.5）+ 12 条同义词映射。材质名精确命中锚点时**直接查表，根本不调 LLM**
-- **LLM 方法**：材质名不在锚点表里时，才请求 DeepSeek 估一个 density；prompt 里给出完整锚点表要求模型插值。失败自动回退启发式（`material_density` 的分词模糊匹配）
-- **缓存**：按 oid 缓存最终 difficulty，按材质名缓存 density，同材质只问一次
+推动阻力就是滑动摩擦力，所以难度由两个物理量决定：
+
+- **μ**：与地面的摩擦系数；带轮子的物体（`empty_cart`、`cart`）用等效滚动阻力系数（0.02–0.05），这是它们特别好推的原因
+- **ρ**：**堆积密度** = 总质量 / 包围盒体积，不是原材料密度。货架内部大半是空气，所以 `steel_shelf` 的 ρ 只有 300 kg/m³ 而非钢的 7850；只有 `concrete_block` 这种实心体才用材料本身的 2400 kg/m³
+
+代码里 `MATERIAL_MU` 和 `MATERIAL_RHO` 分开建表，`MATERIAL_MU_RHO` 由二者相乘自动生成，估计器和 LLM 都只处理 μ·ρ 这一个尺寸无关的系数：
+
+| 材质 | μ | ρ (kg/m³) | μ·ρ (kg/m³) | 典型高度 h (m) |
+|---|---:|---:|---:|---:|
+| `empty_cart` | 0.02 | 50 | 1 | 1 |
+| `cart` | 0.03 | 150 | 4.5 | 1.1 |
+| `styrofoam_box` | 0.35 | 15 | 5.25 | 1 |
+| `plastic_chair` | 0.4 | 22 | 8.8 | 0.9 |
+| `wooden_table` | 0.4 | 26 | 10.4 | 0.75 |
+| `chair` | 0.45 | 31 | 13.95 | 0.9 |
+| `cardboard_box` | 0.35 | 40 | 14 | 0.8 |
+| `foam_mat` | 0.5 | 30 | 15 | 0.1 |
+| `empty_shelf` | 0.45 | 35 | 15.75 | 1.8 |
+| `trash_bin` | 0.4 | 42 | 16.8 | 1 |
+| `stool` | 0.4 | 50 | 20 | 0.5 |
+| `sofa` | 0.5 | 52 | 26 | 0.85 |
+| `wooden_crate` | 0.45 | 60 | 27 | 1 |
+| `unknown` | 0.4 | 100 | 40 | 1 |
+| `cabinet` | 0.45 | 100 | 45 | 1.8 |
+| `pallet` | 0.4 | 174 | 69.6 | 0.15 |
+| `shelf` | 0.45 | 167 | 75.15 | 1.8 |
+| `filing_cabinet` | 0.45 | 308 | 138.6 | 1.3 |
+| `steel_shelf` | 0.5 | 300 | 150 | 2 |
+| `loaded_pallet` | 0.4 | 434 | 173.6 | 1.2 |
+| `industrial_machine` | 0.5 | 700 | 350 | 1.6 |
+| `steel_safe` | 0.5 | 800 | 400 | 1.5 |
+| `concrete_block` | 0.6 | 2400 | 1440 | 1 |
+
+- **锚点表**：23 种材质（μ·ρ 从 empty_cart 1 到 concrete_block 1440）+ 12 条同义词映射。材质名精确命中锚点时**直接查表，根本不调 LLM**
+- **LLM 方法**：材质名不在锚点表里时，才请求 DeepSeek 估一个 μ·ρ；prompt 里给出完整锚点表（含 μ、ρ、μ·ρ 三列）并要求模型分别推理摩擦系数和堆积密度后相乘。失败自动回退启发式（`material_mu_rho` 的分词模糊匹配）
+- **缓存**：按 oid 缓存最终 difficulty，按材质名缓存 μ·ρ，同材质只问一次
 - **用途**：估计值进入 A* 的 **g 值**（`search.py — _removal`：`work = push_work(estimated_diff, push_dist)`），因此**会**影响选哪条路、推哪个障碍物；另有一个只影响展开顺序的偏置 `_llm_bias`（`--no-llm-order` 可关）。但最终 J 始终按真值结算，估计错了只会让决策次优，不会让账算错
 
 ### A* 搜索过程（`search.py`）
@@ -176,6 +211,7 @@ difficulty = density(material) × footprint_area
 | `corridor` | 狭长走廊单障碍物（0.7×6 长板，考验自适应旋转扫掠） | 1 |
 | `two_doors` | 双门经典场景（近门有遮挡物） | 4 |
 | `hidden_obstacle` | 遮挡障碍物测试（B 完全遮挡 C） | 3 |
+| `see_over_short` | 高度遮挡规则测试：后方高障碍物越过前方矮障碍物被看到 | 2 |
 | `hidden_obstacle_backtrack` | 折返场景：近门有重物，远门被诱饵和重物堵住 | 3 |
 | `maze_soft` | 30×30 迷宫，3 个轻障碍物 | 3 |
 | `maze_hard` | 30×30 迷宫，3 个重障碍物 | 3 |
@@ -192,7 +228,7 @@ python main.py [--scenario NAME] [--lambda VALUE] [--strategy NAME]
 | 参数 | 说明 |
 |---|---|
 | `--scenario` | 场景名（默认 `two_doors`），可选值见上表 |
-| `--lambda` | 运动代价 λ 权重（默认 1.0），越大越倾向推开障碍物 |
+| `--lambda` | 机器人等效行进阻力 λ [N]（默认 350），越大越倾向推开障碍物 |
 | `--strategy` | 规划策略：`normal`（默认）/ `shortest` / `easiest` |
 | `--no-llm-order` | 禁用 LLM 排序偏置（`_llm_bias`，只影响展开顺序） |
 | `--frames` | 把每一步运动保存为动图 `img/frames_<场景名>.gif` |
@@ -201,19 +237,19 @@ python main.py [--scenario NAME] [--lambda VALUE] [--strategy NAME]
 运行结束后打印（示例为默认场景 two_doors）：
 ```
 Success                : True   (Reached goal.)
-Total cost J           : 20.9254
-motion lambda*D        : 20.0
-obstacle work W        : 0.9254
+Total cost J           : 7154.4966
+motion lambda*D        : 7000.0          # λ=350 N × D=20.0 m
+obstacle work W        : 154.4966
 Obstacles moved        : [1, 2]
-Replan cycles          : 40
-Total plan time (s)    : 1.6741
-A* expansions          : 7002
-LLM calls              : 0  (mode=deepseek)
+Replan cycles          : 37
+Total plan time (s)    : 2.4495
+A* expansions          : 2500
+LLM calls              : 0  (mode=heuristic)
 ```
 
-- **J** = λD + W（总代价）
-- **motion lambda times D** = λ × 总行驶距离（运动代价）
-- **obstacle work W** = Σ(真实 difficulty × 实际推动距离)（操作代价）
+- **J** = λD + W（总代价，J）
+- **motion lambda times D** = λ × 总行驶距离（运动代价，J）；行驶距离 D = 该值 / λ
+- **obstacle work W** = Σ(真实 difficulty × 实际推动距离)（操作代价，J；difficulty 是摩擦力 [N]）
 - **Obstacles moved** = 被推开的障碍物 ID 列表
 - **Replan cycles** = 重规划次数
 - **Total plan time** = 全部规划耗时之和

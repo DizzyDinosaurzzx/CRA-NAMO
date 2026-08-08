@@ -135,7 +135,9 @@ class Planner:
             work_bias = 0.0
         elif cfg.strategy == "easiest":
             work_mult = 1.0
-            work_bias = 50.0    # per-obstacle surcharge — prefer any reasonable detour
+            # per-obstacle surcharge — prefer any reasonable detour. Expressed in
+            # metres of detour (× lambda) so it tracks the physical cost scale.
+            work_bias = 50.0 * cfg.lambda_distance
         else:
             work_mult = 1.0
             work_bias = 0.0

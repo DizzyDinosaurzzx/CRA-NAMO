@@ -48,7 +48,7 @@ def create():
             h=0.1,
             theta=0.0,
             material="foam_mat",
-            difficulty=0.02,
+            difficulty=58.86,
             oid=1,
         ),
 
@@ -60,7 +60,7 @@ def create():
             h=0.1,
             theta=0.0,
             material="foam_mat",
-            difficulty=0.051,
+            difficulty=150.093,
             oid=2,
         ),
 
@@ -72,7 +72,7 @@ def create():
             h=1.8,
             theta=0.0,
             material="empty_shelf",
-            difficulty=2.722,
+            difficulty=2002.42,
             oid=3,
         ),
     ]

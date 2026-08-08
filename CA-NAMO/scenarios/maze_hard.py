@@ -51,7 +51,7 @@ def create():
             h=0.8,
             theta=0.0,
             material="box",
-            difficulty=0.224,
+            difficulty=439.488,
             oid=1,
         ),
 
@@ -63,7 +63,7 @@ def create():
             h=1.5,
             theta=0.0,
             material="steel_safe",
-            difficulty=29.7,
+            difficulty=21189.6,
             oid=3,
         ),
 
@@ -75,7 +75,7 @@ def create():
                     h=2,
                     theta=0.0,
                     material="steel_shelf",
-                    difficulty=30.24,
+                    difficulty=10594.8,
                     oid=4,
                 ),
     ]
