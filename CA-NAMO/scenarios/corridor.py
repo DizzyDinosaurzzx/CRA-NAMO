@@ -19,7 +19,7 @@ def create():
             x=20.0, y=4.0,
             l=0.7, d=6, h=1, theta=0.0,
             material="wooden_crate",
-            difficulty=1112.45,
+            difficulty=1112.454,
             oid=1,
         ),
     ]

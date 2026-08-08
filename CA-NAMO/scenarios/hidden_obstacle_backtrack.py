@@ -20,7 +20,7 @@ def create():
             h=2,
             theta=0.0,
             material="steel_shelf",
-            difficulty=14008.7,
+            difficulty=14008.68,
             oid=1,
         ),
         MovableObstacle(
@@ -34,6 +34,11 @@ def create():
             difficulty=352.277,
             oid=2,
         ),
+        # The trap behind the decoy. It has to be heavy enough that, once revealed,
+        # walking ~20 m back to the near door and shifting the steel shelf (oid 1)
+        # beats shoving it aside — oid 3 only needs ~0.7 m to clear the doorway, so
+        # a merely "heavy" material loses that comparison and the backtrack never
+        # happens (industrial_machine 29 kN and steel_safe 33 kN both fail here).
         MovableObstacle(
             x=23.0,
             y=18.8,
@@ -41,8 +46,8 @@ def create():
             d=1.4,
             h=1.6,
             theta=0.0,
-            material="industrial_machine",
-            difficulty=29226,
+            material="concrete_block",
+            difficulty=120243.917,
             oid=3,
         ),
     ]

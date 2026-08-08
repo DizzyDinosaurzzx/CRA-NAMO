@@ -20,7 +20,7 @@ def create():
             h=1.6,
             theta=0.0,
             material="industrial_machines",
-            difficulty=26149.5,
+            difficulty=26149.536,
             oid=1,
         ),
         MovableObstacle(
@@ -42,7 +42,7 @@ def create():
             h=1.6,
             theta=0.0,
             material="industrial_machine",
-            difficulty=29226,
+            difficulty=29225.952,
             oid=3,
         ),
     ]

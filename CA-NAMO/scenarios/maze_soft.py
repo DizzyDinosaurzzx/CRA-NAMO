@@ -72,7 +72,7 @@ def create():
             h=1.8,
             theta=0.0,
             material="empty_shelf",
-            difficulty=2002.42,
+            difficulty=2002.417,
             oid=3,
         ),
     ]

@@ -153,11 +153,11 @@ def create():
         ),
         MovableObstacle(
             x=12.8, y=11, l=4.6, d=6.6, h=1.6, theta=0.0,
-            material="industrial_machine", difficulty=166786, oid=2,
+            material="industrial_machine", difficulty=166785.696, oid=2,
         ),
         MovableObstacle(
             x=17.7, y=11.5, l=2.0, d=3.8, h=1, theta=0.0,
-            material="wooden_crate", difficulty=2013.01, oid=3,
+            material="wooden_crate", difficulty=2013.012, oid=3,
         ),
         MovableObstacle(
             x=12.0, y=6.65, l=1.6, d=1.2, h=1, theta=0.0,
@@ -189,11 +189,11 @@ def create():
         ),
         MovableObstacle(
             x=23.75, y=27.75, l=4.5, d=3.5, h=1, theta=0.0,
-            material="wooden_crate", difficulty=4171.7, oid=12,
+            material="wooden_crate", difficulty=4171.703, oid=12,
         ),
         MovableObstacle(
             x=10.25, y=24.3, l=4.5, d=2.1, h=1, theta=0.0,
-            material="wooden_crate", difficulty=2503.02, oid=13,
+            material="wooden_crate", difficulty=2503.022, oid=13,
         ),
         MovableObstacle(
             x=23.0, y=23.05, l=1.1, d=3.0, h=1, theta=0.0,
@@ -202,11 +202,11 @@ def create():
 
         MovableObstacle(
             x=14.0, y=18.7, l=2.5, d=2.3, h=1, theta=0.0,
-            material="wooden_crate", difficulty=1523, oid=16,
+            material="wooden_crate", difficulty=1523.003, oid=16,
         ),
         MovableObstacle(
             x=28.0, y=16.75, l=1.8, d=2.8, h=1, theta=0.0,
-            material="wooden_crate", difficulty=1334.94, oid=17,
+            material="wooden_crate", difficulty=1334.945, oid=17,
         ),
         MovableObstacle(
             x=3.8, y=13.5, l=1.8, d=1.6, h=1, theta=0.0,
@@ -222,7 +222,7 @@ def create():
         ),
         MovableObstacle(
             x=6.9, y=1.5, l=2.2, d=1.8, h=1, theta=0.0,
-            material="wooden_crate", difficulty=1048.88, oid=21,
+            material="wooden_crate", difficulty=1048.885, oid=21,
         ),
         MovableObstacle(
             x=17.1, y=27.5, l=3.0, d=0.75, h=1, theta=0.92,
@@ -242,7 +242,7 @@ def create():
         ),
         MovableObstacle(
             x=22.5, y=12.3, l=8.25, d=0.7, h=1, theta=1.07,
-            material="wooden_crate", difficulty=1529.62, oid=26,
+            material="wooden_crate", difficulty=1529.624, oid=26,
         ),
         MovableObstacle(
             x=3.8, y=9.5, l=4.3, d=0.75, h=1, theta=-1.05,
