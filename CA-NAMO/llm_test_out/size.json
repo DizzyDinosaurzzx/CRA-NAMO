@@ -1,0 +1,109 @@
+{
+  "scales": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "rows": [
+    {
+      "label": "unloaded push trolley",
+      "by_scale": {
+        "0.5": 2.0,
+        "1.0": 1.5,
+        "2.0": 1.5
+      },
+      "mu_rho_true": 1.0,
+      "group": "paraphrase"
+    },
+    {
+      "label": "expanded polystyrene packing box",
+      "by_scale": {
+        "0.5": 5.25,
+        "1.0": 5.25,
+        "2.0": 3.5
+      },
+      "mu_rho_true": 5.25,
+      "group": "paraphrase"
+    },
+    {
+      "label": "wooden shipping crate",
+      "by_scale": {
+        "0.5": 60.0,
+        "1.0": 45.0,
+        "2.0": 40.5
+      },
+      "mu_rho_true": 27.0,
+      "group": "paraphrase"
+    },
+    {
+      "label": "steel storage rack with stock",
+      "by_scale": {
+        "0.5": 250.0,
+        "1.0": 225.0,
+        "2.0": 175.0
+      },
+      "mu_rho_true": 150.0,
+      "group": "paraphrase"
+    },
+    {
+      "label": "solid concrete cube",
+      "by_scale": {
+        "0.5": 1440.0,
+        "1.0": 1440.0,
+        "2.0": 1440.0
+      },
+      "mu_rho_true": 1440.0,
+      "group": "paraphrase"
+    },
+    {
+      "label": "empty steel drum",
+      "by_scale": {
+        "0.5": 68.0,
+        "1.0": 34.0,
+        "2.0": 40.0
+      },
+      "mu_rho_true": 24.691358024691358,
+      "group": "novel"
+    },
+    {
+      "label": "granite countertop slab",
+      "by_scale": {
+        "0.5": 1350.0,
+        "1.0": 1620.0,
+        "2.0": 1350.0
+      },
+      "mu_rho_true": 1615.3846153846155,
+      "group": "novel"
+    },
+    {
+      "label": "cardboard box packed with hardcover books",
+      "by_scale": {
+        "0.5": 200.0,
+        "1.0": 210.0,
+        "2.0": 210.0
+      },
+      "mu_rho_true": 153.12499999999997,
+      "group": "state"
+    },
+    {
+      "label": "empty 240 litre wheelie bin",
+      "by_scale": {
+        "0.5": 1.5,
+        "1.0": 1.0,
+        "2.0": 0.9
+      },
+      "mu_rho_true": 1.6331187778174567,
+      "group": "state"
+    },
+    {
+      "label": "IKEA BILLY bookcase, empty",
+      "by_scale": {
+        "0.5": 56.0,
+        "1.0": 30.8,
+        "2.0": 30.0
+      },
+      "mu_rho_true": 40.775282885431395,
+      "group": "brand"
+    }
+  ]
+}

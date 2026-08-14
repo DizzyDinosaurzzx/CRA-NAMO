@@ -306,11 +306,17 @@ class DifficultyEstimator:
         body = {
             "model": self.cfg.deepseek_model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 32,
             "temperature": 0.0,
             "stream": False,
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
+                         else "disabled"},
         }
+        # Omitted entirely when unset: a cap below the reasoning length does not
+        # truncate the answer, it returns an empty content with
+        # finish_reason='length', which reads here as "no number" and silently
+        # degrades to the heuristic.
+        if self.cfg.llm_max_tokens:
+            body["max_tokens"] = int(self.cfg.llm_max_tokens)
         for attempt in range(self.cfg.llm_max_retries + 1):
             try:
                 self.calls += 1
@@ -333,17 +339,25 @@ class DifficultyEstimator:
                     continue
                 choice = data["choices"][0]
                 text = choice.get("message", {}).get("content") or ""
-                m = re.search(
+                # Last number, not the first: a reasoning reply may restate mu
+                # and rho before committing to their product, and it is the
+                # final figure that answers the question.
+                nums = re.findall(
                     r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?",
                     text,
                 )
-                if m:
-                    mu_rho = float(m.group())
+                if nums:
+                    mu_rho = float(nums[-1])
                     if mu_rho >= 0:
                         return mu_rho
-                self.cfg.log(
-                    "[LLM] no valid mu*rho in response "
-                    f"(finish_reason={choice.get('finish_reason')!r}, text={text!r})")
+                if choice.get("finish_reason") == "length":
+                    self.cfg.log(
+                        "[LLM] reply hit the token cap before answering; raise "
+                        f"Config.llm_max_tokens (currently {self.cfg.llm_max_tokens!r})")
+                else:
+                    self.cfg.log(
+                        "[LLM] no valid mu*rho in response "
+                        f"(finish_reason={choice.get('finish_reason')!r}, text={text!r})")
                 if attempt < self.cfg.llm_max_retries:
                     time.sleep(2.0)
             except Exception as e:

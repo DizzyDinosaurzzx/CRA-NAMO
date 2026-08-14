@@ -53,10 +53,23 @@ class Config:
     max_replans: int = 10000
 
     # -------- LLM -------- #
-    deepseek_api_key: str = ""
+    # Reasoning is on, and the completion length is uncapped, because the prompt
+    # asks for a multi-step derivation (category -> mass -> bulk density -> mu ->
+    # product). Denied the room to run it, the model degenerates into copying a
+    # row out of the anchor table in the prompt: measured 6.1x typical error with
+    # 46% of answers collapsing onto a single value, and the collapse target
+    # moves when the table is reordered — i.e. the answer tracked the prompt
+    # layout, not the object. With reasoning enabled the same model on the same
+    # prompt reaches 1.33x typical error (Spearman 0.95). See llm_test_out/.
+    deepseek_api_key: str = "sk-c1ea9b080fc444ceb1f5fa7901e3b92f"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
-    deepseek_model: str = "deepseek-v4-flash" 
-    llm_timeout: float = 30.0
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_thinking: bool = True    # False reproduces the old copy-a-row behaviour
+    llm_max_tokens: int | None = None  # None -> omit the cap; reasoning needs ~3-4k
+    # Reasoning takes seconds, not milliseconds: a single call was measured up to
+    # ~80 s. A short timeout here does not fail loudly, it silently falls back to
+    # the heuristic, so it is set well above the observed worst case.
+    llm_timeout: float = 300.0
     llm_max_retries: int = 2
 
     # -------- Other -------- #
