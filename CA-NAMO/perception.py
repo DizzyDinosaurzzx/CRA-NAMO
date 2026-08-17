@@ -17,12 +17,12 @@ class Belief:
         self.perceived: Dict[int, MovableObstacle] = {}     # copies of perceived obstacles
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # obstacles blocking edges
         self.newly_revealed: List[int] = []  # newly perceived obstacles
-        self.contacts: List[Polygon] = []  # obstacles known only through push collision
+        self.contacts: List[Polygon] = []  # obstacles known only through manipulation collision
         self.touched: Set[int] = set()
         self.touched_difficulty: Dict[int, float] = {}  # obstacle true difficulties obtained via touch
-        self.push_dir: Dict[int, Tuple[float, float]] = {}  # last push direction per obstacle
+        self.move_dir: Dict[int, Tuple[float, float]] = {}  # last direction moved per obstacle
 
-    # -------------------- Perception ----------------------
+    # --- Perception ---
     def perceive(self, world_obstacles: List[MovableObstacle],
                  robot_pos: Tuple[float, float]) -> List[int]:
         """Reveal all visible obstacles around the robot; sync state for known ones"""
@@ -62,9 +62,9 @@ class Belief:
         self._update_edges_for(known)
         self._clear_contacts_overlapping(old_footprint)
 
-    # -------------------- Visibility (multi-point sampling + wall occlusion) ----------------------
+    # --- visibility ---
     def _half_edge_samples(self, obs: MovableObstacle):  # line-of-sight samples from 8 obstacle points
-        coords = list(obs.polygon.exterior.coords)[:-1]  
+        coords = list(obs.polygon.exterior.coords)[:-1]
         n = len(coords)
         halves = []
         for i in range(n):
@@ -97,7 +97,6 @@ class Belief:
 
     def _visible(self, robot_pos, target: MovableObstacle,
                  world_obstacles: List[MovableObstacle]) -> bool:
-        # return whether truly visible
         for p, c, q in self._half_edge_samples(target):
             if (self._point_visible(robot_pos, p, target, world_obstacles)
                     and self._point_visible(robot_pos, c, target, world_obstacles)
@@ -105,15 +104,14 @@ class Belief:
                 return True
         return False
 
-    # -------------------- Update ----------------------
+    # --- Update ---
     def _update_edges_for(self, obs: MovableObstacle):
-        # update which edges this obstacle blocks
         poly = obs.polygon
         minx, miny, maxx, maxy = poly.bounds
         pad = 1.0
         for key, corridor in self.roadmap.edge_corridor.items():
             cminx, cminy, cmaxx, cmaxy = corridor.bounds
-            if cmaxx < minx - pad or cminx > maxx + pad:      
+            if cmaxx < minx - pad or cminx > maxx + pad:
                 continue
             if cmaxy < miny - pad or cminy > maxy + pad:
                 continue
@@ -123,7 +121,7 @@ class Belief:
             else:
                 blockers.discard(obs.oid)
 
-    # -------------------- Collision contact (partial information) ----------------------
+    # --- collision contact ---
     def register_contact(self, region: Polygon):
         if region is None or region.is_empty:
             return
@@ -159,12 +157,12 @@ class Belief:
         for blockers in self.edge_blockers.values():
             blockers.discard(oid)
 
-    def record_push_direction(self, oid: int, from_xy, to_xy):
-        """Remember which way this obstacle was last pushed (pure rotations keep the old direction)"""
+    def record_move_direction(self, oid: int, from_xy, to_xy):
+        """Remember which way this obstacle was last moved (pure rotations keep the old direction)"""
         dx, dy = to_xy[0] - from_xy[0], to_xy[1] - from_xy[1]
         n = math.hypot(dx, dy)
         if n > 1e-3:
-            self.push_dir[oid] = (dx / n, dy / n)
+            self.move_dir[oid] = (dx / n, dy / n)
 
     def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):  # update obstacle blocking info after relocation
         self._forget_edges(obs.oid)
@@ -172,7 +170,7 @@ class Belief:
         obs.removed = True
         self._update_edges_for(obs)
 
-    # -------------------- Req 3: robot self-collision sensing ----------------------
+    # --- robot self-collision ---
     @staticmethod
     def _first_contact_t(from_pos, to_pos, poly: Polygon, radius: float,
                          coarse: int = 64, refine: int = 20) -> float:
@@ -221,7 +219,7 @@ class Belief:
                 revealed.append(w.oid)
         return revealed, t_hit
 
-    # -------------------- Req 4: touch sensing of true difficulty ----------------------
+    # --- touch sensing ---
     def touch_check(
         self, robot_pos,
         world_obstacles: List[MovableObstacle],
@@ -262,9 +260,10 @@ class Belief:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
 
-    # -------------------- Query ----------------------
+    # --- Query ---
     def blockers_of(self, key: EdgeKey) -> Set[int]:
         return self.edge_blockers.get(key, set())
 
     def obstacle(self, oid: int) -> MovableObstacle:
         return self.perceived[oid]
+

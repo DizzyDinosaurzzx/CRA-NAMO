@@ -4,16 +4,19 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Optional
-import numpy as np
 from shapely.geometry import Polygon
 
+import geometry
+
 def _rect_polygon(x: float, y: float, l: float, d: float, theta: float) -> Polygon:
-    hl, hd = l / 2.0, d / 2.0
-    verts = np.array([[hl, hd], [hl, -hd], [-hl, -hd], [-hl, hd]])
-    c, s = math.cos(theta), math.sin(theta)
-    R = np.array([[c, -s], [s, c]])
-    verts = verts @ R.T + np.array([x, y])
-    return Polygon(verts)
+    """Shapely view of the same rectangle `geometry.rect_corners` returns.
+
+    One implementation of "rectangle at a pose", two representations of it —
+    numpy corners for the grid planner, a shapely polygon for everything that
+    does set operations. They used to be two separate implementations that had to
+    be kept in agreement by hand.
+    """
+    return Polygon(geometry.rect_corners(x, y, l, d, theta))
 
 @dataclass
 class StaticObstacle:
@@ -29,7 +32,7 @@ class MovableObstacle:
     h: float = 1.0                 # height, used for volume and occlusion reasoning
     theta: float = 0.0
     material: str = "unknown"      # semantic label for LLM reasoning
-    difficulty: float = 1.0        # true push resistance f = mu*rho*V*g [N]; W = difficulty * push distance [J]
+    difficulty: float = 1.0        # true sliding resistance f = mu*rho*V*g [N]; W = difficulty * distance moved [J]
     oid: int = -1
 
     # runtime flags
@@ -65,7 +68,7 @@ class MovableObstacle:
         return _rect_polygon(x, y, self.l, self.d,
                              self.theta if theta is None else theta)
 
-    # ---- Information available to the robot once the obstacle is perceived ----
+    # --- observation ---
     def observation(self) -> dict:
         """Information revealed upon perception"""
         return {
@@ -80,3 +83,4 @@ class MovableObstacle:
     def __repr__(self):
         return (f"Obs#{self.oid}({self.material}, c=({self.x:.1f},{self.y:.1f}), "
                 f"{self.l}x{self.d}x{self.h}, diff={self.difficulty})")
+

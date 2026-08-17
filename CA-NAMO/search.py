@@ -4,14 +4,18 @@ from __future__ import annotations
 import heapq
 import itertools
 import math
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+import shapely
 from shapely.ops import unary_union
 from config import Config
 from roadmap import Roadmap, EdgeKey
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
-import geometry
+import contact
+import cost
+import manipulation
 
 @dataclass
 class Plan:
@@ -21,26 +25,28 @@ class Plan:
     expansions: int
 
 
-_PUSH_DIR_EPS = 1e-3    # below this displacement a drop pose carries no push direction
+_MOVE_DIR_EPS = 1e-3    # below this displacement a drop pose carries no move direction
+_INFLATED_CACHE_MAX = 64
 
 
-def push_signature(obs) -> tuple:
+def move_signature(obs) -> tuple:
     return (obs.oid, round(obs.x, 3), round(obs.y, 3), round(obs.theta, 4))
 
 
 class Planner:
     def __init__(self, roadmap: Roadmap, belief: Belief,
                  estimator: DifficultyEstimator, cfg: Config,
-                 failed_pushes: Optional[set] = None):
+                 failed_moves: Optional[set] = None):
         self.roadmap = roadmap
         self.belief = belief
         self.est = estimator
         self.cfg = cfg
-        self.failed_pushes = set() if failed_pushes is None else failed_pushes
+        self.failed_moves = set() if failed_moves is None else failed_moves
         self._robot_pos: Tuple[float, float] = (0.0, 0.0)
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
+        self._inflated_cache: Dict[bytes, object] = {}
 
-    # ------------------------------------------------------------------ planning
+    # --- planning ---
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
         rm = self.roadmap
         cfg = self.cfg
@@ -49,13 +55,13 @@ class Planner:
 
         # Clear persistent cache if new obstacles were revealed since the last
         # plan call — that changes the others_polys geometry for every removal
-        # and would invalidate previously cached push plans.
+        # and would invalidate previously cached move plans.
         if self.belief.newly_revealed:
             self._persistent_removal_cache.clear()
 
         def h(node):
             x, y = rm.nodes[node]
-            return cfg.lambda_distance * math.hypot(x - gx, y - gy)
+            return cost.motion_cost(cfg, math.hypot(x - gx, y - gy))
 
         counter = itertools.count()
         open_heap = [(h(start_node), 0.0, next(counter), start_node)]
@@ -90,9 +96,9 @@ class Planner:
                     continue
                 g_best[v] = ng
                 acts = [{"type": "remove", "oid": oid, "drop": drop,
-                         "dist": push_dist, "work": work, "push_path": push_path,
-                         "key": key}
-                        for (oid, drop, push_dist, work, push_path) in removals]
+                         "dist": move_dist, "work": work, "move_path": move_path,
+                         "contact": cplan, "key": key}
+                        for (oid, drop, move_dist, work, move_path, cplan) in removals]
                 acts.append({"type": "move", "u": node, "v": v,
                              "dist": length, "cost": step_cost})
                 parent[v] = (node, acts, ng)
@@ -115,51 +121,36 @@ class Planner:
         return Plan(cost=round(incumbent, 4), node_path=node_path,
                     actions=actions, expansions=expansions)
 
-    # ------------------------------------------------------------- edge cost
+    # --- edge cost ---
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
-        cfg = self.cfg
-        base = cfg.lambda_distance * self.roadmap.edge_len[key]
+        """Cost of traversing one edge, including clearing whatever blocks it.
+
+        How the strategies weigh obstacle work lives in `cost.strategy_weights`;
+        this function only decides *what* has to be moved.
+        """
+        base = cost.motion_cost(self.cfg, self.roadmap.edge_len[key])
         blockers = self.belief.blockers_of(key)
         if not blockers:
             return base, []
 
-        # "shortest" — always push through blockers regardless of work cost.
-        # Push plans are still computed (needed for execution), but the work
-        # penalty is omitted from the edge cost so the search prefers the
-        # geometrically shortest path.
-        # "easiest"  — heavily penalise pushing so detours are preferred,
-        # but obstacles can still be pushed when no detour exists.
-        # "normal"   — full J = λ·D + W; both path length and push work matter.
-        if cfg.strategy == "shortest":
-            work_mult = 0.0
-            work_bias = 0.0
-        elif cfg.strategy == "easiest":
-            work_mult = 1.0
-            # per-obstacle surcharge — prefer any reasonable detour. Expressed in
-            # metres of detour (× lambda) so it tracks the physical cost scale.
-            work_bias = 50.0 * cfg.lambda_distance
-        else:
-            work_mult = 1.0
-            work_bias = 0.0
-
         removals = []
         extra = 0.0
         for oid in blockers:
-            feasible, work, drop, push_dist, push_path = self._removal(oid, key)
+            feasible, work, drop, move_dist, move_path, cplan = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
-            extra += work * work_mult + work_bias
-            removals.append((oid, drop, push_dist, work, push_path))
+            extra += cost.removal_cost(self.cfg, work, cplan.travel)
+            removals.append((oid, drop, move_dist, work, move_path, cplan))
         return base + extra, removals
 
     def _removal(self, oid: int, key: EdgeKey):
-        """Compute work and drop pose needed to push an obstacle aside, also plan SE2 push path"""
+        """Compute work and drop pose needed to move an obstacle aside, also plan its SE(2) route"""
         obs = self.belief.obstacle(oid)
-        cache_key = (push_signature(obs), key)
+        cache_key = (move_signature(obs), key)
         if cache_key in self._persistent_removal_cache:
             return self._persistent_removal_cache[cache_key]
-        if cache_key in self.failed_pushes:
-            res = (False, math.inf, None, 0.0, None)
+        if cache_key in self.failed_moves:
+            res = (False, math.inf, None, 0.0, None, None)
             self._persistent_removal_cache[cache_key] = res
             return res
         clear_polys = [self.roadmap.edge_corridor[key]]
@@ -174,40 +165,103 @@ class Planner:
             others = unary_union(polys) if polys else None
 
         estimated_diff = self.belief.get_difficulty(oid, self.est)
-        push_path = None
+        move_path = None
         drop = None
-        push_dist = 0.0
+        move_dist = 0.0
         feasible = False
+        cplan = None
 
         robot_pos = self._robot_pos
         bounds = self.roadmap.workspace.bounds
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
-        if self.cfg.push_use_planner:
-            se2_feasible, se2_path, se2_cost, se2_goal = geometry.push_plan_se2(
+        # The robot performs the manipulation as an excursion from the edge it is
+        # about to traverse and returns to it afterwards. The edge midpoint stands
+        # in for whichever of its two endpoints the robot is actually on — they are
+        # at most conn_radius apart — which keeps this result cacheable per edge
+        # instead of per (edge, direction).
+        u, v = key
+        mid = tuple((a + b) / 2.0 for a, b in
+                    zip(self.roadmap.nodes[u], self.roadmap.nodes[v]))
+        contact_memo: Dict[int, tuple] = {}
+
+        def _contact_for(poses):
+            # plan_anywhere hands the same list object to the validator and back
+            # out in the result; hold on to it so the id stays unique
+            hit = contact_memo.get(id(poses))
+            if hit is not None:
+                return hit[1]
+            plan = contact.plan_contact(obs, poses, mid, mid,
+                                        self.roadmap.free_eroded_tol,
+                                        self._others_inflated(others), self.cfg)
+            contact_memo[id(poses)] = (poses, plan)
+            return plan
+
+        if self.cfg.se2_use_planner:
+            path_accept = None
+            rejected: List[str] = []
+            if self.cfg.contact_required:
+                def path_accept(poses):
+                    plan = _contact_for(poses)
+                    if not plan.feasible:
+                        rejected.append(plan.reason)
+                    return plan.feasible
+            se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
                 obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
                 robot_pos, self.cfg, others_polys=others,
-                goal_accept=self._goal_filter(obs))
+                goal_accept=self._goal_filter(obs), path_accept=path_accept)
             if se2_feasible and se2_path:
-                feasible = True
-                push_path = se2_path
-                drop = se2_goal
-                push_dist = se2_cost
+                cplan = (_contact_for(se2_path) if self.cfg.contact_required
+                         else contact.idle_plan(mid, len(se2_path)))
+                if cplan.feasible:
+                    feasible = True
+                    move_path = se2_path
+                    drop = se2_goal
+                    move_dist = se2_cost
+                else:
+                    self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
+            elif rejected:
+                # the obstacle could go somewhere, the robot just could not
+                # escort it there — say which half of the constraint bit
+                counts = Counter(rejected).most_common(2)
+                self.cfg.log(f"[contact] oid={oid} rejected {len(rejected)} path(s): "
+                             + "; ".join(f"{why} x{n}" for why, n in counts))
 
         if not feasible:
             work = math.inf
         else:
-            work = geometry.push_work(estimated_diff, push_dist)
+            work = cost.manipulation_work(estimated_diff, move_dist)
 
-        res = (feasible, work, drop, push_dist, push_path)
+        res = (feasible, work, drop, move_dist, move_path, cplan)
         self._persistent_removal_cache[cache_key] = res
         return res
 
+    def _others_inflated(self, others):
+        """Robot-centre positions ruled out by the *other* movable obstacles.
+
+        Content-addressed by WKB: the union is rebuilt from scratch for every
+        removal candidate, but the same set of obstacles recurs constantly across
+        edges and cycles, and inflating it is the expensive half.
+        """
+        if others is None or others.is_empty:
+            return None
+        key = others.wkb
+        cached = self._inflated_cache.get(key)
+        if cached is not None:
+            return cached
+        geom = others.buffer(max(self.cfg.robot_radius - self.cfg.contact_clearance,
+                                 1e-6))
+        shapely.prepare(geom)
+        self._inflated_cache[key] = geom
+        while len(self._inflated_cache) > _INFLATED_CACHE_MAX:
+            self._inflated_cache.pop(next(iter(self._inflated_cache)))
+        return geom
+
     def _goal_filter(self, obs):
         """Reject drop poses that leave the obstacle blocking more edges than it does
-        now, or that reverse the direction this obstacle was last pushed in."""
+        now, or that reverse the direction this obstacle was last moved in."""
         base_blocked = self.roadmap.count_blocked_edges(obs.polygon)
-        last_dir = self.belief.push_dir.get(obs.oid)
+        last_dir = self.belief.move_dir.get(obs.oid)
 
         def accept(goal):
             if self.roadmap.count_blocked_edges(obs.polygon_at(*goal)) > base_blocked:
@@ -215,7 +269,7 @@ class Planner:
             if last_dir is None:
                 return True
             dx, dy = goal[0] - obs.x, goal[1] - obs.y
-            if math.hypot(dx, dy) <= _PUSH_DIR_EPS:     # pure rotation has no direction
+            if math.hypot(dx, dy) <= _MOVE_DIR_EPS:     # pure rotation has no direction
                 return True
             return dx * last_dir[0] + dy * last_dir[1] >= 0.0
 
@@ -225,6 +279,7 @@ class Planner:
         if not self.cfg.use_llm_ordering or not removals:
             return 0.0
         s = 0.0
-        for (oid, _drop, _dist, _work, _push_path) in removals:
+        for (oid, _drop, _dist, _work, _move_path, _cplan) in removals:
             s += self.est.estimate(self.belief.obstacle(oid).observation())
         return s
+

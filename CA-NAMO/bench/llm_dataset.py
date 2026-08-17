@@ -36,6 +36,10 @@ because they answer different questions:
 
 from __future__ import annotations
 
+# Run from anywhere: the library lives one directory up.
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 

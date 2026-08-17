@@ -1,4 +1,10 @@
-"""SE2 push path planner"""
+"""SE(2) manipulation path planner.
+
+Searches a discretised (x, y, theta) grid with a Dial-bucket Dijkstra for a
+continuous path that carries a rectangular body from its current pose to one
+that no longer blocks a corridor. Knows nothing about robots, costs, or
+contact - it answers only "can this body get there, and by what route".
+"""
 
 from __future__ import annotations
 import math
@@ -6,144 +12,22 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-# ============ Basic geometry ============= #
-def rect_corners(cx: float, cy: float, w: float, h: float, theta: float) -> np.ndarray:
-    dx, dy = w / 2.0, h / 2.0
-    local = np.array([[-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]], dtype=float)
-    c, s = math.cos(theta), math.sin(theta)
-    R = np.array([[c, -s], [s, c]])
-    return local @ R.T + np.array([cx, cy])
+from geometry import (
+    c_obstacle,
+    convex_hull,
+    inside_convex,
+    mean_rotation_radius,
+    offset_bbox,
+    polygon_exterior_coords,
+    rect_corners,
+    sat_rect_intersect,
+    wrap_dtheta,
+)
 
-def convex_hull(pts: np.ndarray) -> np.ndarray:
-    pts = np.unique(np.round(np.asarray(pts, dtype=float), 9), axis=0)
-    if len(pts) <= 2:
-        return pts
-    pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
-
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-    lower = []
-    for p in pts:
-        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-            lower.pop()
-        lower.append(p)
-    upper = []
-    for p in pts[::-1]:
-        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-            upper.pop()
-        upper.append(p)
-    return np.array(lower[:-1] + upper[:-1])
-
-
-def minkowski_sum(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    pairwise = (A[:, None, :] + B[None, :, :]).reshape(-1, 2)
-    return convex_hull(pairwise)
-
-
-def c_obstacle(shape_poly: np.ndarray, obs_corners_local: np.ndarray) -> np.ndarray:
-    return minkowski_sum(shape_poly, -obs_corners_local)
-
-
-def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
-                  margin: float = 0.0) -> np.ndarray:
-    poly = np.asarray(poly, dtype=float)
-    n = len(poly)
-    shape = np.broadcast(X, Y).shape
-    if n == 0:
-        return np.zeros(shape, dtype=bool)
-    if n < 3:  # degenerate case: point or line segment
-        a, b = poly[0], poly[-1]
-        ab = b - a
-        L2 = float(ab @ ab)
-        if L2 < 1e-18:
-            d2 = (X - a[0]) ** 2 + (Y - a[1]) ** 2
-        else:
-            t = np.clip(((X - a[0]) * ab[0] + (Y - a[1]) * ab[1]) / L2, 0.0, 1.0)
-            d2 = (X - (a[0] + t * ab[0])) ** 2 + (Y - (a[1] + t * ab[1])) ** 2
-        return d2 <= margin ** 2
-
-    inside = np.ones(shape, dtype=bool)
-    for i in range(n):
-        p, q = poly[i], poly[(i + 1) % n]
-        e = q - p
-        L = math.hypot(e[0], e[1])
-        if L < 1e-12:
-            continue
-        nx, ny = e[1] / L, -e[0] / L  # outward normal of counter-clockwise polygon
-        inside &= ((X - p[0]) * nx + (Y - p[1]) * ny) <= margin
-    return inside
-
-
-def offset_bbox(poly: np.ndarray, margin: float):
-    poly = np.asarray(poly, dtype=float)
-    n = len(poly)
-    if n == 0:
-        return None
-    if n < 3:      # degenerate point/segment: criterion is "distance <= margin", just expand bbox
-        return (poly[:, 0].min() - margin, poly[:, 0].max() + margin,
-                poly[:, 1].min() - margin, poly[:, 1].max() + margin)
-
-    normals, offsets = [], []
-    for i in range(n):
-        p, q = poly[i], poly[(i + 1) % n]
-        e = q - p
-        L = math.hypot(e[0], e[1])
-        if L < 1e-12:
-            continue
-        nx, ny = e[1] / L, -e[0] / L
-        normals.append((nx, ny))
-        offsets.append(p[0] * nx + p[1] * ny + margin)
-    m = len(normals)
-    if m < 3:
-        return None
-
-    xs, ys = [], []
-    for i in range(m):
-        (ax, ay), ca = normals[i - 1], offsets[i - 1]
-        (bx, by), cb = normals[i], offsets[i]
-        det = ax * by - ay * bx
-        if abs(det) < 1e-12:      # adjacent edges collinear: vertex does not exist, skip
-            continue
-        xs.append((ca * by - cb * ay) / det)
-        ys.append((ax * cb - bx * ca) / det)
-    if not xs:
-        return None
-    return (min(xs), max(xs), min(ys), max(ys))
-
-
-def mean_rotation_radius(w: float, h: float) -> float:
-    if w <= 0.0 or h <= 0.0:
-        return 0.0
-    s = math.hypot(w, h)
-    return (s / 6.0
-            + (w * w / (12.0 * h)) * math.log((s + h) / w)
-            + (h * h / (12.0 * w)) * math.log((s + w) / h))
-
-
-def wrap_dtheta(a: float, b: float) -> float:
-    return (b - a + math.pi / 2) % math.pi - math.pi / 2
-
-# ============ SAT collision detection ============= #
-
-def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
-    for poly in (A, B):
-        n = len(poly)
-        for i in range(n):
-            e = poly[(i + 1) % n] - poly[i]
-            axis = np.array([-e[1], e[0]])
-            L = math.hypot(axis[0], axis[1])
-            if L < 1e-12:
-                continue
-            axis /= L
-            pa, pb = A @ axis, B @ axis
-            if pa.max() < pb.min() - eps or pb.max() < pa.min() - eps:
-                return False
-    return True
-# ============ SE2 grid + Dial-bucket Dijkstra ============= #
+# --- SE2 grid + Dial-bucket Dijkstra ---
 
 @dataclass
-class PushPlanResult:
+class SE2PlanResult:
     success: bool
     reason: str = ""
     cost: float = float("nan")
@@ -159,7 +43,7 @@ _CORRIDOR_MASK_CACHE: Dict[tuple, tuple] = {}
 _CORRIDOR_MASK_CACHE_MAX = 4096
 
 
-class PushPlanner:
+class SE2Planner:
     _W_AXIS = 990
     _W_DIAG = 1400
     _W_KNIGHT = 2214
@@ -220,11 +104,11 @@ class PushPlanner:
         self._cache: Optional[Tuple[np.ndarray, np.ndarray, int]] = None
 
         if verbose:
-            print(f"[push] oid={self.oid} | "
+            print(f"[se2] oid={self.oid} | "
                   f"free {self.free.mean() * 100:.0f}% "
                   f"-> reachable {self.allowed.mean() * 100:.0f}%")
 
-    # -------------------------------------------------------- move definitions
+    # --- move definitions ---
     def _build_moves(self) -> None:
         """(di, dj, dk, integer weight). Translation and rotation are mutually exclusive."""
         mv: List[Tuple[int, int, int, int]] = []
@@ -249,7 +133,7 @@ class PushPlanner:
                 np.array([m[1] for m in g], dtype=np.int64)[:, None])
             for w, g in groups.items()]
 
-    # ------------------------------------------------------------ configuration space build
+    # --- configuration space build ---
     def _build_cspace(self) -> None:
         rx, ry = self.robot_pos
         R = self.work_radius
@@ -299,7 +183,7 @@ class PushPlanner:
         self._route_window: Optional[Tuple[int, int, int, int]] = None
         self._route_mask: Optional[np.ndarray] = None
 
-    # -------------------------------------------------- start un-stuck (discretisation artifact fix)
+    # --- start un-stuck ---
     def _true_collision(self, pose: Tuple[float, float, float],
                         clearance: float = 1e-9) -> bool:
         O = rect_corners(0.0, 0.0, self.obstacle_w, self.obstacle_h, pose[2])
@@ -366,11 +250,11 @@ class PushPlanner:
             self._unstuck_for = start_idx
             if self.verbose:
                 x, y, _ = self._pose(*start_idx)
-                print(f"[push] oid={self.oid} unstuck {freed} states at ({x:.1f}, {y:.1f}) "
+                print(f"[se2] oid={self.oid} unstuck {freed} states at ({x:.1f}, {y:.1f}) "
                       f"clearance={clearance:.3f}")
         return freed
 
-    # ----------------------------------------------------------- index helpers
+    # --- index helpers ---
     def _snap(self, x: float, y: float, theta: float) -> Tuple[int, int, int]:
         i = int(np.clip(round((x - self.xs[0]) / self.cell), 0, self.nx - 1))
         j = int(np.clip(round((y - self.ys[0]) / self.cell), 0, self.ny - 1))
@@ -391,7 +275,7 @@ class PushPlanner:
         j = rem // nT
         return i, j, rem - j * nT
 
-    # ------------------------------------------------- Dial-bucket Dijkstra
+    # --- Dial-bucket Dijkstra ---
     def _search(self, start_idx: Tuple[int, int, int], max_bucket: int | None = None):
         """Dial-bucket Dijkstra. If *max_bucket* is given, stop expanding once the
         current bucket exceeds that value — states beyond that distance are unreachable
@@ -420,7 +304,7 @@ class PushPlanner:
                 if idx.size == 0:
                     continue
                 i, j, k = self._unflat(idx)
-                # ---- translation ----
+                # --- translation ---
                 for w, DI, DJ in self._move_groups:
                     ni, nj = i + DI, j + DJ            # (num directions, frontier size)
                     ok = (ni >= 0) & (ni < nx) & (nj >= 0) & (nj < ny)
@@ -441,7 +325,7 @@ class PushPlanner:
                     if nd > max_b:
                         max_b = nd
 
-                # ---- rotation ----
+                # --- rotation ---
                 nd = b + self.W_rot
                 for dk in (1, -1):
                     kk = k if dk == 1 else (k - 1) % nT
@@ -482,7 +366,7 @@ class PushPlanner:
     def _pose_gap(a, b) -> float:
         return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(wrap_dtheta(a[2], b[2])))
 
-    # ----------------------------------------------------------------- planning
+    # --- planning ---
     def _build_corridor_mask(self, corridor_polys: List[np.ndarray]):
         x0, y0, cell = float(self.xs[0]), float(self.ys[0]), self.cell
         layers = []                       # (k, i0, i1, j0, j1, layer)
@@ -541,7 +425,7 @@ class PushPlanner:
         while len(_CORRIDOR_MASK_CACHE) > _CORRIDOR_MASK_CACHE_MAX:
             _CORRIDOR_MASK_CACHE.pop(next(iter(_CORRIDOR_MASK_CACHE)))
 
-    # ------------------------------------------------- goal preference (forward push penalty)
+    # --- goal preference ---
     def _forward_bias(self, start_pose: Tuple[float, float, float]):
         if self.forward_penalty <= 0.0:
             return None
@@ -603,30 +487,30 @@ class PushPlanner:
                       start_pose: Tuple[float, float, float],
                       validate=None,
                       n_candidates: int = 10,
-                      goal_accept=None) -> PushPlanResult:
+                      goal_accept=None) -> SE2PlanResult:
         start_idx = self._snap(*start_pose)
 
         if not self.in_disk[start_idx]:
-            return PushPlanResult(False, "start pose is outside the workspace circle")
+            return SE2PlanResult(False, "start pose is outside the workspace circle")
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
                 O_start + np.array([start_pose[0], start_pose[1]]),
                 wp, eps=_START_COLLISION_EPS):
-                return PushPlanResult(False, "start pose collides with wall")
+                return SE2PlanResult(False, "start pose collides with wall")
 
         if self._unstick_start(start_idx):
             self._cache = None            # C-space changed, invalidate previous Dijkstra result
 
         # Cap the Dijkstra search radius to the corridor extent + obstacle size.
-        # An obstacle never needs to be pushed farther than this to clear the corridor;
+        # An obstacle never needs to be moved farther than this to clear the corridor;
         # exploring beyond it wastes time on unreachable / irrelevant states.
         max_bucket = None
         if self._route_window is not None:
             i0, i1, j0, j1 = self._route_window
             corridor_diag = math.hypot((i1 - i0) * self.cell, (j1 - j0) * self.cell)
-            max_push = (corridor_diag + self.r_half_diag * 2.0) * 1.5
-            max_bucket = int(max_push / self.unit)
+            max_reach = (corridor_diag + self.r_half_diag * 2.0) * 1.5
+            max_bucket = int(max_reach / self.unit)
 
         start_flat = int(self._flat(*start_idx))
         if self._cache is None or self._cache[2] != start_flat:
@@ -637,7 +521,7 @@ class PushPlanner:
         candidates, reachable = self._select_goal(
             dist, start_pose, n_best=1 if one_shot else n_candidates)
         if not reachable:
-            return PushPlanResult(False, "no reachable pose can clear the path")
+            return SE2PlanResult(False, "no reachable pose can clear the path")
 
         nyT = self.ny * self.n_theta
         fallback = None
@@ -652,7 +536,7 @@ class PushPlanner:
                         for a, b in zip(poses, poses[1:]))
             rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
             cost = trans + self.rot_weight * rot
-            result = PushPlanResult(True, "", cost, trans, rot, goal_pose, poses)
+            result = SE2PlanResult(True, "", cost, trans, rot, goal_pose, poses)
             # candidates come in cost order, so the first accepted one is the
             # cheapest acceptable drop pose; keep the cheapest overall as fallback
             if goal_accept is None or goal_accept(goal_pose):
@@ -662,29 +546,29 @@ class PushPlanner:
         if fallback is not None:
             return fallback
 
-        return PushPlanResult(False, "all candidate push paths failed swept-volume validation")
+        return SE2PlanResult(False, "all candidate routes failed swept-volume validation")
 
     def plan_path(self,
                   start_pose: Tuple[float, float, float],
-                  goal_pose: Tuple[float, float, float]) -> PushPlanResult:
+                  goal_pose: Tuple[float, float, float]) -> SE2PlanResult:
         start_idx = self._snap(*start_pose)
         goal_idx = self._snap(*goal_pose)
 
         if not self.in_disk[start_idx]:
-            return PushPlanResult(False, "start pose is outside the robot workspace circle")
+            return SE2PlanResult(False, "start pose is outside the robot workspace circle")
         # check start against walls (no margin). tangent contact allowed, see _START_COLLISION_EPS.
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
                 O_start + np.array([start_pose[0], start_pose[1]]),
                 wp, eps=_START_COLLISION_EPS):
-                return PushPlanResult(False, "start pose collides with wall")
+                return SE2PlanResult(False, "start pose collides with wall")
 
         if not self.free[goal_idx]:
-            return PushPlanResult(False, "goal pose collides with wall (or is too close)")
+            return SE2PlanResult(False, "goal pose collides with wall (or is too close)")
 
         if not self.in_disk[goal_idx]:
-            return PushPlanResult(False, "goal pose is outside the robot workspace circle")
+            return SE2PlanResult(False, "goal pose is outside the robot workspace circle")
 
         if self._unstick_start(start_idx):
             self._cache = None
@@ -698,22 +582,16 @@ class PushPlanner:
         INF = np.int64(1) << 62
 
         if dist[goal_flat] >= INF:
-            return PushPlanResult(False, "no feasible path from start to goal in the discrete search space")
+            return SE2PlanResult(False, "no feasible path from start to goal in the discrete search space")
 
         poses = self._trace(parent, goal_flat, start_pose)
         trans = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(poses, poses[1:]))
         rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
         cost = trans + self.rot_weight * rot     # same as plan_anywhere: path length is the basis
-        return PushPlanResult(True, "", cost, trans, rot, self._pose(*goal_idx), poses)
+        return SE2PlanResult(True, "", cost, trans, rot, self._pose(*goal_idx), poses)
 
-# ============ Factory function ============= #
-def polygon_exterior_coords(polygon) -> np.ndarray:
-    coords = list(polygon.exterior.coords)
-    if len(coords) >= 2 and coords[0] == coords[-1]:
-        coords = coords[:-1]
-    return np.array(coords, dtype=float)
-
-def build_push_planner(wall_polys,             # list of shapely Polygons — impassable region outlines
+# --- Factory function ---
+def build_se2_planner(wall_polys,             # list of shapely Polygons — impassable region outlines
                        obstacle_w: float,
                        obstacle_h: float,
                        bounds: Tuple[float, float, float, float],
@@ -726,11 +604,11 @@ def build_push_planner(wall_polys,             # list of shapely Polygons — im
                        containment: str = "centroid",
                        forward_penalty: float = 0.0,
                        oid: int = -1,
-                       verbose: bool = False) -> PushPlanner:
-    """Build a PushPlanner from CA-NAMO-style data."""
+                       verbose: bool = False) -> SE2Planner:
+    """Build a SE2Planner from CA-NAMO-style data."""
     wall_verts = [polygon_exterior_coords(p) for p in wall_polys]
 
-    return PushPlanner(
+    return SE2Planner(
         wall_polys=wall_verts,
         obstacle_w=obstacle_w,
         obstacle_h=obstacle_h,
@@ -746,3 +624,4 @@ def build_push_planner(wall_polys,             # list of shapely Polygons — im
         oid=oid,
         verbose=verbose,
     )
+

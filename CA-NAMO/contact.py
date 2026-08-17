@@ -1,0 +1,312 @@
+"""Robot–obstacle contact trajectory planning.
+
+The manipulation model is: the robot is a disc that must stay *physically in
+contact* with the obstacle for the whole time the obstacle is moving.  It may
+grip anywhere on the perimeter, so it can push (robot behind the motion) or
+pull (robot ahead of it) with no restriction on direction, and it may slide its
+grip point along the surface while the obstacle moves.
+
+Given the obstacle's SE(2) path, this module picks where the robot holds it at
+every sub-step so that
+
+  * the robot disc never overlaps a wall or another obstacle,
+  * the grip point moves continuously along the surface (no teleporting from
+    one side to the other),
+  * the total robot travel distance is minimal.
+
+Travel is charged at the same rate as ordinary driving (lambda [N] per metre),
+so the joules the robot spends carting itself around the obstacle land in the
+same cost function as the joules it spends overcoming the obstacle's friction.
+
+Discretisation
+--------------
+Candidate grip points ("stations") are sampled uniformly by arc length along
+the *offset curve* of the rectangle at distance ``robot_radius`` — four straight
+runs joined by four quarter arcs.  A station is a fixed point in the obstacle's
+local frame, so it rides along with both translation and rotation.  Choosing one
+station per manipulation sub-step is then a shortest-path problem over a
+(sub-step x station) lattice, solved exactly by dynamic programming.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
+import shapely
+from shapely.geometry import LineString
+
+import geometry
+
+Pose = Tuple[float, float, float]
+XY = Tuple[float, float]
+
+_INF = float("inf")
+_MIN_STATIONS = 8
+_MAX_STATIONS = 64
+
+
+@dataclass
+class ContactPlan:
+    """Where the robot is at every step of a manipulation.
+
+    ``robot_path`` is one continuous polyline:
+        [start] + [grip point per extended pose] + [end]
+    ``move_offset`` maps move-path indices onto it: the robot is at
+    ``robot_path[move_offset + i]`` while the obstacle is at ``poses[i]``.
+    The entries before ``move_offset`` are the approach plus any walk around the
+    stationary obstacle to reach the chosen grip side; the entries after the
+    push are the symmetric walk back out.
+    """
+    feasible: bool
+    reason: str = ""
+    robot_path: List[XY] = field(default_factory=list)
+    move_offset: int = 0
+    travel: float = 0.0            # total robot travel over the whole manipulation [m]
+
+    def at(self, i: int) -> XY:
+        return self.robot_path[self.move_offset + i]
+
+    def leg_length(self, a: int, b: int) -> float:
+        """Length of robot_path[a:b+1] (indices into robot_path, a <= b)."""
+        return sum(math.dist(self.robot_path[t], self.robot_path[t + 1])
+                   for t in range(a, b))
+
+
+def idle_plan(robot_pos: XY, n_poses: int) -> ContactPlan:
+    """Degenerate plan used when contact is not required: the obstacle moves on
+    its own and the robot stays put. Shaped like a real plan — start, one entry
+    per pose, end — so the executor needs no special case, but every entry is the
+    same point, so it accrues no travel."""
+    return ContactPlan(True, "", [tuple(robot_pos)] * (max(1, n_poses) + 2), 1, 0.0)
+
+
+# --- grip stations ---
+def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
+    """Robot centre positions in contact with an ``l`` x ``d`` rectangle.
+
+    Returns a (K, 2) array of points in the obstacle's local frame, ordered
+    counter-clockwise and equally spaced by arc length, each exactly ``r`` away
+    from the rectangle's boundary.
+    """
+    hl, hd = l / 2.0, d / 2.0
+    quarter = 0.5 * math.pi * r
+    # counter-clockwise: right edge, corner, top edge, corner, ...
+    segments = [
+        ("line", (hl + r, -hd), (0.0, 1.0), d),
+        ("arc", (hl, hd), 0.0, quarter),
+        ("line", (hl, hd + r), (-1.0, 0.0), l),
+        ("arc", (-hl, hd), 0.5 * math.pi, quarter),
+        ("line", (-hl - r, hd), (0.0, -1.0), d),
+        ("arc", (-hl, -hd), math.pi, quarter),
+        ("line", (-hl, -hd - r), (1.0, 0.0), l),
+        ("arc", (hl, -hd), 1.5 * math.pi, quarter),
+    ]
+    perimeter = 2.0 * (l + d) + 2.0 * math.pi * r
+    k = int(math.ceil(perimeter / max(spacing, 1e-3)))
+    k = max(_MIN_STATIONS, min(_MAX_STATIONS, k))
+
+    pts = np.empty((k, 2), dtype=float)
+    step = perimeter / k
+    seg_i, seg_s = 0, 0.0          # current segment and how far into it we are
+    for n in range(k):
+        target = n * step
+        # advance to the segment containing `target`
+        acc = 0.0
+        for si, seg in enumerate(segments):
+            length = seg[3]
+            if acc + length > target or si == len(segments) - 1:
+                seg_i, seg_s = si, target - acc
+                break
+            acc += length
+        seg = segments[seg_i]
+        if seg[0] == "line":
+            (px, py), (ux, uy) = seg[1], seg[2]
+            pts[n] = (px + ux * seg_s, py + uy * seg_s)
+        else:
+            (cx, cy), a0 = seg[1], seg[2]
+            a = a0 + (seg_s / max(quarter, 1e-12)) * (0.5 * math.pi)
+            pts[n] = (cx + r * math.cos(a), cy + r * math.sin(a))
+    return pts
+
+
+def _unwrapped_angles(poses: Sequence[Pose]) -> np.ndarray:
+    """Continuous heading along the path.
+
+    The SE(2) planner stores orientation modulo pi, because a rectangle at theta
+    and at theta+pi has the same footprint. A grip point does not: the body
+    really did turn, and tracking the stored angle would slide the robot to the
+    opposite face the moment the index wraps from pi back to 0. Accumulating the
+    short-way delta — the same `wrap_dtheta` the swept volume and the rotation
+    cost use — keeps the grip on the face it is actually holding.
+    """
+    th = [float(poses[0][2])]
+    for a, b in zip(poses, poses[1:]):
+        th.append(th[-1] + geometry.wrap_dtheta(a[2], b[2]))
+    return np.array(th, dtype=float)
+
+
+def _world_positions(stations: np.ndarray, poses: Sequence[Pose]) -> np.ndarray:
+    """(T, K, 2) world positions of every station at every pose."""
+    th = _unwrapped_angles(poses)
+    c, s = np.cos(th), np.sin(th)
+    sx = stations[:, 0][None, :]
+    sy = stations[:, 1][None, :]
+    x = c[:, None] * sx - s[:, None] * sy + np.array([p[0] for p in poses])[:, None]
+    y = s[:, None] * sx + c[:, None] * sy + np.array([p[1] for p in poses])[:, None]
+    return np.stack([x, y], axis=2)
+
+
+# --- line-of-travel test ---
+def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
+    """Can the robot drive straight from *a* to *b*?
+
+    Walls are checked over the whole segment (``free_geom`` is the static free
+    space already eroded by the robot radius).  Movable obstacles are checked
+    over the segment trimmed by one robot radius at each end: both endpoints are
+    positions the robot is known to be able to occupy, and the last radius of an
+    approach is the docking move that ends flush against the obstacle.
+    """
+    seg = LineString([a, b])
+    if not shapely.contains(free_geom, seg):
+        return False
+    if blocked_geom is None:
+        return True
+    length = seg.length
+    if length <= 2.0 * trim:
+        return True
+    inner = LineString([seg.interpolate(trim), seg.interpolate(length - trim)])
+    return not shapely.intersects(blocked_geom, inner)
+
+
+# --- planner ---
+def plan_contact(obs,
+                 poses: Sequence[Pose],
+                 robot_start: XY,
+                 robot_end: XY,
+                 free_geom,
+                 others_inflated,
+                 cfg) -> ContactPlan:
+    """Plan the robot's trajectory for one manipulation.
+
+    ``free_geom``       prepared polygon of robot-centre positions that clear the
+                        static walls (static free space eroded by the robot radius).
+    ``others_inflated`` prepared polygon of robot-centre positions forbidden by the
+                        *other* movable obstacles (their union inflated by the robot
+                        radius), or None.
+    """
+    if not poses:
+        return ContactPlan(False, "empty move path")
+
+    r = float(cfg.robot_radius)
+    tol = float(cfg.contact_clearance)
+    stations = contact_stations(obs.l, obs.d, r, cfg.contact_station_spacing)
+    k = len(stations)
+
+    # how far the grip may slide along the surface within one manipulation sub-step
+    step_arc = (2.0 * (obs.l + obs.d) + 2.0 * math.pi * r) / k
+    # floor, not round: rounding up would let the grip slide further per sub-step
+    # than contact_max_slide allows. One station is always permitted, otherwise a
+    # coarsely sampled perimeter would freeze the grip in place entirely.
+    max_shift = max(1, int(cfg.contact_max_slide / max(step_arc, 1e-6)))
+    # room to walk around the stationary obstacle before and after the move, so
+    # the far side stays reachable even when the direct line to it is blocked
+    pad = int(math.ceil(k / (2.0 * max_shift)))
+
+    ext: List[Pose] = ([poses[0]] * pad) + list(poses) + ([poses[-1]] * pad)
+    world = _world_positions(stations, ext)
+    t_total = len(ext)
+
+    # --- grip feasibility (vectorised) ---
+    flat_x = world[:, :, 0].ravel()
+    flat_y = world[:, :, 1].ravel()
+    ok = shapely.contains_xy(free_geom, flat_x, flat_y)
+    if others_inflated is not None:
+        ok &= ~shapely.intersects_xy(others_inflated, flat_x, flat_y)
+    feas = ok.reshape(t_total, k)
+    if not feas.any():
+        return ContactPlan(False, "no reachable grip point on this obstacle")
+
+    # the obstacle itself blocks the approach and the exit walk, but not
+    # the grip points (those are flush against it by construction)
+    def _with_body(pose: Pose):
+        body = obs.polygon_at(pose[0], pose[1], pose[2]).buffer(max(r - tol, 0.0))
+        merged = body if others_inflated is None else others_inflated.union(body)
+        shapely.prepare(merged)
+        return merged
+
+    approach_blockers = _with_body(poses[0])
+    exit_blockers = approach_blockers if len(poses) == 1 else _with_body(poses[-1])
+
+    # The reference point is a roadmap position, and roadmap positions ignore
+    # movable obstacles — so it can lie *under* the very obstacle being moved.
+    # There is no drive-in to validate from a spot the robot could not be standing
+    # on in the first place; the distance is still charged, only the line test for
+    # that leg is meaningless and gets skipped.
+    start_under = bool(shapely.intersects_xy(approach_blockers, *robot_start))
+    end_under = bool(shapely.intersects_xy(exit_blockers, *robot_end))
+
+    # --- entry costs ---
+    cost = np.full(k, _INF)
+    for s in np.flatnonzero(feas[0]):
+        p = (float(world[0, s, 0]), float(world[0, s, 1]))
+        if start_under or _clear_line(robot_start, p, free_geom,
+                                      approach_blockers, r):
+            cost[s] = math.dist(robot_start, p)
+    if not np.isfinite(cost).any():
+        return ContactPlan(False, "cannot reach any grip point on this obstacle")
+
+    # --- dynamic programming ---
+    parent = np.full((t_total, k), -1, dtype=np.int64)
+    idx = np.arange(k)
+    shifts = range(-max_shift, max_shift + 1)
+    for t in range(t_total - 1):
+        feas_next = feas[t + 1]
+        best = np.full(k, _INF)
+        best_src = np.full(k, -1, dtype=np.int64)
+        for shift in shifts:
+            # every station the grip slides across must be free at the next pose
+            slide_ok = np.ones(k, dtype=bool)
+            span = range(0, shift + 1) if shift >= 0 else range(shift, 1)
+            for e in span:
+                slide_ok &= np.roll(feas_next, -e)
+            step = np.linalg.norm(np.roll(world[t + 1], -shift, axis=0) - world[t],
+                                  axis=1)
+            cand = np.where(slide_ok, cost + step, _INF)
+            cand = np.roll(cand, shift)          # scatter source s onto target s+shift
+            upd = cand < best
+            best[upd] = cand[upd]
+            best_src[upd] = (idx[upd] - shift) % k
+        cost, parent[t + 1] = best, best_src
+        if not np.isfinite(cost).any():
+            return ContactPlan(
+                False, "robot cannot stay in contact for the whole manipulation")
+
+    # --- exit costs ---
+    # candidates in ascending total cost; the first with a clear drive-out wins
+    exit_dist = np.linalg.norm(world[-1] - np.asarray(robot_end), axis=1)
+    total = cost + exit_dist
+    chosen = -1
+    for s in np.argsort(total):
+        if not np.isfinite(total[s]):
+            break
+        p = (float(world[-1, s, 0]), float(world[-1, s, 1]))
+        if end_under or _clear_line(p, robot_end, free_geom, exit_blockers, r):
+            chosen = int(s)
+            break
+    if chosen < 0:
+        return ContactPlan(False, "robot cannot leave the obstacle after moving it")
+
+    # --- backtrack ---
+    seq = [chosen]
+    for t in range(t_total - 1, 0, -1):
+        seq.append(int(parent[t, seq[-1]]))
+    seq.reverse()
+    grip = [(float(world[t, s, 0]), float(world[t, s, 1]))
+            for t, s in enumerate(seq)]
+    path = [tuple(robot_start)] + grip + [tuple(robot_end)]
+    travel = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
+    return ContactPlan(True, "", path, 1 + pad, travel)
+

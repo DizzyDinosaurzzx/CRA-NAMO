@@ -3,6 +3,7 @@
 from __future__ import annotations
 import math
 from typing import Dict, List, Tuple
+import shapely
 from shapely.geometry import Point, Polygon, LineString
 from shapely.ops import unary_union
 from shapely.prepared import prep
@@ -16,7 +17,13 @@ class Roadmap:
         self.cfg = cfg
         self.workspace = workspace
         polys = [so.polygon for so in static_obstacles]
-        self.static_obstacles = static_obstacles  # for use by the push planner
+        self.static_obstacles = static_obstacles  # for use by the SE(2) planner
+        # Three nested free-space sets, from largest to smallest. Keeping them
+        # named by what they are eroded by is the point: they differ only in that,
+        # and picking the wrong one is otherwise invisible.
+        #   static_free      — anywhere inside the workspace that is not a wall
+        #   free_eroded      — where the robot's *centre* may sit (eroded by r)
+        #   free_eroded_tol  — same, minus a contact_clearance hair of slack
         self.static_free = workspace.difference(unary_union(polys)) if polys else workspace
         self.static_free_prep = prep(self.static_free)
         self.free_eroded = self.static_free.buffer(-cfg.robot_radius, quad_segs=16)
@@ -27,10 +34,29 @@ class Roadmap:
         self.edge_corridor: Dict[EdgeKey, Polygon] = {}
         self._kdtree: KDTree | None = None
         self._corridor_tree: STRtree | None = None
+        self._free_eroded_tol: Polygon | None = None
         self._build()
         self._rebuild_kdtree()
 
-    # ------------------ Construction ---------------- #
+    @property
+    def free_eroded_tol(self):
+        """`free_eroded`, relaxed by `contact_clearance`.
+
+        Built lazily because only the contact model needs it. Roadmap
+        construction deliberately uses the strict `free_eroded`: a node is a place
+        the robot parks, and it should have real clearance. A grip point is not —
+        it is pressed flush against an obstacle that may itself be flush against a
+        wall, so it lands exactly on the strict boundary and gets rejected for a
+        rounding error. Hence the hair of slack, and hence two sets rather than one.
+        """
+        if self._free_eroded_tol is None:
+            eps = max(1e-6, self.cfg.robot_radius - self.cfg.contact_clearance)
+            geom = self.static_free.buffer(-eps, quad_segs=16)
+            shapely.prepare(geom)
+            self._free_eroded_tol = geom
+        return self._free_eroded_tol
+
+    # --- Construction ---
     def _build(self):
         """Uniform grid across the entire map"""
         cfg = self.cfg
@@ -75,7 +101,7 @@ class Roadmap:
         self.adj[u].append(v)
         self.adj[v].append(u)
 
-    # ------------------ Query ---------------- #
+    # --- Query ---
     def neighbors(self, u: int):
         for v in self.adj[u]:
             key = (u, v) if u < v else (v, u)
@@ -98,6 +124,39 @@ class Roadmap:
             return 0
         _, idx = self._kdtree.query(p)
         return int(idx)
+
+    def can_drive(self, a: Tuple[float, float], b: Tuple[float, float],
+                  blocked=None) -> bool:
+        """Can the robot drive straight from *a* to *b*?
+
+        *blocked* is an optional prepared geometry of robot-centre positions
+        ruled out by known movable obstacles.
+        """
+        if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9:
+            # degenerate segment: shapely predicates on a zero-length LineString
+            # are unreliable, and standing still is trivially possible anyway
+            return shapely.contains(self.free_eroded_tol, Point(a))
+        seg = LineString([a, b])
+        if not shapely.contains(self.free_eroded_tol, seg):
+            return False
+        return blocked is None or not shapely.intersects(blocked, seg)
+
+    def nearest_reachable_node(self, p: Tuple[float, float], blocked=None,
+                               k: int = 24) -> int | None:
+        """Nearest node the robot can drive to from *p* in a straight line.
+
+        Used to put the robot back on the roadmap after a manipulation ended
+        somewhere off-graph.
+        """
+        if self._kdtree is None:
+            return None
+        k = min(k, len(self.nodes))
+        _, idx = self._kdtree.query(p, k=k)
+        for nid in (idx if hasattr(idx, "__iter__") else [idx]):
+            nid = int(nid)
+            if self.can_drive(p, self.nodes[nid], blocked):
+                return nid
+        return None
 
     def add_terminal(self, p: Tuple[float, float]) -> int:
         cfg = self.cfg
@@ -122,3 +181,4 @@ class Roadmap:
     def __repr__(self):
         return (f"Roadmap(nodes={len(self.nodes)}, edges={len(self.edge_len)}, "
                 f"step={self.cfg.grid_step:g}m)")
+

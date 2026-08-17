@@ -2,7 +2,7 @@
 
 Three stages, run independently or with `all`:
 
-  accuracy   Ask the live model for mu*rho on every item in `llm_test_dataset`,
+  accuracy   Ask the live model for mu*rho on every item in `llm_dataset`,
              several times each, and compare against the reference values.
              Also records the no-LLM heuristic (`material_mu_rho`) on the same
              items, so every accuracy number has a floor to beat.
@@ -40,6 +40,10 @@ Usage
 
 from __future__ import annotations
 
+# Run from anywhere: the library lives one directory up.
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import argparse
 import json
 import math
@@ -65,13 +69,13 @@ from llm_difficulty import (
     friction_force,
     material_mu_rho,
 )
-from llm_test_dataset import (
+from llm_dataset import (
     DATASET,
     PARAPHRASE_OF_ANCHOR,
     Item,
     assert_all_off_anchor,
 )
-from planner import OnlineNAMO
+from executor import OnlineNAMO
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_test_out")
 
@@ -690,11 +694,11 @@ def _repeatability(rows) -> dict:
             "max_spread": round(max(spreads), 3)}
 
 
-def _decision_flips(rows, cfg: Config, push_dist=2.0) -> List[dict]:
+def _decision_flips(rows, cfg: Config, move_dist=2.0) -> List[dict]:
     """How often the estimate flips the only decision the planner makes.
 
     An obstacle is worth pushing when work < the detour it saves:
-        difficulty * push_dist  <  lambda * detour
+        difficulty * move_dist  <  lambda * detour
     so each obstacle has a break-even detour length. Comparing the estimated
     break-even against the true one at a few plausible detour lengths turns the
     mu*rho error into the quantity that actually reaches the search.
@@ -708,8 +712,8 @@ def _decision_flips(rows, cfg: Config, push_dist=2.0) -> List[dict]:
             if not r.get("pred"):
                 continue
             volume = r["l"] * r["d"] * r["h"]
-            true_push = friction_force(r["mu_rho_true"], volume) * push_dist
-            est_push = friction_force(r["pred"], volume) * push_dist
+            true_push = friction_force(r["mu_rho_true"], volume) * move_dist
+            est_push = friction_force(r["pred"], volume) * move_dist
             total += 1
             if (true_push < budget) != (est_push < budget):
                 flips += 1
