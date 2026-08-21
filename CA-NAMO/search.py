@@ -16,6 +16,7 @@ from llm_difficulty import DifficultyEstimator
 import contact
 import cost
 import manipulation
+import timing
 
 @dataclass
 class Plan:
@@ -47,7 +48,13 @@ class Planner:
         self._inflated_cache: Dict[bytes, object] = {}
 
     # --- planning ---
-    def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
+    def plan(self, start_node: int, goal_node: int,
+             heading: Optional[float] = None) -> Optional[Plan]:
+        """Best route from `start_node`, given the robot is facing `heading`.
+
+        `heading` only matters when `time_importance > 0`, where it prices the
+        pivot the robot would have to make to set off down each first edge.
+        """
         rm = self.roadmap
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
@@ -60,8 +67,11 @@ class Planner:
             self._persistent_removal_cache.clear()
 
         def h(node):
+            # Admissible at every time_importance: the straight line is a lower
+            # bound on the remaining distance, and no route covers it faster
+            # than v_max, so it also lower-bounds the remaining time.
             x, y = rm.nodes[node]
-            return cost.motion_cost(cfg, math.hypot(x - gx, y - gy))
+            return cost.search_motion_cost(cfg, math.hypot(x - gx, y - gy))
 
         counter = itertools.count()
         open_heap = [(h(start_node), 0.0, next(counter), start_node)]
@@ -84,10 +94,31 @@ class Planner:
             if expansions > cfg.max_expansions:
                 break
 
+            # Heading the robot would arrive on. At the start node that is where
+            # it is really pointing right now, which matters more than anything
+            # else here: `step_execute_edges` is 1, so the first edge is the only
+            # one that ever gets driven, and pricing its corner against the real
+            # heading is what stops consecutive plans from zig-zagging.
+            # Deeper in the tree it comes from whichever parent is recorded —
+            # `g_best` stays keyed on the node alone rather than on
+            # (node, heading), the same trade the edge midpoint already makes for
+            # the manipulation excursion. Only ever adds non-negative cost, so h
+            # stays admissible, and it is identically zero at time_importance=0.
+            here = rm.nodes[node]
+            if node == start_node:
+                h_in = heading
+            else:
+                prev = parent[node][0]
+                h_in = (timing.heading_of(rm.nodes[prev], here)
+                        if prev is not None else None)
+
             for v, key, length in rm.neighbors(node):
                 step_cost, removals = self._edge_cost(key)
                 if step_cost == math.inf:
                     continue
+                if h_in is not None:
+                    step_cost += cost.search_turn_cost(cfg, timing.turn_between(
+                        h_in, timing.heading_of(here, rm.nodes[v])))
                 ng = g + step_cost
                 if ng >= g_best.get(v, math.inf) - 1e-12:
                     continue
@@ -125,10 +156,10 @@ class Planner:
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
         """Cost of traversing one edge, including clearing whatever blocks it.
 
-        How the strategies weigh obstacle work lives in `cost.strategy_weights`;
+        How energy and time are weighed against each other lives in `cost.py`;
         this function only decides *what* has to be moved.
         """
-        base = cost.motion_cost(self.cfg, self.roadmap.edge_len[key])
+        base = cost.search_motion_cost(self.cfg, self.roadmap.edge_len[key])
         blockers = self.belief.blockers_of(key)
         if not blockers:
             return base, []
@@ -139,7 +170,7 @@ class Planner:
             feasible, work, drop, move_dist, move_path, cplan = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
-            extra += cost.removal_cost(self.cfg, work, cplan.travel)
+            extra += cost.removal_cost(self.cfg, work, cplan.travel, move_dist)
             removals.append((oid, drop, move_dist, work, move_path, cplan))
         return base + extra, removals
 

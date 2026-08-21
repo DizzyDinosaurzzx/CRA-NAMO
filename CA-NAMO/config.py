@@ -7,10 +7,33 @@ def validate_lambda(value: float) -> float:
         raise ValueError("lambda_distance must be a positive number")
     return value
 
+
+def validate_time_importance(value: float) -> float:
+    value = float(value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("time_importance must be between 0 and 1")
+    return value
+
 @dataclass
 class Config:
     # --- Robot ---
     robot_radius: float = 0.3    # robot radius
+
+    # --- Robot dynamics (mission time only; they do not enter J) ---
+    # A differential-drive disc of this size: it turns in place, then drives
+    # straight. Numbers are in the range of an indoor service platform
+    # (TurtleBot/Jackal class). See timing.py for how they become seconds.
+    v_max: float = 0.8           # free-driving cruise speed [m/s]
+    a_max: float = 0.5           # free-driving linear acceleration [m/s^2]
+    w_max: float = 1.5           # free turn-in-place rate [rad/s]
+    alpha_max: float = 2.0       # free angular acceleration [rad/s^2]
+    # Escorting an obstacle: the robot is pressed against a load it must not let
+    # slip, so it drives and turns considerably more gently.
+    v_max_contact: float = 0.25      # [m/s]
+    a_max_contact: float = 0.20      # [m/s^2]
+    w_max_contact: float = 0.50      # [rad/s]
+    alpha_max_contact: float = 0.80  # [rad/s^2]
+    grip_time: float = 2.0       # seconds to latch onto an obstacle, and again to release
 
     # --- Cost function J = lambda * D + W ---
     # Obstacle difficulty is a real friction force f = mu*rho*V*g [N], so W is in
@@ -19,6 +42,15 @@ class Config:
     # resistance) so that the detour-vs-move trade-off stays in a regime where
     # moving light obstacles is still worthwhile.
     lambda_distance: float = 350.0   # equivalent driving resistance [N]
+
+    # --- What the search optimises: C = (1-w)*J + w*(lambda*v_max)*T ---
+    # How much the robot cares about finishing quickly rather than cheaply.
+    #   0 -> pure J, the energy model, and the run is identical to before this
+    #        knob existed
+    #   1 -> pure T, the fastest route it can find, energy ignored
+    # A second is priced at lambda*v_max watts — what a second of cruising costs
+    # in joules — so no separate calibration is needed. See cost.time_price.
+    time_importance: float = 0.5
 
     # --- Perception ---
     R_perc: float = 10.0       # perception radius
@@ -64,7 +96,7 @@ class Config:
     conn_radius: float =0.6   # roadmap node connection radius
 
     # --- Search ---
-    strategy: str = "normal"    # "normal" | "shortest" | "easiest"
+    strategy: str = "normal"    # "normal" | "shortest"
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
@@ -95,7 +127,7 @@ class Config:
     # --- Other ---
     rng_seed: int = 0
     out_dir: str = "img"
-    save_frames: bool = True   # whether to save the per-step animation (GIF)
+    save_frames: bool = False   # whether to save the per-step animation (GIF)
     gif_fps: float = 5.0       # animation speed, frames per second
     gif_end_hold_s: float = 2  # hold the last frame this long before looping
     gif_dpi: int = 300         # per-frame render resolution inside the GIF
@@ -103,6 +135,7 @@ class Config:
 
     def __post_init__(self):
         self.lambda_distance = validate_lambda(self.lambda_distance)
+        self.time_importance = validate_time_importance(self.time_importance)
 
     def log(self, *args):
         if self.verbose:

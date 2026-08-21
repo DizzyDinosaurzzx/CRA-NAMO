@@ -10,43 +10,108 @@ Colour vocabulary:
     obstacle route  blue dashed (where an obstacle is to be carried)
     planned contact dark goldenrod dotted (where the robot grips it)
     obstacle        crimson if untouched, orange once moved
-    robot trail     translucent blue corridor
+    robot trail     translucent blue corridor, outlined; ground the robot drove
+                    around rather than over stays empty
 """
 
 from __future__ import annotations
 import io
-import textwrap
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.patches import PathPatch
+from matplotlib.path import Path
 from PIL import Image
 from shapely.geometry import LineString, Point
 
 from executor import OnlineNAMO
 
-def _plot_poly(ax, poly, **kw):  # draw basic polygon
-    if poly.geom_type == "Polygon":
-        xs, ys = poly.exterior.xy
-        ax.fill(xs, ys, **kw)
-    else:
-        for g in poly.geoms:
-            xs, ys = g.exterior.xy
-            ax.fill(xs, ys, **kw)
+
+def _ring(ring):
+    """One closed ring as (vertices, path codes)."""
+    verts = np.asarray(ring.coords)
+    codes = np.full(len(verts), Path.LINETO, dtype=Path.code_type)
+    codes[0] = Path.MOVETO
+    return verts, codes
+
+
+def _plot_poly(ax, poly, **kw):
+    """Fill a (Multi)Polygon — holes included.
+
+    Filling `exterior.xy` and stopping there, which is what this used to do,
+    paints straight over every hole. It shows up the moment the robot's trail
+    closes a loop: the buffered corridor is a ring, and the whole area the robot
+    drove *around* was flooded with trail colour as if it had driven across it.
+    Every ring goes into one compound path instead, which Agg fills by the
+    even-odd rule, so interiors come out empty.
+    """
+    geoms = poly.geoms if poly.geom_type.startswith("Multi") else [poly]
+    verts, codes = [], []
+    for g in geoms:
+        if g.is_empty:
+            continue
+        for ring in (g.exterior, *g.interiors):
+            v, c = _ring(ring)
+            verts.append(v)
+            codes.append(c)
+    if not verts:
+        return
+    ax.add_patch(PathPatch(Path(np.concatenate(verts), np.concatenate(codes)),
+                           **kw))
+
+
+# An estimate counts as correct only to floating-point noise. Difficulty is a
+# derived quantity (mu*rho x volume x g), so when the estimator recognises the
+# material it reproduces the scenario's value exactly; anything else is a miss,
+# not a near miss. This is the comparison the label has always made.
+_DIFF_MATCH_EPS = 1e-6
 
 
 def _obstacle_label(oid: int, estimates, touched=None) -> str:
-    """Obstacle ID, plus estimated / true difficulty when available."""
+    """Obstacle ID, its estimated difficulty, and how that estimate held up.
+
+    The second line is the estimate, the third is the verdict on it. The robot
+    only learns the truth by physically touching the obstacle, so until then
+    there is no third line at all; afterwards it reads `right` when the guess
+    was correct and `real=<truth>` when it was not — the number is only worth
+    the space when it says something the estimate did not.
+    """
     est = estimates.get(oid) if estimates else None
     true = touched.get(oid) if touched else None
     parts = [str(oid)]
     if est is not None:
         parts.append(f"est={est:g}")
     if true is not None:
-        parts.append(f"true={true:g}")
-        if est is not None and abs(est - true) > 1e-6:
-            parts[-1] = f"T={true:g}"  # highlight mismatch with estimate
+        # touched before ever being estimated: nothing to be right or wrong about
+        if est is not None and abs(est - true) <= _DIFF_MATCH_EPS:
+            parts.append("right")
+        else:
+            parts.append(f"real={true:g}")
     return "\n".join(parts)
+
+
+# Outlined rather than a bare translucent wash: once holes render as holes, the
+# boundary is carrying real information — a thin edge is what makes an enclosed
+# pocket read as unvisited ground rather than as a lighter patch of trail.
+_TRAIL_KW = dict(facecolor="royalblue", edgecolor="royalblue",
+                 alpha=0.28, lw=0.6, zorder=5)
+
+
+def _draw_trail(ax, track, radius: float):
+    """Ground the robot's body has covered: the region swept by its disc.
+
+    One buffered polygon over the whole track, not a stack of per-step circles,
+    so ground crossed five times looks the same as ground crossed once — this
+    answers *where it has been*, not how often. Ground it drove around but never
+    over stays empty, which is the whole point of a loop having a hole.
+    """
+    if not track:
+        return
+    swept = (LineString(track).buffer(radius, cap_style=1) if len(track) >= 2
+             else Point(track[0]).buffer(radius))
+    _plot_poly(ax, swept, **_TRAIL_KW)
 
 
 def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):  # draw flag marker
@@ -121,19 +186,49 @@ _PLOT_BOX = (8.0, 7.0)     # max plot area (width, height), inches
 _MARGIN = 0.5              # left/right + bottom tick-label margin, inches
 _TOP_PAD = 0.12            # whitespace above title, inches
 _TITLE_LINE = 0.24         # height per title line, inches
-_TITLE_LINES = 2           # always reserve height for two title lines
+_TITLE_LINES = 3           # always reserve height for the three-line caption
 _LEGEND_H = 0.5            # bottom legend strip height, inches
 _TITLE_FS = 9              # title font size
 _LEGEND_NCOL = 5
 
 
-def _wrap_title(text: str, width_inch: float) -> str:
+# --- caption ---
+# The summary plot and every animation frame carry the *same* three lines, so a
+# still and a frame read the same way:
+#     1. run configuration — fixed for the whole run
+#     2. where the run is  — one step, or the final verdict
+#     3. what it has cost  — identical fields either way, cumulative in a frame
+# Structural sameness is the point. Line 2 is the one that differs by design, so
+# anything belonging to only one of the two views belongs there.
+def _mode_tag(sim: OnlineNAMO) -> str:
+    cfg = sim.cfg
+    return "[" + " | ".join((
+        cfg.strategy,
+        f"w={cfg.time_importance:g}",
+        "SE2" if cfg.se2_use_planner else "teleport",
+        sim.estimator.mode,
+    )) + "]"
+
+
+def _cost_line(J, walk, work, motion_s, plan_s) -> str:
+    return (f"J {J:,.1f} = λD {walk:,.1f} + W {work:,.1f}"
+            f"  |  move {motion_s:,.1f}s + plan {plan_s:,.1f}s")
+
+
+def _wrap_title(lines, width_inch: float) -> str:
+    """Fit the caption into the reserved block, one output line per input line.
+
+    Long lines are ellipsised rather than reflowed: reflowing line 1 would push
+    the cost line out of the block entirely, and the three lines have distinct
+    jobs that wrapping would blur together.
+    """
     ncols = max(20, int(width_inch / (0.55 * _TITLE_FS / 72.0)))
-    lines = textwrap.wrap(text, width=ncols) or [""]
-    if len(lines) > _TITLE_LINES:
-        lines = lines[:_TITLE_LINES]
-        lines[-1] = lines[-1][:max(1, ncols - 1)] + "…"
-    return "\n".join(lines)
+    out = []
+    for line in list(lines)[:_TITLE_LINES]:
+        if len(line) > ncols:
+            line = line[:max(1, ncols - 1)] + "…"
+        out.append(line)
+    return "\n".join(out)
 
 def _new_canvas(sim: OnlineNAMO):
     minx, miny, maxx, maxy = sim.workspace.bounds
@@ -150,12 +245,12 @@ def _new_canvas(sim: OnlineNAMO):
     return fig, ax
 
 
-def _finish_ax(ax, sim: OnlineNAMO, title: str):
+def _finish_ax(ax, sim: OnlineNAMO, title_lines):
     minx, miny, maxx, maxy = sim.workspace.bounds
     ax.set_aspect("equal")
     ax.set_xlim(minx - 1, maxx + 1)
     ax.set_ylim(miny - 1, maxy + 1)
-    ax.set_title(_wrap_title(title, ax.figure.get_figwidth() - 2 * _MARGIN),
+    ax.set_title(_wrap_title(title_lines, ax.figure.get_figwidth() - 2 * _MARGIN),
                  fontsize=_TITLE_FS)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -178,24 +273,15 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
                                            sim.belief.touched_difficulty),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4)
 
-    # draw robot motion trail corridor:
-    if len(res.robot_track) >= 2:
-        corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
-        _plot_poly(ax, corridor, color="royalblue", alpha=0.3, zorder=5)
-    elif res.robot_track:
-        # if only a single point (robot did not move), draw a circle
-        p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
-        _plot_poly(ax, p, color="royalblue", alpha=0.3, zorder=5)
-    # assemble title info. In maps like maze_doors, moved may have dozens of ids;
-    # listing them all would span many lines, so only report the count when long.
-    manip_mode = "SE2" if sim.cfg.se2_use_planner else "teleport"
-    strategy = sim.cfg.strategy
-    moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
-             else (str(res.removed) if res.removed else "none"))
-    title = (f"[{strategy}] {res.message}  |  J={res.J} "
-             f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
-             f"moved={moved}  |  manip={manip_mode}  |  LLM={res.llm_mode}")
-    _finish_ax(ax, sim, title)
+    _draw_trail(ax, res.robot_track, sim.cfg.robot_radius)
+    # which obstacles moved is already on the map — they are the orange ones,
+    # each drawn beside the dashed outline of where it started
+    _finish_ax(ax, sim, (
+        _mode_tag(sim),
+        f"{res.message}  —  {res.cycles} replan cycles",
+        _cost_line(res.J, res.walk_cost, res.work_cost,
+                   res.motion_time, res.plan_time),
+    ))
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
 
@@ -225,11 +311,8 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
         ax.text(cx, cy, _obstacle_label(oid, estimates, touched),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=z + 1)
 
-    # draw robot motion trail up to this frame (semi-transparent blue corridor)
-    track = frame["track"]
-    if len(track) >= 2:
-        buf = LineString(track).buffer(sim.cfg.robot_radius, cap_style=1)
-        _plot_poly(ax, buf, color="royalblue", alpha=0.25, zorder=5)
+    # trail up to this frame — same treatment as the summary plot
+    _draw_trail(ax, frame["track"], sim.cfg.robot_radius)
 
     # draw all paths given by the planner at this frame (blue lines)
     _draw_plan_paths(ax, frame)
@@ -240,9 +323,14 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     _plot_poly(ax, robot_circle, color="limegreen", alpha=0.85, zorder=7)
     ax.plot(rx, ry, marker="o", color="darkgreen", ms=4, zorder=8, label="robot")
 
-    # title: step N / total | action label | cumulative cost
-    title = f"[{sim.cfg.strategy}] step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
-    _finish_ax(ax, sim, title)
+    # same three lines as the summary; line 3 is cumulative up to this frame
+    _finish_ax(ax, sim, (
+        _mode_tag(sim),
+        f"step {idx}/{total - 1}  —  {frame['label']}",
+        _cost_line(frame["J"], frame.get("walk_cost", 0.0),
+                   frame.get("work_cost", 0.0), frame.get("motion_time", 0.0),
+                   frame.get("plan_time", 0.0)),
+    ))
     return fig
 
 

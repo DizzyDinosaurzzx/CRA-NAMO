@@ -1,5 +1,8 @@
 """The cost function, in one place.
 
+What the robot is billed
+------------------------
+
     J = lambda * D + W          [J]
 
     lambda * D  lambda_distance [N] times every metre the robot drives — both
@@ -19,6 +22,22 @@ case anywhere in the code.
 **Nothing outside this module should multiply by `lambda_distance` or by
 `difficulty`.** If it does, the accounting has leaked back out again, which is
 how it came to be spread over four files in the first place.
+
+What the search optimises
+-------------------------
+
+Not J. J is what the run *costs*; the route is chosen against
+
+    C = (1 - w) * J + w * P * T      w = cfg.time_importance in [0, 1]
+
+so the robot can be told to care about finishing quickly as well as cheaply.
+`P = lambda * v_max` [W] is the exchange rate — see `time_price`. At w = 0 this
+collapses to J exactly and the search is bit-identical to the energy-only model;
+at w = 1 it is a pure minimum-time search.
+
+J and T stay separately measured and separately reported throughout. The blend
+exists only inside the search; execution always settles at true physical cost
+and true simulated duration, whichever route the blend picked.
 """
 
 from __future__ import annotations
@@ -27,11 +46,8 @@ import math
 from dataclasses import dataclass
 
 import geometry
+import timing
 from config import Config
-
-# An `easiest`-strategy surcharge per obstacle, expressed in metres of detour so
-# it tracks the physical cost scale rather than being an arbitrary constant.
-_EASIEST_DETOUR_EQUIV_M = 50.0
 
 
 # --- the two terms ---
@@ -64,6 +80,34 @@ def se2_path_length(obs, poses, cfg: Config) -> float:
     return total
 
 
+# --- energy against time ---
+def time_price(cfg: Config) -> float:
+    """Joules that one second of mission time is worth.
+
+    Not a new hand-tuned constant: it is the power the robot burns while
+    cruising, lambda [N] x v_max [m/s]. Pricing a second at what a second of
+    driving already costs makes the two terms exchangeable without inventing a
+    rate, and it has a tidy consequence — for ordinary driving the blend cancels
+    exactly:
+
+        (1-w) * lambda*d  +  w * (lambda*v) * (d/v)  =  lambda*d
+
+    So `time_importance` leaves plain travel alone and moves only the price of
+    *handling obstacles*, which is the trade-off it exists to control. Energy
+    cares how heavy a thing is; the clock does not, and cares instead that the
+    robot crawls at v_max_contact while it has hold of it.
+    """
+    return cfg.lambda_distance * cfg.v_max
+
+
+def blend(cfg: Config, joules: float, seconds: float) -> float:
+    """C = (1-w)*J + w*P*T — the number the search actually minimises."""
+    w = cfg.time_importance
+    if w <= 0.0:
+        return joules      # exact, so w=0 reproduces the energy-only model bit for bit
+    return (1.0 - w) * joules + w * time_price(cfg) * seconds
+
+
 # --- search strategies ---
 @dataclass(frozen=True)
 class StrategyWeights:
@@ -74,27 +118,49 @@ class StrategyWeights:
     cost regardless of which strategy chose the route.
     """
     work_mult: float
-    work_bias: float
 
 
 def strategy_weights(cfg: Config) -> StrategyWeights:
     if cfg.strategy == "shortest":
         # ignore W entirely, so the search takes the geometrically shortest route
-        return StrategyWeights(work_mult=0.0, work_bias=0.0)
-    if cfg.strategy == "easiest":
-        # heavily penalise touching anything, so detours win where they exist
-        return StrategyWeights(
-            work_mult=1.0,
-            work_bias=_EASIEST_DETOUR_EQUIV_M * cfg.lambda_distance)
-    return StrategyWeights(work_mult=1.0, work_bias=0.0)
+        return StrategyWeights(work_mult=0.0)
+    return StrategyWeights(work_mult=1.0)
 
 
-def removal_cost(cfg: Config, work: float, contact_travel: float) -> float:
+# --- what the search charges ---
+def search_motion_cost(cfg: Config, distance: float) -> float:
+    """Driving `distance` metres, as the *search* prices it.
+
+    Equal to `motion_cost` for every w (see `time_price`), but written as the
+    blend so the cancellation is visible here rather than being an unwritten
+    assumption that breaks silently if the exchange rate ever changes.
+    """
+    return blend(cfg, motion_cost(cfg, distance), timing.drive_seconds(cfg, distance))
+
+
+def search_turn_cost(cfg: Config, dtheta: float) -> float:
+    """Stopping and pivoting through `dtheta` at a corner, as the search prices it.
+
+    Turning burns no *distance*, so it has no place in J at all — this term is
+    pure time and is therefore exactly zero at w = 0, which is why adding it
+    leaves the energy-only model untouched. Without it the search is blind to
+    corners and, once time starts to matter, will happily buy a shorter route
+    with a dozen extra stop-turn-go cycles that cost more seconds than they save.
+    """
+    if cfg.time_importance <= 0.0 or dtheta <= 0.0:
+        return 0.0
+    return blend(cfg, 0.0, timing.turn_seconds(cfg, dtheta))
+
+
+def removal_cost(cfg: Config, work: float, contact_travel: float,
+                 move_dist: float) -> float:
     """What the search charges for clearing one obstacle off an edge.
 
-    `work` is the estimated obstacle friction work; `contact_travel` is how far
-    the robot itself drives to fetch, escort and leave it.
+    `work` is the estimated obstacle friction work, `contact_travel` how far the
+    robot itself drives to fetch, escort and leave it, and `move_dist` the
+    obstacle's own route — the last only sets the clock under `--no-contact`.
     """
-    w = strategy_weights(cfg)
-    return work * w.work_mult + w.work_bias + motion_cost(cfg, contact_travel)
+    joules = (work * strategy_weights(cfg).work_mult
+              + motion_cost(cfg, contact_travel))
+    return blend(cfg, joules, timing.removal_seconds(cfg, contact_travel, move_dist))
 

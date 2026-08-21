@@ -20,6 +20,7 @@ from search import Planner, move_signature
 import cost
 import geometry
 import manipulation
+import timing
 
 # Simulation result summary
 @dataclass
@@ -30,7 +31,11 @@ class RunResult:
     manip_walk_cost: float = 0.0            # part of walk_cost spent escorting obstacles
     work_cost: float = 0.0                  # manipulation cost = Σ(true difficulty × distance moved)
     cycles: int = 0                         # number of replan cycles
-    plan_time: float = 0.0                  # total planning time (seconds)
+    # --- mission time: T = motion_time + plan_time (see timing.py) ---
+    motion_time: float = 0.0                # simulated seconds of robot motion
+    manip_motion_time: float = 0.0          # part of motion_time spent handling obstacles
+    plan_time: float = 0.0                  # measured seconds of decision compute (A* + LLM)
+    mission_time: float = 0.0               # motion_time + plan_time
     first_plan_time: float = 0.0            # first plan time (seconds) — cold-start cost measure
     total_expansions: int = 0               # total A* node expansions (all rounds combined)
     llm_calls: int = 0                      # LLM API call count
@@ -75,6 +80,11 @@ class OnlineNAMO:
         # true robot position. It equals the current roadmap node between actions,
         # but during a manipulation the robot leaves the node to hold the obstacle.
         self.robot_xy: Tuple[float, float] = self.roadmap.nodes[self.start_node]
+        # mission clock. The robot starts already pointing at the goal, so the run
+        # does not open with an arbitrary pivot that depends on the world frame.
+        self.timer = timing.MotionTimer(
+            timing.MotionProfile.from_config(cfg),
+            heading=timing.heading_of(self.start_point, self.goal_point) or 0.0)
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
         # insert start/goal into roadmap; snap to nearest valid node when the robot disc does not fit
@@ -100,7 +110,10 @@ class OnlineNAMO:
 
         for cycle in range(cfg.max_replans):
             t0 = time.time()
-            plan = planner.plan(node, self.goal_node)
+            # hand over where the robot is really pointing: with
+            # step_execute_edges=1 the first edge is the only one that gets
+            # driven, so its pivot is the one the plan should be paying for
+            plan = planner.plan(node, self.goal_node, self.timer.heading)
             dt = time.time() - t0
             res.plan_time += dt
             if cycle == 0:
@@ -109,6 +122,7 @@ class OnlineNAMO:
             if plan is None:
                 res.message = "No feasible plan under current belief."
                 res.cycles = cycle + 1
+                self._settle_time(res)
                 return res
             res.total_expansions += plan.expansions
 
@@ -166,16 +180,21 @@ class OnlineNAMO:
                         contact_pos = (
                             from_pos[0] + (to_pos[0] - from_pos[0]) * t_contact,
                             from_pos[1] + (to_pos[1] - from_pos[1]) * t_contact)
-                        # advance to contact point then retreat to previous node; charge both legs
-                        blocked_dist = 2.0 * t_contact * act["dist"]
-                        self._charge_walk(res, blocked_dist)
+                        # advance to contact point then retreat to previous node.
+                        # Both legs are charged; the return leg is driven in
+                        # reverse, so it costs a stop but not a pivot.
+                        leg = t_contact * act["dist"]
+                        self._charge_walk(res, leg,
+                                          heading=timing.heading_of(from_pos, to_pos))
+                        self._charge_walk(res, leg)
                         # collision is physical contact; the true difficulty of the hit object is revealed
                         self.belief.touch_check(contact_pos, self.world, cfg)
                         self.belief.perceive(self.world, from_pos)
                         self._capture_frame(
                             res, node, f"collision revealed {hit_oids} -> replan")
                         break
-                    self._charge_walk(res, act["dist"])
+                    self._charge_walk(res, act["dist"],
+                                      heading=timing.heading_of(from_pos, to_pos))
                     node = act["v"]
                     self._set_robot(res, self.roadmap.nodes[node])
                     moves_done += 1
@@ -203,13 +222,21 @@ class OnlineNAMO:
         res.walk_cost = round(res.walk_cost, 4)
         res.manip_walk_cost = round(res.manip_walk_cost, 4)
         res.work_cost = round(res.work_cost, 4)
-        res.plan_time = round(res.plan_time, 4)
+        self._settle_time(res)
         res.llm_calls = self.estimator.calls
         if res.success and not res.message:
             res.message = "Reached goal."
         elif not res.success and not res.message:
             res.message = "Ran out of replan cycles."
         return res
+
+    def _settle_time(self, res: RunResult):
+        """Close the mission clock: T = motion (simulated) + decision (measured)."""
+        self.timer.flush()
+        res.motion_time = round(self.timer.total, 4)
+        res.manip_motion_time = round(self.timer.contact_total, 4)
+        res.plan_time = round(res.plan_time, 4)
+        res.mission_time = round(self.timer.total + res.plan_time, 4)
 
     def _world_obstacle(self, oid: int) -> Optional[MovableObstacle]:
         for w in self.world:
@@ -281,14 +308,21 @@ class OnlineNAMO:
         return [int(i) for i in np.linspace(0, len(move_path) - 1, max_frames)]
 
     # --- robot bookkeeping ---
-    def _charge_walk(self, res: RunResult, dist: float, in_contact: bool = False):
-        """Bill λ × dist of robot travel. Manipulation travel is tracked separately
-        for reporting but lands in the same λ·D term of J."""
+    def _charge_walk(self, res: RunResult, dist: float, in_contact: bool = False,
+                     heading: Optional[float] = None):
+        """Bill λ × dist of robot travel, and the seconds it takes.
+
+        Manipulation travel is tracked separately for reporting but lands in the
+        same λ·D term of J. `heading` is the direction the robot drives in, so
+        the timer can charge the pivot it needs to get onto it; pass None when
+        the robot is reversing back over ground it just covered.
+        """
         charge = cost.motion_cost(self.cfg, dist)
         res.walk_cost += charge
         res.J += charge
         if in_contact:
             res.manip_walk_cost += charge
+        self.timer.travel(dist, heading, in_contact)
 
     def _set_robot(self, res: RunResult, p: Tuple[float, float]):
         self.robot_xy = (float(p[0]), float(p[1]))
@@ -305,11 +339,13 @@ class OnlineNAMO:
             hits, t = self.belief.check_robot_collision(a, b, self.world, cfg)
             if hits:
                 stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-                self._charge_walk(res, math.dist(a, stop), in_contact=True)
+                self._charge_walk(res, math.dist(a, stop), in_contact=True,
+                                  heading=timing.heading_of(a, b))
                 self._set_robot(res, stop)
                 self.belief.touch_check(stop, self.world, cfg)
                 return i - 1, hits, stop
-            self._charge_walk(res, math.dist(a, b), in_contact=True)
+            self._charge_walk(res, math.dist(a, b), in_contact=True,
+                              heading=timing.heading_of(a, b))
             self._set_robot(res, b)
         return len(pts) - 1, [], (pts[-1] if pts else self.robot_xy)
 
@@ -317,7 +353,9 @@ class OnlineNAMO:
         """Back out along ground the robot has just covered — no collision check
         needed, it was clear a moment ago and nothing has moved since."""
         for i in range(1, len(pts)):
-            self._charge_walk(res, math.dist(pts[i - 1], pts[i]), in_contact=True)
+            a, b = pts[i - 1], pts[i]
+            self._charge_walk(res, math.dist(a, b), in_contact=True,
+                              heading=timing.heading_of(a, b))
             self._set_robot(res, pts[i])
 
     def _reanchor(self, res: RunResult, node: int) -> Optional[int]:
@@ -329,15 +367,17 @@ class OnlineNAMO:
         blocked = self._known_obstacles_inflated()
         home = self.roadmap.nodes[node]
         if self.roadmap.can_drive(self.robot_xy, home, blocked):
-            self._charge_walk(res, math.dist(self.robot_xy, home), in_contact=True)
+            self._charge_walk(res, math.dist(self.robot_xy, home), in_contact=True,
+                              heading=timing.heading_of(self.robot_xy, home))
             self._set_robot(res, home)
             return None
         target = self.roadmap.nearest_reachable_node(self.robot_xy, blocked)
         if target is None:
             target = self.roadmap.nearest_node(self.robot_xy)
-        self._charge_walk(res, math.dist(self.robot_xy, self.roadmap.nodes[target]),
-                          in_contact=True)
-        self._set_robot(res, self.roadmap.nodes[target])
+        dest = self.roadmap.nodes[target]
+        self._charge_walk(res, math.dist(self.robot_xy, dest), in_contact=True,
+                          heading=timing.heading_of(self.robot_xy, dest))
+        self._set_robot(res, dest)
         return target
 
     def _known_obstacles_inflated(self):
@@ -367,7 +407,12 @@ class OnlineNAMO:
         home = self.robot_xy
 
         cplan = act.get("contact")
-        if not cfg.contact_required or cplan is None or not cplan.feasible:
+        # When the robot escorts the obstacle its own travel already accounts for
+        # the transport time. When it does not, the obstacle still takes time to
+        # cross its SE(2) path and the robot is stood waiting for it, so that has
+        # to be billed explicitly below.
+        escorting = cfg.contact_required and cplan is not None and cplan.feasible
+        if not escorting:
             # contact model disabled: the obstacle moves while the robot waits on
             # its node. Rebuilt around the robot's real position rather than
             # reusing the planned one, which is anchored to the edge midpoint.
@@ -405,6 +450,9 @@ class OnlineNAMO:
             self._capture_frame(
                 res, node, f"robot hit {sorted(hits)} approaching {oid} -> replan")
             return (False, None, 0.0, None)
+        # latching on now and letting go later, billed once here so every exit
+        # path below pays for it
+        self.timer.grip()
         self._capture_frame(res, node, f"grip obstacle {oid}", move_oid=oid)
 
         # --- move the obstacle ---
@@ -433,7 +481,8 @@ class OnlineNAMO:
                     self.belief.relocate(obs, *move_path[last_i])
                     self.belief.record_move_direction(oid, start_xy, move_path[last_i])
                 stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-                self._charge_walk(res, math.dist(a, stop), in_contact=True)
+                self._charge_walk(res, math.dist(a, stop), in_contact=True,
+                                  heading=timing.heading_of(a, b))
                 self._set_robot(res, stop)
                 self.belief.touch_check(stop, self.world, cfg)
                 self.belief.perceive(self.world, self.robot_xy)
@@ -445,8 +494,13 @@ class OnlineNAMO:
                         cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
                         new_node)
             self._relocate_world(oid, wx, wy, wth)
-            self._charge_walk(res, math.dist(a, b), in_contact=True)
+            self._charge_walk(res, math.dist(a, b), in_contact=True,
+                              heading=timing.heading_of(a, b))
             self._set_robot(res, b)
+            if not escorting:
+                # robot waits on its node while the obstacle covers this sub-step
+                self.timer.transport(
+                    cost.se2_path_length(obs, move_path[i - 1:i + 1], cfg))
             last_i = i
             if i in frame_at:
                 self._capture_frame(res, node, f"move {oid} step {i}/{n - 1}",
@@ -525,7 +579,14 @@ class OnlineNAMO:
                 if oid in perceived
             },
             "touched_difficulty": dict(self.belief.touched_difficulty),
+            # running totals, so a frame's caption can carry the same figures
+            # the final summary does rather than a reduced version of them
             "J": round(res.J, 4),
+            "walk_cost": round(res.walk_cost, 4),
+            "work_cost": round(res.work_cost, 4),
+            "motion_time": round(self.timer.elapsed, 4),
+            "plan_time": round(res.plan_time, 4),
+            "cycles": res.cycles,
             "label": label,
         })
 
