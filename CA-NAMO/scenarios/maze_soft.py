@@ -1,9 +1,12 @@
+"""软障碍迷宫场景：迷宫路径被低难度泡沫垫类障碍阻挡，考验推挪。"""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
+    """构建软障碍迷宫场景。"""
     workspace = box(0, 0, 30, 30)
 
     t = 0.45

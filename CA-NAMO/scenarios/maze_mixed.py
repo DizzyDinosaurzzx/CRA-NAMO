@@ -1,9 +1,12 @@
+"""混合迷宫场景：软硬障碍混杂，考验逐个障碍搬走或绕行的取舍。"""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
+    """构建混合迷宫场景。"""
     workspace = box(0, 0, 30, 30)
 
     t = 0.45

@@ -1,9 +1,12 @@
+"""双门隐藏障碍场景：门后障碍需感知发现后重新决策。"""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
+    """构建双门隐藏障碍场景。"""
     workspace = box(0, 0, 28, 40)
     walls = [
         StaticObstacle(box(0.0, 19.5, 3.0, 20.5), "wall_left"),

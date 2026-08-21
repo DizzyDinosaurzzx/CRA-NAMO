@@ -1,9 +1,12 @@
+"""双门回溯场景：诱饵后藏超重障碍，逼出折返搬另一门障碍的回溯。"""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
+    """构建双门回溯场景。"""
     workspace = box(0, 0, 28, 40)
     walls = [
         StaticObstacle(box(0.0, 19.5, 3.0, 20.5), "wall_left"),
@@ -34,11 +37,8 @@ def create():
             difficulty=352.277,
             oid=2,
         ),
-        # The trap behind the decoy. It has to be heavy enough that, once revealed,
-        # walking ~20 m back to the near door and shifting the steel shelf (oid 1)
-        # beats shoving it aside — oid 3 only needs ~0.7 m to clear the doorway, so
-        # a merely "heavy" material loses that comparison and the backtrack never
-        # happens (industrial_machine 29 kN and steel_safe 33 kN both fail here).
+        # 诱饵后方的陷阱：须重到让"折返约 20 m 搬开近门钢架"优于硬推——
+        # oid 3 只需挪约 0.7 m 即可让开门洞，普通重物（29 kN / 33 kN）会输掉该比较而不触发回溯。
         MovableObstacle(
             x=23.0,
             y=18.8,

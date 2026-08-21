@@ -1,3 +1,5 @@
+"""复杂迷宫带门场景：更多门板与斜置障碍，考验门板选择与推挪规划。"""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
@@ -12,6 +14,8 @@ DOOR_CLEARANCE = 0.2
 def _door_blocker(label: str, x: float, y: float, l: float, d: float,
                   material: str = DEFAULT_DOOR_MATERIAL,
                   difficulty: float | None = None) -> MovableObstacle:
+    """生成封堵门洞的门板障碍，oid 从 DOOR_OID_BASE 起按编号分配。"""
+    # 长边留出 DOOR_CLEARANCE 间隙，避免门板完全封死门洞
     if l > d:
         l -= DOOR_CLEARANCE
     else:
@@ -32,6 +36,7 @@ def _door_blocker(label: str, x: float, y: float, l: float, d: float,
     )
 
 def create():
+    """构建复杂迷宫带门场景。"""
     workspace = box(0, 0, 30, 30)
     t = 0.45
 

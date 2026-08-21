@@ -1,36 +1,4 @@
-"""How long the mission actually takes, in one place.
-
-    T = T_motion + T_decision
-
-    T_motion    simulated wall-clock of the robot physically driving the route
-                it ended up taking — accumulated here from the same travel
-                events that `cost.py` bills, so distance and duration can never
-                disagree about what the robot did.
-    T_decision  real measured wall-clock spent planning (A* + LLM calls). It is
-                timed in `executor.py`, not modelled here.
-
-Motion model
-------------
-The robot is a differential-drive disc: it **turns in place, then drives
-straight**. So a polyline route costs
-
-    sum over straight runs   trapezoid(run length, v_max, a_max)
-  + sum over corners         trapezoid(|turn|,     w_max, alpha_max)
-
-Consecutive collinear segments are merged into one straight run before the
-profile is applied — otherwise the roadmap's 0.3 m grid spacing would make the
-robot brake to a stop thirty times per straight corridor and the number would be
-meaningless.  `trapezoid` is the standard accelerate–cruise–decelerate profile,
-degrading to a triangular one when the run is too short to ever reach v_max.
-
-Escorting an obstacle uses a second, slower set of limits (`*_contact`): the
-robot is pressed against a load it has to keep from slipping, so it drives and
-turns more gently than it does in free space.
-
-**Nothing outside this module should divide a distance by a speed.**  Same rule
-as `cost.py` and for the same reason — the moment two places own the conversion
-they drift apart.
-"""
+"""任务耗时模型唯一所在地：T = T_motion + T_decision；模块外不得自行用距离除以速度。"""
 
 from __future__ import annotations
 
@@ -42,94 +10,66 @@ from config import Config
 
 XY = Tuple[float, float]
 
-# Below this a "segment" is numerical noise from the contact planner (the grip
-# point barely slides while the obstacle rotates), not a drive the robot makes.
+# 小于此值视为接触规划器的数值噪声（障碍物旋转时抓取点几乎没动），而非真实行驶
 _MIN_SEGMENT_M = 1e-9
-# Heading change under this is the same straight line continuing, so the run is
-# not broken and no turn is billed.
+# 朝向变化小于此值视为同一直线的延续，不截断直线段、不计转向
 _MIN_TURN_RAD = 1e-6
 
 
 def trapezoid_time(distance: float, v_max: float, a_max: float) -> float:
-    """Seconds to cover `distance` from rest to rest under |v| <= v_max, |a| <= a_max.
-
-    Works for angles too — feed radians, rad/s and rad/s^2.
-    """
+    """从静止到静止走完 distance 的秒数（|v|<=v_max、|a|<=a_max）；代入弧度同样适用于转向。"""
     if distance <= 0.0:
         return 0.0
-    # distance consumed by accelerating to v_max and back down again
+    # 加速到 v_max 再减速回零所消耗的距离
     ramp = v_max * v_max / a_max
     if distance >= ramp:
-        return distance / v_max + v_max / a_max      # accelerate, cruise, decelerate
-    return 2.0 * math.sqrt(distance / a_max)         # triangular: never reaches v_max
+        return distance / v_max + v_max / a_max      # 加速-巡航-减速
+    return 2.0 * math.sqrt(distance / a_max)         # 三角形：始终达不到 v_max
 
 
 def _wrap_pi(angle: float) -> float:
-    """Shortest signed turn, modulo 2*pi.
-
-    Not `geometry.wrap_dtheta`, which is modulo *pi* because a rectangle's
-    footprint repeats every half turn. A heading does not: driving north and
-    driving south are not the same manoeuvre.
-    """
+    """模 2*pi 的最短带符号转角；勿用 geometry.wrap_dtheta（那是模 pi 的，而朝向半圈并不重合）。"""
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def heading_of(a: XY, b: XY) -> Optional[float]:
-    """Direction of travel from a to b, or None when they coincide."""
+    """a 到 b 的行进方向；两点重合时返回 None。"""
     dx, dy = b[0] - a[0], b[1] - a[1]
     if math.hypot(dx, dy) <= _MIN_SEGMENT_M:
         return None
     return math.atan2(dy, dx)
 
 
-# --- planner-side estimates ---
-# The executor above measures what the robot *did*, turn by turn.  The search
-# needs a price before the fact, for an edge it may never take, and it does not
-# know which way the robot will be facing when it arrives — heading depends on
-# the route, so pricing turns would mean searching over (node, heading) instead
-# of node.  So these estimate at cruise speed with no ramps and no pivots.
-#
-# That makes them a *lower bound* on the executor's number, which is what keeps
-# the A* heuristic admissible.  It is the same bargain the codebase already
-# makes with obstacle difficulty: plan against an estimate, settle against the
-# truth.  The reported mission time always comes from the executor.
+# --- 规划侧估计 ---
+# 搜索须在事前给一条未必会走的边估价，且不知道到达朝向（按朝向计价就得搜 (节点, 朝向) 而非节点），
+# 故按巡航速度、无加减速、无转向估计——结果构成执行器数值的下界，保证 A* 启发式可采纳；
+# 上报的任务时间始终取自执行器。
 def drive_seconds(cfg: Config, distance: float) -> float:
-    """Estimated seconds to drive `distance` metres in free space."""
+    """自由空间行驶 distance 米的估计秒数。"""
     return distance / cfg.v_max
 
 
 def turn_seconds(cfg: Config, dtheta: float) -> float:
-    """Seconds to pivot through `dtheta` radians in free space.
-
-    Unlike the two estimates around it this one is exact — the executor bills a
-    corner with the same profile. It is separate from `drive_seconds` because
-    the search only knows a corner is coming when it looks at two consecutive
-    edges, which happens in the expansion loop rather than in the edge cost.
-    """
+    """自由空间原地转 dtheta 弧度的秒数；此估计是精确的（执行器同式计费），单独存在只因搜索到扩张循环才看得到拐角。"""
     return trapezoid_time(abs(dtheta), cfg.w_max, cfg.alpha_max)
 
 
 def turn_between(h_in: Optional[float], h_out: Optional[float]) -> float:
-    """Size of the pivot from heading `h_in` to `h_out`, or 0 if either is unknown."""
+    """从朝向 h_in 转到 h_out 的转角大小；任一朝向未知则为 0。"""
     if h_in is None or h_out is None:
         return 0.0
     return abs(_wrap_pi(h_out - h_in))
 
 
 def removal_seconds(cfg: Config, contact_travel: float, move_dist: float) -> float:
-    """Estimated seconds to clear one obstacle out of an edge.
-
-    `contact_travel` is how far the robot walks to fetch, escort and leave it;
-    `move_dist` is the obstacle's own SE(2) route, which only sets the clock in
-    the `--no-contact` model where the robot does not walk with it.
-    """
+    """估计搬走一个障碍物所需秒数；move_dist 仅在 --no-contact 模型（机器人不随行）下计时。"""
     handling = (contact_travel if cfg.contact_required else move_dist)
     return handling / cfg.v_max_contact + 2.0 * cfg.grip_time
 
 
 @dataclass(frozen=True)
 class MotionProfile:
-    """Velocity and acceleration limits, in free space and while in contact."""
+    """自由空间与接触状态下的速度、加速度限制。"""
     v_max: float
     a_max: float
     w_max: float
@@ -157,47 +97,29 @@ class MotionProfile:
 
 
 class MotionTimer:
-    """Accumulates simulated seconds as the executor drives the robot.
-
-    Call `travel` once per segment the robot actually covers, in order.  Collinear
-    same-mode segments merge into one straight run, which is only converted to
-    time when the run ends — so `total` and `contact_total` are exact only after
-    `flush`.  `run()` flushes for you.
-    """
+    """随执行器实际行驶逐段累计仿真秒数；共线同模式段合并为一次直线运行，结束才折算时间，flush 前总计值不完整。"""
 
     def __init__(self, profile: MotionProfile, heading: float = 0.0):
         self.profile = profile
         self.heading = heading
-        self.total = 0.0            # all simulated robot motion [s]
-        self.contact_total = 0.0    # the part of it spent holding an obstacle [s]
-        # open straight run, not yet converted to time
+        self.total = 0.0            # 机器人全部仿真运动时间 [s]
+        self.contact_total = 0.0    # 其中抓着障碍物的部分 [s]
+        # 尚未折算成时间的未闭合直线段
         self._run_dist = 0.0
         self._run_contact = False
 
     @property
     def elapsed(self) -> float:
-        """Seconds so far, counting the still-open straight run.
-
-        Read-only on purpose: calling `flush` to get an up-to-date figure would
-        close the run, and the next collinear segment would then start a fresh
-        one — turning one straight line into two and inflating the total. Use
-        this for progress readouts, `flush` only when the motion really ends.
-        """
+        """含未闭合直线段的已耗时秒数；刻意只读：此处 flush 会截断直线段、使同一直线计两次。"""
         if self._run_dist <= 0.0:
             return self.total
         v_max, a_max, _w, _alpha = self.profile.limits(self._run_contact)
         return self.total + trapezoid_time(self._run_dist, v_max, a_max)
 
-    # --- accumulation ---
+    # --- 累计 ---
     def travel(self, distance: float, heading: Optional[float] = None,
                in_contact: bool = False) -> None:
-        """Drive `distance` metres facing `heading`.
-
-        `heading=None` means "do not bill a turn" — the robot is reversing back
-        over ground it just covered, which a differential drive does without
-        turning around.  The straight run is still broken, because it does have
-        to stop before reversing.
-        """
+        """沿朝向 heading 行驶 distance 米；heading=None 表示倒退不计转向（差速底盘倒车无需掉头，但倒车前仍须停车截断直线段）。"""
         if distance <= _MIN_SEGMENT_M:
             return
         if heading is None:
@@ -210,7 +132,7 @@ class MotionTimer:
         self._run_contact = in_contact
 
     def turn_to(self, heading: float, in_contact: bool = False) -> None:
-        """Pivot in place to face `heading`."""
+        """原地转向至指定朝向。"""
         self.flush()
         dtheta = abs(_wrap_pi(heading - self.heading))
         _v, _a, w_max, alpha_max = self.profile.limits(in_contact)
@@ -218,28 +140,22 @@ class MotionTimer:
         self.heading = heading
 
     def hold(self, seconds: float, in_contact: bool = True) -> None:
-        """Time the robot spends stationary but occupied — gripping, releasing,
-        or standing by while an obstacle it is not escorting moves."""
+        """机器人原地不动但被占用的时间——抓取、松开或等待非随行移动的障碍物。"""
         if seconds <= 0.0:
             return
         self.flush()
         self._add(seconds, in_contact)
 
     def transport(self, distance: float) -> None:
-        """Time for an obstacle to cover `distance` of its own path while the
-        robot stands by instead of escorting it (the `--no-contact` model).
-
-        Charged at the contact cruise speed with no ramps, because this is one
-        sub-step of a continuous motion rather than a move from rest to rest.
-        """
+        """--no-contact 模型下机器人原地等待障碍物自行走 distance 米的时间；按接触巡航速且无加减速，因这只是连续运动的一个子步。"""
         self.hold(distance / self.profile.v_max_contact)
 
     def grip(self) -> None:
-        """Latching onto an obstacle and letting go of it again, once each."""
+        """抓上并松开障碍物各一次的耗时。"""
         self.hold(2.0 * self.profile.grip_time)
 
     def flush(self) -> None:
-        """Close the open straight run and convert it to time."""
+        """闭合当前直线段并折算成时间。"""
         if self._run_dist <= 0.0:
             self._run_dist = 0.0
             return

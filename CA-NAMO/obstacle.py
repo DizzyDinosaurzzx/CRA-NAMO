@@ -1,4 +1,4 @@
-"""Obstacle data structures"""
+"""障碍物数据结构定义。"""
 
 from __future__ import annotations
 import math
@@ -9,13 +9,7 @@ from shapely.geometry import Polygon
 import geometry
 
 def _rect_polygon(x: float, y: float, l: float, d: float, theta: float) -> Polygon:
-    """Shapely view of the same rectangle `geometry.rect_corners` returns.
-
-    One implementation of "rectangle at a pose", two representations of it —
-    numpy corners for the grid planner, a shapely polygon for everything that
-    does set operations. They used to be two separate implementations that had to
-    be kept in agreement by hand.
-    """
+    """由 geometry.rect_corners 生成矩形角点，再包装成 shapely 多边形；一处实现两种表示。"""
     return Polygon(geometry.rect_corners(x, y, l, d, theta))
 
 @dataclass
@@ -29,14 +23,14 @@ class MovableObstacle:
     y: float
     l: float
     d: float
-    h: float = 1.0                 # height, used for volume and occlusion reasoning
+    h: float = 1.0                 # 高度，用于体积与遮挡推理
     theta: float = 0.0
-    material: str = "unknown"      # semantic label for LLM reasoning
-    difficulty: float = 1.0        # true sliding resistance f = mu*rho*V*g [N]; W = difficulty * distance moved [J]
+    material: str = "unknown"      # 材质语义标签，供 LLM 推理
+    difficulty: float = 1.0        # 真实滑动阻力 f = mu*rho*V*g [N]；做功 W = difficulty * 移动距离 [J]
     oid: int = -1
 
-    # runtime flags
-    removed: bool = False          # has been physically moved out of the way
+    # 运行时状态
+    removed: bool = False          # 是否已被实际挪开
 
     def __post_init__(self):
         if self.difficulty < 0:
@@ -58,7 +52,7 @@ class MovableObstacle:
         return (self.x, self.y)
 
     def perceived_copy(self) -> "MovableObstacle":
-        """Return a copy for Belief tracking, with difficulty set to NaN"""
+        """返回用于信念追踪的副本，difficulty 置为 NaN。"""
         return MovableObstacle(
             x=self.x, y=self.y, l=self.l, d=self.d, h=self.h, theta=self.theta,
             material=self.material, difficulty=math.nan, oid=self.oid,
@@ -68,9 +62,9 @@ class MovableObstacle:
         return _rect_polygon(x, y, self.l, self.d,
                              self.theta if theta is None else theta)
 
-    # --- observation ---
+    # --- 观测 ---
     def observation(self) -> dict:
-        """Information revealed upon perception"""
+        """感知时对外暴露的障碍物信息。"""
         return {
             "oid": self.oid,
             "x": round(self.x, 2), "y": round(self.y, 2),

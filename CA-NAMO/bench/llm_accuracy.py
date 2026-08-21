@@ -1,46 +1,8 @@
-"""Benchmark the LLM mu*rho estimator, and price its error in navigation cost.
-
-Three stages, run independently or with `all`:
-
-  accuracy   Ask the live model for mu*rho on every item in `llm_dataset`,
-             several times each, and compare against the reference values.
-             Also records the no-LLM heuristic (`material_mu_rho`) on the same
-             items, so every accuracy number has a floor to beat.
-
-  size       mu*rho is defined size-independent, but the prompt states the
-             object's dimensions. Re-asks a subset at 0.5x / 1x / 2x linear
-             scale; any movement is prompt leakage, not physics.
-
-  nav        Runs whole scenarios with the estimator's output swapped out, and
-             measures what the planner actually pays. Arms:
-               oracle     perfect mu*rho              (the floor on cost)
-               llm        stage-1 medians             (what you would ship)
-               heuristic  `material_mu_rho` fallback  (what you get with no key)
-               x<f>       every estimate multiplied by f  (sensitivity curve)
-               noise<s>   per-obstacle lognormal error at the measured spread
-             Maps are relabelled with paraphrases of their own anchors, so the
-             ground-truth physics is untouched and the arms differ *only* in
-             what the estimator believes.
-
-  report     Turns the saved JSON into report.md plus two charts. No API calls.
-
-Why the arms are comparable: the true `difficulty` is recomputed from the same
-reference mu*rho in every arm, and work is always charged at the true value
-(`planner.py` uses `_world_obstacle(oid).difficulty`). A bad estimate therefore
-cannot make the bill *look* cheaper — it can only cause the planner to choose
-worse, which is exactly the effect we want to isolate.
-
-Usage
------
-    python3 LLM_test.py all                 # ~15 min, ~200 API calls
-    python3 LLM_test.py accuracy --repeats 3
-    python3 LLM_test.py nav --maps two_doors,hidden_obstacle
-    python3 LLM_test.py report              # offline, re-renders from JSON
-"""
+"""评测 LLM mu*rho 估计器并把误差折算成导航代价：accuracy / size / ablate / order / nav / lambda / report 七个阶段。"""
 
 from __future__ import annotations
 
-# Run from anywhere: the library lives one directory up.
+# 任意目录均可运行：库位于上一级目录。
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
@@ -79,21 +41,18 @@ from executor import OnlineNAMO
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_test_out")
 
-# Maps used by the nav stage. Every one offers the planner a real choice between
-# pushing and detouring — on a map with only one route the estimate cannot
-# change anything and the comparison is vacuous.
+# nav 阶段使用的地图：每张都给规划器推/绕的真实抉择；
+# 只有一条路的地图上估计误差无从体现，对比无意义。
 DEFAULT_MAPS = ("two_doors", "hidden_obstacle", "maze_mixed", "corridor")
 
-# Sensitivity sweep: uniform multiplicative error applied to every estimate.
-# Spread wide on purpose — the response is expected to be flat then step, and a
-# narrow sweep would miss where the step is.
+# 敏感性扫描：对所有估计值乘同一倍数；响应预期先平后跳变，
+# 故意扫宽以免错过跳变位置。
 SWEEP_FACTORS = (0.05, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 20.0)
 NOISE_SEEDS = (0, 1, 2, 3, 4)
 
 SIZE_SCALES = (0.5, 1.0, 2.0)
 
-# Palette: dataviz categorical slots 1/2/3/7, validated all-pairs on the light
-# surface (worst CVD dE 9.2, worst normal-vision dE 16.3).
+# 配色：dataviz 分类色 1/2/3/7，浅色底上已通过全对校验。
 GROUP_STYLE = {
     "paraphrase": ("#2a78d6", "o"),
     "novel":      ("#eb6834", "s"),
@@ -104,8 +63,7 @@ INK, MUTED, GRID = "#0b0b0b", "#898781", "#e1e0d9"
 
 
 def log(msg: str) -> None:
-    """Heartbeat. Every long stage prints through here so a stalled run is
-    visible in the output file rather than looking like a hang."""
+    """心跳日志：长阶段都经此打印，卡住的运行能从输出文件里看出来。"""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
@@ -127,7 +85,7 @@ def _load(name: str):
 
 
 # --------------------------------------------------------------------------- #
-# Stage 1 - estimator accuracy
+# 阶段 1 —— 估计器准确率
 # --------------------------------------------------------------------------- #
 
 def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
@@ -165,8 +123,7 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
             **{k: v for k, v in asdict(item).items()},
             "mu_rho_true": item.mu_rho,
             "preds": by_label[item.label],
-            # median over repeats is what the nav stage ships: one number per
-            # material, robust to a single malformed reply
+            # 取重复次数的中位数供 nav 阶段使用：单一坏回复不至于带偏
             "pred": statistics.median(preds) if preds else None,
             "n_ok": len(preds),
             "heuristic": material_mu_rho(item.label),
@@ -178,15 +135,11 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 2 - size independence
+# 阶段 2 —— 尺寸无关性
 # --------------------------------------------------------------------------- #
 
 def stage_size(cfg: Config, workers: int) -> dict:
-    """The prompt hands the model l x d x h and then forbids it from mattering.
-
-    Anything that moves with scale is the model reading size as a mass cue,
-    which double-counts volume: the caller multiplies by volume again.
-    """
+    """prompt 给出 l×d×h 却又声明尺寸无关；随 scale 变化的结果是模型把尺寸当质量线索，而体积调用方还会再乘一次。"""
     est = DifficultyEstimator(cfg)
     subset = [it for it in DATASET
               if it.label in {
@@ -223,18 +176,15 @@ def stage_size(cfg: Config, workers: int) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 2b - request-setting ablation
+# 阶段 2b —— 请求参数消融
 # --------------------------------------------------------------------------- #
 
-# `_deepseek` hardcodes its request settings, so a bad number could be the
-# model's judgement or just the way it is being asked. These variants separate
-# the two. The first row is exactly what `llm_difficulty.py` ships today.
+# `_deepseek` 写死了请求参数，坏数值可能出自模型判断、也可能只是问法问题；
+# 以下变体区分二者。第一行即 `llm_difficulty.py` 当前线上配置。
 ABLATIONS = (
     ("shipped: v4-flash, no thinking, 32 tok", "deepseek-v4-flash", "disabled", 32),
-    # 32k, not 4k: reasoning runs to several thousand tokens on this prompt and
-    # the harder objects think the longest. A budget that truncates them drops
-    # exactly the items the model finds difficult, and the survivors would score
-    # far better than the setting deserves.
+    # 32k 而非 4k：推理在此 prompt 上会跑几千 token，越难的对象想得越久；
+    # 截断恰好丢掉最难的条目，幸存者的分数会虚高。
     ("v4-flash, thinking on, 32k tok",         "deepseek-v4-flash", "enabled", 32000),
     ("deepseek-chat, no thinking, 32 tok",     "deepseek-chat",     "disabled", 32),
 )
@@ -242,17 +192,7 @@ ABLATIONS = (
 
 def _ask_raw(cfg: Config, model: str, thinking: str, max_tokens: int,
              prompt: str) -> tuple:
-    """One call with explicit request settings, mirroring `_deepseek`'s parsing.
-
-    Returns `(value, finish_reason)`. The reason is kept because an unparsed
-    reply is ambiguous on its own: `length` means the token budget was too small
-    and the item should not be scored, while `stop` with no number is a genuine
-    refusal to answer.
-
-    Takes the *last* number in the reply rather than the first: a reasoning
-    model's visible answer may be preceded by a restatement, and the final
-    number is the one it is committing to.
-    """
+    """按显式请求参数发一次调用，解析方式与 `_deepseek` 一致；返回 (值, finish_reason)——length 表示被 token 预算截断、不应计分，stop 却无数字才是拒答。取回复中最后一个数字：推理模型最终认定的答案在末尾。"""
     import re
     import requests
     body = {"model": model, "messages": [{"role": "user", "content": prompt}],
@@ -309,20 +249,14 @@ def stage_ablate(cfg: Config, workers: int) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 2c - is the collapse target the table's last row, or its largest value?
+# 阶段 2c —— 塌缩目标是表格最后一行还是最大值？
 # --------------------------------------------------------------------------- #
 
 _ANCHOR_LINE = re.compile(r"^\s{2}(\S+)\s+mu=\S+\s+rho=\S+\s+mu\*rho=(\S+)\s*$")
 
 
 def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
-    """Rewrite only the anchor table's row order, leaving the prompt otherwise
-    byte-identical to what production sends.
-
-    The shipped table is sorted ascending, which puts `concrete_block` (1440) on
-    both the last line *and* the largest value — the two candidate explanations
-    for the collapse are perfectly confounded. Reordering separates them.
-    """
+    """只重排锚点表的行序，prompt 其余字节与线上完全一致；原表升序使 1440 既是最后一行又是最大值，重排可把两个解释分开。"""
     lines = prompt.split("\n")
     idx = [i for i, ln in enumerate(lines) if _ANCHOR_LINE.match(ln)]
     if not idx:
@@ -346,8 +280,7 @@ def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
 
 def stage_order(cfg: Config, workers: int) -> dict:
     est = DifficultyEstimator(cfg)
-    # Only the off-table objects: the paraphrase items have an anchor as their
-    # correct answer, so they cannot show whether a hit is copying or reasoning.
+    # 只用表外物体：paraphrase 条目的正确答案本身就是锚点，无法区分抄袭与推理。
     items = [it for it in DATASET if it.group != "paraphrase"]
     orders = [("ascending", 0), ("descending", 0), ("shuffled", 1), ("shuffled", 2)]
 
@@ -403,16 +336,11 @@ def stage_order(cfg: Config, workers: int) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 3 - navigation impact
+# 阶段 3 —— 对导航的影响
 # --------------------------------------------------------------------------- #
 
 def _resolve_anchor(material: str) -> str:
-    """Map a scenario's material label onto a PROMPT_ANCHORS entry.
-
-    Scenario authors write labels by hand, so a stray plural has to be tolerated
-    — but silently guessing would corrupt the ground truth, so anything else is
-    an error rather than a fallback.
-    """
+    """把场景手写的材质标签映射到 PROMPT_ANCHORS 条目；容许多余的复数，其余直接报错——静默猜测会污染真值。"""
     for candidate in (material, str(material).rstrip("sS")):
         anchor = _canonical_anchor(candidate)
         if anchor is not None:
@@ -423,13 +351,7 @@ def _resolve_anchor(material: str) -> str:
 
 
 def _relabel_map(scenario: dict) -> Dict[str, float]:
-    """Rewrite every obstacle's material as a paraphrase of its own anchor.
-
-    The obstacle keeps its geometry and its true difficulty (recomputed from the
-    same anchor mu*rho it already used), so the world is physically identical.
-    Only the string the estimator sees changes — which is precisely the variable
-    under test.
-    """
+    """把每个障碍物的材质改写为其锚点的改述；几何与真实难度不变，只有估计器看到的字符串在变——这正是被测变量。"""
     ground_truth: Dict[str, float] = {}
     for w in scenario["movable"]:
         anchor = _resolve_anchor(w.material)
@@ -444,8 +366,8 @@ def _relabel_map(scenario: dict) -> Dict[str, float]:
 def _run_map(map_name: str, arm: str,
              mu_rho_by_label: Optional[Dict[str, float]],
              lambda_distance: Optional[float] = None) -> dict:
-    """One scenario, one belief about mu*rho. `None` means the no-LLM heuristic."""
-    scenario = scenarios.load(map_name)          # fresh objects every call
+    """跑一张图、一种 mu*rho 信念；mapping 为 None 表示无 LLM 的启发式。"""
+    scenario = scenarios.load(map_name)          # 每次调用都加载全新对象
     cfg: Config = scenario["cfg"]
     cfg.save_frames = False
     cfg.verbose = False
@@ -455,8 +377,7 @@ def _run_map(map_name: str, arm: str,
 
     sim = OnlineNAMO(scenario["workspace"], scenario["static"], scenario["movable"],
                      scenario["start"], scenario["goal"], cfg)
-    # Cut the network out: every arm is served from a pre-seeded cache, so runs
-    # are deterministic and repeatable without burning calls.
+    # 断网：各 arm 均由预置缓存供数，运行确定可复现且不烧 API 调用。
     sim.estimator.api_key = ""
     sim.estimator.mode = arm
     if mu_rho_by_label is not None:
@@ -469,7 +390,7 @@ def _run_map(map_name: str, arm: str,
     res = sim.run()
     wall = time.time() - t0
 
-    # What the planner believed, per obstacle, for the record.
+    # 存档：规划器对各障碍物的信念。
     beliefs = {str(oid): round(v, 4) for oid, v in sim.estimator.mu_rho_cache.items()}
     return {
         "map": map_name, "arm": arm, "success": res.success, "J": res.J,
@@ -482,14 +403,7 @@ def _run_map(map_name: str, arm: str,
 
 
 def _preds_and_sigma(rows: Optional[List[dict]]):
-    """Predictions keyed the way `_relabel_map` keys ground truth, plus the
-    spread of that estimator's log10 error over the whole dataset.
-
-    Only the paraphrase rows can be used as an arm — those are the labels the
-    relabelled maps carry — but sigma is taken over every item, because it
-    stands for the error the estimator would show on arbitrary real-world
-    labels, which is the deployment case.
-    """
+    """按 `_relabel_map` 的真值键返回预测，及该估计器在全数据集上的 log10 误差散布；只有 paraphrase 行能当 arm（地图标签即它们），sigma 却取全体条目——那才是部署时面对任意标签的误差。"""
     if not rows:
         return {}, 0.0
     pred = {_normalise(r["label"]): r["pred"] for r in rows
@@ -503,9 +417,7 @@ def _llm_and_sigma(accuracy: Optional[dict]):
 
 
 def _thinking_rows(ablate: Optional[dict]) -> Optional[List[dict]]:
-    """The reasoning-mode variant, but only if it answered essentially
-    everything — a truncated variant has dropped its hardest items and would
-    make reasoning mode look better than it is."""
+    """取推理模式的变体，但仅当它几乎答全——被截断的变体丢了最难条目，会让推理模式显得虚好。"""
     if not ablate:
         return None
     for v in ablate["variants"]:
@@ -514,23 +426,15 @@ def _thinking_rows(ablate: Optional[dict]) -> Optional[List[dict]]:
     return None
 
 
-# Extra estimators to run alongside the current one, as (arm name, results file).
-# The no-reasoning file is the estimator this project shipped before 2026-08-10;
-# keeping it as an arm means the before/after comparison lives in a single
-# nav.json and can be re-derived without re-running the old configuration.
+# 与当前估计器并列运行的额外估计器，(arm 名, 结果文件)。
+# no-think 文件是 2026-08-10 之前的线上版本；留作 arm 使前后对比
+# 并入同一 nav.json，无需重跑旧配置即可复现。
 COMPARISON_ESTIMATORS = (("llm_nothink", "accuracy_nothink_backup.json"),)
 
 
 def stage_lambda(maps: List[str], lambdas: List[float],
                  accuracy: Optional[dict]) -> dict:
-    """Where the cost of a bad estimate turns on.
-
-    lambda_distance is the price of a metre of driving, so it sets the exchange
-    rate between detouring and pushing. Estimation error is only expensive when
-    obstacles sit near that break-even; the shipped lambda may or may not put
-    them there, and that is a property of the tuning, not of the model. This
-    sweep locates the regime instead of assuming it.
-    """
+    """定位坏估计开始付代价的区间：lambda_distance 是每米驾驶的价格，决定绕行/推开的换算率；误差只在障碍物靠近盈亏平衡点时才贵，本扫描实测该区间而非假设。"""
     llm_pred, sigma = _llm_and_sigma(accuracy)
     runs = []
     for map_name in maps:
@@ -565,9 +469,8 @@ def stage_nav(maps: List[str], accuracy: Optional[dict]) -> dict:
     else:
         log("nav: no accuracy.json - skipping the 'llm' arm, sweep only")
 
-    # Every estimator gets both a point arm (its actual predictions) and a noise
-    # family drawn from its own measured error spread. The point arm can be
-    # lucky on one map's labels; the noise family is what generalises.
+    # 每个估计器各跑一个点估计 arm 和按自身实测误差散布抽取的噪声族；
+    # 点估计可能碰巧押中某张图的标签，噪声族才可泛化。
     estimators = [("llm", llm_pred, sigma)]
     for arm_name, filename in COMPARISON_ESTIMATORS:
         pred, s = _preds_and_sigma((_load(filename) or {}).get("rows"))
@@ -577,14 +480,13 @@ def stage_nav(maps: List[str], accuracy: Optional[dict]) -> dict:
 
     runs = []
     for map_name in maps:
-        gt = _relabel_map(scenarios.load(map_name))     # labels + true mu*rho
+        gt = _relabel_map(scenarios.load(map_name))     # 标签 + 真实 mu*rho
 
         arms: List[tuple] = [("oracle", dict(gt)), ("heuristic", None)]
         for arm_name, pool, s in estimators:
             missing = [k for k in gt if k not in pool]
             if missing:
-                # a partial arm would be half model, half heuristic fallback and
-                # would measure neither, so refuse it rather than report a blend
+                # 半模型半启发式回退的混合 arm 两者都测不到，宁可拒绝也不报告混合结果
                 log(f"  {map_name}: no {arm_name!r} arm, missing {missing}")
                 continue
             arms.append((arm_name, {k: pool[k] for k in gt}))
@@ -612,7 +514,7 @@ def stage_nav(maps: List[str], accuracy: Optional[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Metrics
+# 指标
 # --------------------------------------------------------------------------- #
 
 def _log_errors(rows, key="pred"):
@@ -645,13 +547,7 @@ def _accuracy_stats(rows, key="pred") -> dict:
 
 
 def _anchor_snapping(rows, key="pred") -> dict:
-    """How often the reply is a verbatim row of the anchor table.
-
-    The prompt asks the model to *interpolate between* anchors, so an exact
-    anchor value is a copy, not an estimate. Concentration on the largest anchor
-    is worse than a wrong number: it is the table's last line, and it makes
-    every unknown object look like solid concrete.
-    """
+    """统计回复恰为锚点表某一行的频率；prompt 要求在锚点间插值，精确命中即抄袭而非估计。"""
     anchor_values = {round(v, 4) for k, v in MATERIAL_MU_RHO.items() if k != "unknown"}
     top = max(anchor_values)
     preds = [r[key] for r in rows if r.get(key)]
@@ -676,11 +572,7 @@ def _spearman(rows, key="pred") -> Optional[float]:
 
 
 def _repeatability(rows) -> dict:
-    """Spread across repeats of the *same* question at temperature 0.
-
-    Non-zero spread means the ordering the planner sees is not stable between
-    identical runs, which matters more than the absolute value.
-    """
+    """温度 0 下同一问题重复提问的散布；非零散布意味着规划器看到的次序在相同运行间不稳定。"""
     spreads = []
     for r in rows:
         preds = [p for p in r["preds"] if p and p > 0]
@@ -695,14 +587,7 @@ def _repeatability(rows) -> dict:
 
 
 def _decision_flips(rows, cfg: Config, move_dist=2.0) -> List[dict]:
-    """How often the estimate flips the only decision the planner makes.
-
-    An obstacle is worth pushing when work < the detour it saves:
-        difficulty * move_dist  <  lambda * detour
-    so each obstacle has a break-even detour length. Comparing the estimated
-    break-even against the true one at a few plausible detour lengths turns the
-    mu*rho error into the quantity that actually reaches the search.
-    """
+    """估计值翻转规划器唯一决策（推/绕）的频率：值得推的条件是 difficulty*push_dist < lambda*detour，在几个绕行长度下比较估计/真实的盈亏平衡点，即把 mu*rho 误差换算成真正进入搜索的量。"""
     out = []
     for detour in (2.0, 5.0, 10.0, 20.0, 50.0):
         budget = cfg.lambda_distance * detour
@@ -723,7 +608,7 @@ def _decision_flips(rows, cfg: Config, move_dist=2.0) -> List[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# Charts
+# 图表
 # --------------------------------------------------------------------------- #
 
 def _chart_accuracy(rows, path: str):
@@ -738,8 +623,7 @@ def _chart_accuracy(rows, path: str):
         ax.fill_between([lo, hi], [lo / band, hi / band], [lo * band, hi * band],
                         color=MUTED, alpha=alpha, lw=0, zorder=1)
 
-    # The horizontal stripes are the finding, so name them on the plot rather
-    # than leaving the reader to decode why so many points share a y value.
+    # 水平条带本身就是结论，直接在图上点名，免得读者自己解码为何许多点共 y 值。
     counts: Dict[float, int] = {}
     for r in rows:
         if r.get("pred"):
@@ -789,8 +673,7 @@ def _chart_sensitivity(nav: dict, path: str):
     colors = ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"]
     fig, ax = plt.subplots(figsize=(7.6, 5.0))
 
-    # The dead zone is the result worth reading off this chart: inside it the
-    # planner makes the same choices it would with a perfect estimate.
+    # 盲区是本图最值得读出的结果：区内规划器的选择与完美估计时完全相同。
     free_lo, free_hi = 0.25, 4.0
     ax.axvspan(free_lo, free_hi, color=MUTED, alpha=0.13, lw=0)
     ax.text(1.0, 0.97, "estimates in this band cost nothing",
@@ -835,7 +718,7 @@ def _chart_sensitivity(nav: dict, path: str):
 
 
 # --------------------------------------------------------------------------- #
-# Report
+# 报告
 # --------------------------------------------------------------------------- #
 
 def _table(header: List[str], body: List[List[str]]) -> str:
@@ -858,7 +741,7 @@ def stage_report(cfg: Config) -> str:
              f"Model `{acc['model']}`, {acc['repeats']} repeats per item, "
              f"{len(rows)} items, {acc['seconds']}s of API time.\n"]
 
-    # -- headline -----------------------------------------------------------
+    # -- 摘要 -----------------------------------------------------------
     overall = _accuracy_stats(rows)
     snapshot = _anchor_snapping(rows)
     head = [
@@ -897,8 +780,7 @@ def stage_report(cfg: Config) -> str:
                 f"contact — so a bad mu*rho costs a wrong first choice, not a "
                 f"wrong final path.")
     if abl:
-        # Only variants that answered nearly every item can be ranked: a
-        # truncated run has silently dropped its hardest cases.
+        # 只有几乎答全的变体才可排名：被截断的运行悄悄丢了最难的样本。
         rankable = [v for v in abl["variants"]
                     if _accuracy_stats(v["rows"]).get("n", 0) >= 0.9 * len(v["rows"])]
         best = min(rankable, key=lambda v: _accuracy_stats(v["rows"])["median_abs_factor"],
@@ -918,7 +800,7 @@ def stage_report(cfg: Config) -> str:
                         f"score fairly): {', '.join(dropped)}.")
     parts.append("\n## Headline\n\n" + "\n".join(head) + "\n")
 
-    # -- accuracy -----------------------------------------------------------
+    # -- 准确率 -----------------------------------------------------------
     parts.append("\n## 1. Estimator accuracy\n")
     parts.append("`median_abs_factor` is the typical multiplicative miss: 1.0 is "
                  "exact, 2.0 means the usual answer is off by a factor of two in "
@@ -964,7 +846,7 @@ def stage_report(cfg: Config) -> str:
         [[r["label"], r["group"], f"{r['mu_rho_true']:.1f}", f"{r['pred']:.1f}",
           f"{r['pred'] / r['mu_rho_true']:.2f}x", r["note"]] for r in worst]))
 
-    # -- size independence --------------------------------------------------
+    # -- 尺寸无关性 --------------------------------------------------
     if size:
         parts.append("\n## 2. Size independence\n")
         parts.append("mu*rho must not depend on the object's size — the caller "
@@ -984,7 +866,7 @@ def stage_report(cfg: Config) -> str:
               r["by_scale"].get("2.0"), f"{s:.2f}x"]
              for s, r in sorted(moved, key=lambda t: -t[0])]))
 
-    # -- decision relevance -------------------------------------------------
+    # -- 决策相关性 -------------------------------------------------
     parts.append("\n## 3. Does the error reach the planner?\n")
     parts.append(f"The search only ever asks one question per obstacle: is "
                  f"`difficulty x push_distance` cheaper than `lambda x detour`? "
@@ -995,7 +877,7 @@ def stage_report(cfg: Config) -> str:
         [[f"{d['detour_m']:g} m", d["n"], f"{d['flip_rate']:.0%}"]
          for d in _decision_flips(rows, cfg)]))
 
-    # -- navigation ---------------------------------------------------------
+    # -- 导航 ---------------------------------------------------------
     if nav:
         parts.append("\n## 4. Navigation cost\n")
         parts.append("Same maps, same physics, same true difficulties — only the "
@@ -1070,7 +952,7 @@ def stage_report(cfg: Config) -> str:
                              f"{max(pens):+.1f}%", fails])
         parts.append(_table(["map", "mean penalty", "worst penalty", "failed runs"], body))
 
-        # -- does a better estimator actually buy anything? -----------------
+        # -- 更准的估计器真的值钱吗？-------------------------------------
         if "llm_nothink" in (nav.get("estimator_sigmas") or {}):
             parts.append("\n### Is reasoning mode worth it, on the robot?\n")
             parts.append(
@@ -1102,7 +984,7 @@ def stage_report(cfg: Config) -> str:
                 ["map", "llm (reasoning, current)", "llm (no reasoning, previous)",
                  "current noise mean/worst", "previous noise mean/worst"], body))
 
-    # -- lambda regime ------------------------------------------------------
+    # -- lambda 区间 ------------------------------------------------------
     lam = _load("lambda.json")
     if lam:
         parts.append("\n## 4b. When does the error start to cost anything?\n")
@@ -1129,7 +1011,7 @@ def stage_report(cfg: Config) -> str:
             body.append(line)
         parts.append(_table(header, body))
 
-    # -- anchor ordering ----------------------------------------------------
+    # -- 锚点行序 ----------------------------------------------------
     order = _load("order.json")
     if order:
         parts.append("\n## 4c. Proof that it is copying, not estimating\n")
@@ -1159,7 +1041,7 @@ def stage_report(cfg: Config) -> str:
             "rather than removing it. Only giving the model room to reason "
             "does that.\n")
 
-    # -- request-setting ablation -------------------------------------------
+    # -- 请求参数消融 -------------------------------------------
     if abl:
         parts.append("\n## 5. Is it the model or the way it is asked?\n")
         parts.append("Same prompt, same items, different request settings. "

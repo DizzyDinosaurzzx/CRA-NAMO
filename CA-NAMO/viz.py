@@ -1,18 +1,4 @@
-"""Rendering: the summary plot and the per-step animation.
-
-Split out of `main.py`, which is now just the command-line entry point. Nothing
-here is used by the simulation itself — it reads a finished `RunResult` and the
-frame snapshots the executor recorded along the way.
-
-Colour vocabulary:
-    robot           yellow disc, dark goldenrod centre
-    planned route   blue solid (where the robot intends to drive)
-    obstacle route  blue dashed (where an obstacle is to be carried)
-    planned contact dark goldenrod dotted (where the robot grips it)
-    obstacle        crimson if untouched, orange once moved
-    robot trail     translucent blue corridor, outlined; ground the robot drove
-                    around rather than over stays empty
-"""
+"""渲染汇总图与逐帧动画：只读取已完成的 RunResult 与执行器记录的帧快照，不参与仿真本身。"""
 
 from __future__ import annotations
 import io
@@ -30,7 +16,7 @@ from executor import OnlineNAMO
 
 
 def _ring(ring):
-    """One closed ring as (vertices, path codes)."""
+    """把单个闭合环转为 (顶点, 路径码)。"""
     verts = np.asarray(ring.coords)
     codes = np.full(len(verts), Path.LINETO, dtype=Path.code_type)
     codes[0] = Path.MOVETO
@@ -38,14 +24,9 @@ def _ring(ring):
 
 
 def _plot_poly(ax, poly, **kw):
-    """Fill a (Multi)Polygon — holes included.
+    """填充 (Multi)Polygon（含洞）：所有环合成一条复合路径，由 Agg 按奇偶规则填充。
 
-    Filling `exterior.xy` and stopping there, which is what this used to do,
-    paints straight over every hole. It shows up the moment the robot's trail
-    closes a loop: the buffered corridor is a ring, and the whole area the robot
-    drove *around* was flooded with trail colour as if it had driven across it.
-    Every ring goes into one compound path instead, which Agg fills by the
-    even-odd rule, so interiors come out empty.
+    只填 exterior 会把洞盖住——轨迹闭环时绕行的整片空地会被误涂成走过的区域。
     """
     geoms = poly.geoms if poly.geom_type.startswith("Multi") else [poly]
     verts, codes = [], []
@@ -62,29 +43,19 @@ def _plot_poly(ax, poly, **kw):
                            **kw))
 
 
-# An estimate counts as correct only to floating-point noise. Difficulty is a
-# derived quantity (mu*rho x volume x g), so when the estimator recognises the
-# material it reproduces the scenario's value exactly; anything else is a miss,
-# not a near miss. This is the comparison the label has always made.
+# 估计仅在浮点误差内才算正确：难度是推导量(mu*rho×V×g)，认出材料即精确复现场景值，其余一律算错
 _DIFF_MATCH_EPS = 1e-6
 
 
 def _obstacle_label(oid: int, estimates, touched=None) -> str:
-    """Obstacle ID, its estimated difficulty, and how that estimate held up.
-
-    The second line is the estimate, the third is the verdict on it. The robot
-    only learns the truth by physically touching the obstacle, so until then
-    there is no third line at all; afterwards it reads `right` when the guess
-    was correct and `real=<truth>` when it was not — the number is only worth
-    the space when it says something the estimate did not.
-    """
+    """障碍物 ID、难度估计及其对错的标注：第二行为估计值，触碰获知真相后才有第三行。"""
     est = estimates.get(oid) if estimates else None
     true = touched.get(oid) if touched else None
     parts = [str(oid)]
     if est is not None:
         parts.append(f"est={est:g}")
     if true is not None:
-        # touched before ever being estimated: nothing to be right or wrong about
+        # 触碰早于估计：无对错可言
         if est is not None and abs(est - true) <= _DIFF_MATCH_EPS:
             parts.append("right")
         else:
@@ -92,20 +63,15 @@ def _obstacle_label(oid: int, estimates, touched=None) -> str:
     return "\n".join(parts)
 
 
-# Outlined rather than a bare translucent wash: once holes render as holes, the
-# boundary is carrying real information — a thin edge is what makes an enclosed
-# pocket read as unvisited ground rather than as a lighter patch of trail.
+# 加描边而非纯半透明填充：洞真正渲染成洞后边界携带信息，细边使围合空地读作未经过区域
 _TRAIL_KW = dict(facecolor="royalblue", edgecolor="royalblue",
                  alpha=0.28, lw=0.6, zorder=5)
 
 
 def _draw_trail(ax, track, radius: float):
-    """Ground the robot's body has covered: the region swept by its disc.
+    """机器人圆盘扫过的地面：整条轨迹一次 buffer 而非逐帧叠圆。
 
-    One buffered polygon over the whole track, not a stack of per-step circles,
-    so ground crossed five times looks the same as ground crossed once — this
-    answers *where it has been*, not how often. Ground it drove around but never
-    over stays empty, which is the whole point of a loop having a hole.
+    走过五次与一次显示相同——回答"去过哪"而非"去过几次"；绕行未压过的地面留空。
     """
     if not track:
         return
@@ -114,7 +80,7 @@ def _draw_trail(ax, track, radius: float):
     _plot_poly(ax, swept, **_TRAIL_KW)
 
 
-def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):  # draw flag marker
+def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):  # 绘制旗帜标记
     x, y = point
     s = 0.06 * max(sim.workspace.bounds[2], sim.workspace.bounds[3])
     top = y + s
@@ -132,34 +98,34 @@ def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
     segs = [(rm.nodes[u], rm.nodes[v]) for u, v in rm.edge_len]
     ax.add_collection(LineCollection(segs, colors="lightgray", linewidths=0.2,
                                      zorder=0.3))
-    # roadmap nodes: silver-grey scatter
+    # 路网节点：银灰色散点
     xs = [p[0] for p in rm.nodes]
     ys = [p[1] for p in rm.nodes]
     ax.scatter(xs, ys, color="silver", s=0.5, zorder=0.4)
-    # highlight current node (blue square); reachable neighbours are not drawn separately
+    # 高亮当前节点（蓝色方块）；可达邻节点不单独绘制
     if cur_node is not None and 0 <= cur_node < len(rm.nodes):
         hx, hy = rm.nodes[cur_node]
         ax.scatter([hx], [hy], color="dodgerblue", s=20, marker="s", zorder=4.7)
 
 
-def _draw_plan_paths(ax, frame):  # draw the planned paths being executed at this frame (blue)
+def _draw_plan_paths(ax, frame):  # 绘制本帧正在执行的规划路径（蓝色）
     labeled = set()
     for path in frame.get("plan_paths") or []:
         xs = [p[0] for p in path["pts"]]
         ys = [p[1] for p in path["pts"]]
         if path["kind"] == "route":
-            # robot planned route: blue solid line + small dots at via-nodes
+            # 机器人规划路线：蓝色实线 + 途经节点小圆点
             label = None if "route" in labeled else "planned path"
             ax.plot(xs, ys, color="blue", lw=1.8, alpha=0.9, zorder=6,
                     solid_capstyle="round", label=label)
             ax.scatter(xs, ys, color="blue", s=6, zorder=6.1)
         elif path["kind"] == "contact":
-            # where the robot holds the obstacle while it moves — the contact path
+            # 机器人搬运障碍物时的贴身抓持路径
             label = None if "contact" in labeled else "planned contact"
             ax.plot(xs, ys, color="darkgreen", lw=1.1, ls=":", alpha=0.85, zorder=6,
                     label=label)
         else:
-            # obstacle's own SE2 route: blue dashed line
+            # 障碍物自身 SE2 路线：蓝色虚线
             label = None if "obstacle" in labeled else "planned obstacle route"
             ax.plot(xs, ys, color="blue", lw=1.3, ls="--", alpha=0.75, zorder=6,
                     label=label)
@@ -167,39 +133,34 @@ def _draw_plan_paths(ax, frame):  # draw the planned paths being executed at thi
 
 
 def _draw_static(ax, sim: OnlineNAMO, original_poses):
-    # workspace background
+    # 工作区背景
     _plot_poly(ax, sim.workspace, color="whitesmoke", zorder=0)
     ax.plot(*sim.workspace.exterior.xy, color="black", lw=1)
-    # static obstacles (walls etc. that are never moved)
+    # 静态障碍物（墙等，永不移动）
     for so in sim.static_obstacles:
         _plot_poly(ax, so.polygon, color="dimgray", zorder=1)
-    # start (blue) and goal (red) flags
+    # 起点(蓝)与终点(红)旗帜
     _draw_flag(ax, sim, sim.start_point, "royalblue", "start")
     _draw_flag(ax, sim, sim.goal_point, "red", "goal")
-    # original positions of movable obstacles (red dashed), for comparison with final positions
+    # 可移动障碍物初始位置（红虚线），与最终位置对比
     for oid, poly in original_poses.items():
         ax.plot(*poly.exterior.xy, color="crimson", lw=1, ls="--", alpha=0.5, zorder=2)
 
 
-# --- Canvas layout ---
-_PLOT_BOX = (8.0, 7.0)     # max plot area (width, height), inches
-_MARGIN = 0.5              # left/right + bottom tick-label margin, inches
-_TOP_PAD = 0.12            # whitespace above title, inches
-_TITLE_LINE = 0.24         # height per title line, inches
-_TITLE_LINES = 3           # always reserve height for the three-line caption
-_LEGEND_H = 0.5            # bottom legend strip height, inches
-_TITLE_FS = 9              # title font size
+# --- 画布布局 ---
+_PLOT_BOX = (8.0, 7.0)     # 最大绘图区（宽, 高），英寸
+_MARGIN = 0.5              # 左右及底部刻度标签边距，英寸
+_TOP_PAD = 0.12            # 标题上方留白，英寸
+_TITLE_LINE = 0.24         # 每行标题高度，英寸
+_TITLE_LINES = 3           # 始终为三行标题预留高度
+_LEGEND_H = 0.5            # 底部图例条高度，英寸
+_TITLE_FS = 9              # 标题字号
 _LEGEND_NCOL = 5
 
 
-# --- caption ---
-# The summary plot and every animation frame carry the *same* three lines, so a
-# still and a frame read the same way:
-#     1. run configuration — fixed for the whole run
-#     2. where the run is  — one step, or the final verdict
-#     3. what it has cost  — identical fields either way, cumulative in a frame
-# Structural sameness is the point. Line 2 is the one that differs by design, so
-# anything belonging to only one of the two views belongs there.
+# --- 标题栏 ---
+# 汇总图与每帧动画共用同样三行结构：1) 运行配置（全程不变） 2) 当前进度或最终结果
+# 3) 代价（字段一致，帧内为累计值）。仅属于其中一个视图的内容只放在第 2 行。
 def _mode_tag(sim: OnlineNAMO) -> str:
     cfg = sim.cfg
     return "[" + " | ".join((
@@ -216,12 +177,7 @@ def _cost_line(J, walk, work, motion_s, plan_s) -> str:
 
 
 def _wrap_title(lines, width_inch: float) -> str:
-    """Fit the caption into the reserved block, one output line per input line.
-
-    Long lines are ellipsised rather than reflowed: reflowing line 1 would push
-    the cost line out of the block entirely, and the three lines have distinct
-    jobs that wrapping would blur together.
-    """
+    """把标题压进预留块，一行输入对应一行输出；超长截断省略而非换行，以免代价行被挤出块外。"""
     ncols = max(20, int(width_inch / (0.55 * _TITLE_FS / 72.0)))
     out = []
     for line in list(lines)[:_TITLE_LINES]:
@@ -232,7 +188,7 @@ def _wrap_title(lines, width_inch: float) -> str:
 
 def _new_canvas(sim: OnlineNAMO):
     minx, miny, maxx, maxy = sim.workspace.bounds
-    w, h = (maxx - minx) + 2.0, (maxy - miny) + 2.0   # consistent with xlim/ylim padding below
+    w, h = (maxx - minx) + 2.0, (maxy - miny) + 2.0   # 与下方 xlim/ylim 留白一致
     s = min(_PLOT_BOX[0] / w, _PLOT_BOX[1] / h)
     pw, ph = w * s, h * s
 
@@ -260,22 +216,21 @@ def _finish_ax(ax, sim: OnlineNAMO, title_lines):
                          framealpha=0.9, borderaxespad=0.0)
 
 def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
-    """Generate the final summary plot of the simulation"""
+    """生成仿真的最终汇总图。"""
     fig, ax = _new_canvas(sim)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim)
-    # iterate over all movable obstacles, colour by whether they were moved
+    # 遍历所有可移动障碍物，按是否被移动着色
     for w in sim.world:
         col = "orange" if w.removed else "crimson"
         _plot_poly(ax, w.polygon, color=col, alpha=0.6, zorder=3)
-        # label obstacle centroid with ID, estimate, and true difficulty if known
+        # 在障碍物质心标注 ID、估计难度及已知真实难度
         ax.text(w.x, w.y, _obstacle_label(w.oid, sim.estimator.cache,
                                            sim.belief.touched_difficulty),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4)
 
     _draw_trail(ax, res.robot_track, sim.cfg.robot_radius)
-    # which obstacles moved is already on the map — they are the orange ones,
-    # each drawn beside the dashed outline of where it started
+    # 哪些障碍物被移动图上已可见——即橙色者，旁有其初始位置虚线轮廓
     _finish_ax(ax, sim, (
         _mode_tag(sim),
         f"{res.message}  —  {res.cycles} replan cycles",
@@ -288,21 +243,20 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
 
 def render_frame(sim: OnlineNAMO, frame, original_poses,
                  idx: int, total: int, cur_node: int | None = None):
-    """Render a single frame from the simulation; returns the figure (caller closes it)"""
+    """渲染单帧仿真画面；返回 figure，由调用方关闭。"""
     fig, ax = _new_canvas(sim)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim, cur_node=cur_node)
-    # draw obstacles classified by perception state
+    # 按感知状态分类绘制障碍物
     perceived = frame["perceived"]
     for oid, poly, removed in frame["obstacles"]:
         if oid not in perceived:
-            # unperceived: grey dotted outline only (robot doesn't know where this obstacle is)
+            # 未感知：仅灰色点线轮廓（机器人不知其位置）
             ax.plot(*poly.exterior.xy, color="gray", lw=1, ls=":", alpha=0.5, zorder=3)
             continue
-        # perceived: colour by whether it has been moved
+        # 已感知：按是否被移动着色
         col = "orange" if removed else "crimson"
-        # the obstacle being moved sits above the robot, so a piece carried past
-        # the robot is not hidden by it; on collisions the robot stays on top
+        # 被搬运障碍物画在机器人之上，经过机器人身侧的部件不被遮挡；碰撞时机器人在上层
         z = 8.5 if oid == frame.get("move_oid") else 3
         _plot_poly(ax, poly, color=col, alpha=0.6, zorder=z)
         cx, cy = poly.centroid.x, poly.centroid.y
@@ -311,19 +265,19 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
         ax.text(cx, cy, _obstacle_label(oid, estimates, touched),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=z + 1)
 
-    # trail up to this frame — same treatment as the summary plot
+    # 截至本帧的轨迹——与汇总图同法绘制
     _draw_trail(ax, frame["track"], sim.cfg.robot_radius)
 
-    # draw all paths given by the planner at this frame (blue lines)
+    # 绘制本帧规划器给出的所有路径（蓝线）
     _draw_plan_paths(ax, frame)
 
-    # draw current robot position (filled green circle + dark green centre dot)
+    # 绘制机器人当前位置（绿色实心圆 + 深绿圆心点）
     rx, ry = frame["robot"]
     robot_circle = Point(rx, ry).buffer(sim.cfg.robot_radius)
     _plot_poly(ax, robot_circle, color="limegreen", alpha=0.85, zorder=7)
     ax.plot(rx, ry, marker="o", color="darkgreen", ms=4, zorder=8, label="robot")
 
-    # same three lines as the summary; line 3 is cumulative up to this frame
+    # 与汇总图相同的三行标题；第 3 行为本帧累计值
     _finish_ax(ax, sim, (
         _mode_tag(sim),
         f"step {idx}/{total - 1}  —  {frame['label']}",
@@ -335,12 +289,7 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
 
 
 def _shared_palette(buffers, colors: int = 255):
-    """One palette for the whole animation, sampled from start / middle / end.
-
-    Frames sharing a palette let Pillow store only the pixels that changed
-    between them, which matters here: the roadmap background is redrawn
-    identically every step and dominates the file size otherwise.
-    """
+    """全动画共用一张调色板（取首/中/末帧采样）：Pillow 只存帧间变化像素，否则逐帧重绘的路网背景会撑大文件。"""
     picks = sorted({0, len(buffers) // 2, len(buffers) - 1})
     tiles = [Image.open(buffers[i]).convert("RGB") for i in picks]
     w, h = tiles[0].size
@@ -351,13 +300,12 @@ def _shared_palette(buffers, colors: int = 255):
 
 
 def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
-    """Render every motion frame into one animated GIF"""
+    """将全部运动帧渲染为一个 GIF 动画。"""
     cfg = sim.cfg
     total = len(res.frames)
     if total == 0:
         return 0
-    # keep the frames as encoded PNG bytes rather than decoded bitmaps: a long
-    # run on a large map would otherwise hold hundreds of MB of pixels at once
+    # 帧保存为 PNG 编码字节而非解码位图，否则大地图长跑会同时驻留数百 MB 像素
     buffers = []
     for i, frame in enumerate(res.frames):
         fig = render_frame(sim, frame, original_poses, i, total,
@@ -374,7 +322,7 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
               for b in buffers]
     step_ms = max(20, int(round(1000.0 / cfg.gif_fps)))
     durations = [step_ms] * len(images)
-    durations[-1] = max(step_ms, int(cfg.gif_end_hold_s * 1000))  # pause on the result
+    durations[-1] = max(step_ms, int(cfg.gif_end_hold_s * 1000))  # 在结果帧上停顿
     images[0].save(gif_path, save_all=True, append_images=images[1:],
                    duration=durations, loop=0, optimize=True)
     return total

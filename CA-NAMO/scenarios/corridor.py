@@ -1,9 +1,12 @@
+"""走廊场景：长通道被木箱与交错短墙阻挡，考验绕行还是搬走。"""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
+    """构建走廊场景。"""
     workspace = box(0, 0, 40, 8)
     t = 0.5
 

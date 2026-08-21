@@ -1,4 +1,4 @@
-"""Command-line entry point."""
+"""命令行入口。"""
 
 from __future__ import annotations
 import argparse
@@ -12,7 +12,7 @@ from executor import OnlineNAMO
 
 
 def _hms(seconds: float) -> str:
-    """Seconds, plus a mm:ss reading once the number stops being readable."""
+    """秒数；数值大到不易读时附上时分秒读数。"""
     if seconds < 60.0:
         return f"{seconds:,.2f} s"
     m, s = divmod(seconds, 60.0)
@@ -21,7 +21,7 @@ def _hms(seconds: float) -> str:
     return f"{seconds:,.2f} s   ({clock})"
 
 
-# --- main function ---
+# --- 主函数 ---
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default=scenarios.DEFAULT_SCENARIO,
@@ -53,22 +53,22 @@ def main():
                          "rather than behind it; 0 removes the bias entirely")
     args = ap.parse_args()
 
-    # load scenario
+    # 加载场景
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
 
-    # command-line override of strategy
+    # 命令行覆盖策略
     if args.strategy is not None:
         cfg.strategy = args.strategy
 
-    # command-line override of λ in config
+    # 命令行覆盖配置中的 λ
     if args.lambda_distance is not None:
         try:
             cfg.lambda_distance = config.validate_lambda(args.lambda_distance)
         except ValueError as e:
             ap.error(str(e))
 
-    # command-line override of the energy-vs-time weighting
+    # 命令行覆盖能量-时间权重
     if args.time_importance is not None:
         try:
             cfg.time_importance = config.validate_time_importance(
@@ -76,23 +76,23 @@ def main():
         except ValueError as e:
             ap.error(str(e))
 
-    # command-line override of LLM ordering switch
+    # 命令行关闭 LLM 排序
     if args.no_llm_order:
         cfg.use_llm_ordering = False
 
-    # command-line override of the contact model
+    # 命令行关闭接触模型
     if args.no_contact:
         cfg.contact_required = False
     if args.forward_penalty is not None:
         cfg.manip_forward_penalty = max(0.0, args.forward_penalty)
 
-    # command-line enable per-frame saving
+    # 命令行开启逐帧保存
     if args.frames:
         cfg.save_frames = True
 
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    # initialise CA-NAMO simulator
+    # 初始化 CA-NAMO 仿真器
     sim = OnlineNAMO(s["workspace"], s["static"], s["movable"],
                      s["start"], s["goal"], cfg)
     
@@ -109,10 +109,10 @@ def main():
     print("-" * 60)
 
     res = sim.run()
-    print("=" * 60)  # separate runtime [se2] logs from the stats below
+    print("=" * 60)  # 分隔运行时 [se2] 日志与下方统计
 
-    # print simulation statistics
-    W = 22  # label field width – everything left-aligned
+    # 打印仿真统计
+    W = 22  # 标签列宽，全部左对齐
     print(f"{'Success':<{W}} : {res.success}   ({res.message})")
     print(f"{'Total cost J':<{W}} : {res.J:,.4f}")
     print(f"{'motion lambda*D':<{W}} : {res.walk_cost:,.4f}")
@@ -124,7 +124,7 @@ def main():
     print(f"{'A* expansions':<{W}} : {res.total_expansions:,}")
     print(f"{'LLM calls':<{W}} : {res.llm_calls:,}  (mode={res.llm_mode})")
 
-    # mission time = how long the robot drives + how long it thinks
+    # 任务时间 = 行驶时间 + 决策计算时间
     print("-" * 60)
     print(f"{'Robot motion time':<{W}} : {_hms(res.motion_time)}"
           f"   (v={cfg.v_max:g}/{cfg.v_max_contact:g} m/s free/contact,"
@@ -135,8 +135,7 @@ def main():
           f"   ({res.cycles} replans, measured wall clock)")
     print(f"{'Total mission time':<{W}} : {_hms(res.mission_time)}")
 
-    # render summary plot. The suffix keeps runs that differ only in objective
-    # from overwriting each other's output.
+    # 渲染汇总图。后缀避免仅目标函数不同的运行互相覆盖输出。
     strategy_suffix = f"_{cfg.strategy}" if cfg.strategy != "normal" else ""
     if cfg.time_importance > 0.0:
         strategy_suffix += f"_t{cfg.time_importance:g}"
@@ -144,7 +143,7 @@ def main():
     viz.visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
 
-    # render every motion frame into one animation
+    # 把全部运动帧渲染成一段动画
     if cfg.save_frames:
         gif_path = os.path.join(cfg.out_dir, f"frames_{s['name']}{strategy_suffix}.gif")
         n = viz.render_sequence(sim, res, original_poses, gif_path)

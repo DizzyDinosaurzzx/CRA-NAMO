@@ -1,4 +1,4 @@
-"""Perception and belief state maintenance and update"""
+"""感知与信念状态的维护和更新。"""
 
 from __future__ import annotations
 import math
@@ -14,23 +14,23 @@ class Belief:
     def __init__(self, roadmap: Roadmap, cfg: Config):
         self.roadmap = roadmap
         self.cfg = cfg
-        self.perceived: Dict[int, MovableObstacle] = {}     # copies of perceived obstacles
-        self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # obstacles blocking edges
-        self.newly_revealed: List[int] = []  # newly perceived obstacles
-        self.contacts: List[Polygon] = []  # obstacles known only through manipulation collision
+        self.perceived: Dict[int, MovableObstacle] = {}     # 已感知障碍物的副本
+        self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # 阻塞各边的障碍物
+        self.newly_revealed: List[int] = []  # 新感知到的障碍物
+        self.contacts: List[Polygon] = []  # 仅通过搬运碰撞得知的障碍物
         self.touched: Set[int] = set()
-        self.touched_difficulty: Dict[int, float] = {}  # obstacle true difficulties obtained via touch
-        self.move_dir: Dict[int, Tuple[float, float]] = {}  # last direction moved per obstacle
+        self.touched_difficulty: Dict[int, float] = {}  # 触觉获得的障碍物真实难度
+        self.move_dir: Dict[int, Tuple[float, float]] = {}  # 各障碍物最近一次被移动的方向
 
-    # --- Perception ---
+    # --- 感知 ---
     def perceive(self, world_obstacles: List[MovableObstacle],
                  robot_pos: Tuple[float, float]) -> List[int]:
-        """Reveal all visible obstacles around the robot; sync state for known ones"""
+        """揭示机器人周围所有可见障碍物；已知障碍物同步位姿。"""
         self.newly_revealed = []
         rp = Point(robot_pos)
         for w in world_obstacles:
             known = self.perceived.get(w.oid)
-            # known and pose matches — no info to sync, skip expensive visibility check entirely
+            # 已知且位姿一致——无信息可同步，整体跳过昂贵的可见性检查
             if known is not None and self._pose_matches(known, w):
                 continue
             if rp.distance(Point(w.center())) > self.cfg.R_perc:
@@ -44,7 +44,7 @@ class Belief:
             self.perceived[w.oid] = obs
             self.newly_revealed.append(w.oid)
             self._update_edges_for(obs)
-            # obstacle is now fully perceived; any prior anonymous "contact" records for it can be cleared
+            # 障碍物已被完整感知，此前匿名的"接触"记录可清除
             self._clear_contacts_overlapping(obs.polygon)
         return self.newly_revealed
 
@@ -54,7 +54,7 @@ class Belief:
                 and abs(a.theta - b.theta) < 1e-9)
 
     def _sync_pose(self, known: MovableObstacle, world_obs: MovableObstacle):
-        """Align perceived copy pose to world ground-truth pose"""
+        """将感知副本位姿对齐到世界真实位姿。"""
         old_footprint = known.polygon
         self._forget_edges(known.oid)
         known.x, known.y, known.theta = world_obs.x, world_obs.y, world_obs.theta
@@ -62,8 +62,8 @@ class Belief:
         self._update_edges_for(known)
         self._clear_contacts_overlapping(old_footprint)
 
-    # --- visibility ---
-    def _half_edge_samples(self, obs: MovableObstacle):  # line-of-sight samples from 8 obstacle points
+    # --- 可见性 ---
+    def _half_edge_samples(self, obs: MovableObstacle):  # 取障碍物轮廓各半边上的视线采样点
         coords = list(obs.polygon.exterior.coords)[:-1]
         n = len(coords)
         halves = []
@@ -79,15 +79,14 @@ class Belief:
     def _point_visible(self, robot_pos, p,
                        target: MovableObstacle,
                        world_obstacles: List[MovableObstacle]) -> bool:
-        # line-of-sight check
+        # 视线检查
         seg = LineString([robot_pos, p])
         width = self.cfg.sight_width
         sight = seg.buffer(width / 2.0, cap_style=2) if width > 0 else seg
-        # wall occlusion: a ray is blocked once it leaves the static free space (= workspace minus walls)
+        # 墙体遮挡：视线一旦离开静态自由空间（工作区减墙体）即被挡
         if not self.roadmap.static_free_prep.contains(sight):
             return False
-        # occlusion by other movable obstacles; a blocker no taller than half the
-        # target still leaves the target's upper half exposed, so it does not occlude
+        # 其他可移动障碍物遮挡：遮挡物不高于目标一半时目标上半部仍露出，不算遮挡
         for w in world_obstacles:
             if w.oid == target.oid or w.h <= target.h / 2.0 + 1e-9:
                 continue
@@ -104,7 +103,7 @@ class Belief:
                 return True
         return False
 
-    # --- Update ---
+    # --- 更新 ---
     def _update_edges_for(self, obs: MovableObstacle):
         poly = obs.polygon
         minx, miny, maxx, maxy = poly.bounds
@@ -121,7 +120,7 @@ class Belief:
             else:
                 blockers.discard(obs.oid)
 
-    # --- collision contact ---
+    # --- 碰撞接触 ---
     def register_contact(self, region: Polygon):
         if region is None or region.is_empty:
             return
@@ -129,7 +128,7 @@ class Belief:
             region = region.difference(obs.polygon)
             if region.is_empty:
                 return
-        if region.area <= 1e-9:      # only floating-point fragments remain
+        if region.area <= 1e-9:      # 只剩浮点碎片
             return
         merged = [region]
         rest = []
@@ -143,7 +142,7 @@ class Belief:
             return
         self.contacts = [c for c in self.contacts if not c.intersects(poly)]
 
-    def force_reveal(self, world_obs: MovableObstacle) -> List[int]:  # reveal full obstacle properties on physical contact
+    def force_reveal(self, world_obs: MovableObstacle) -> List[int]:  # 物理接触时揭示障碍物全部属性
         if world_obs.oid in self.perceived:
             return []
         obs = world_obs.perceived_copy()
@@ -153,24 +152,24 @@ class Belief:
         self._clear_contacts_overlapping(obs.polygon)
         return [obs.oid]
 
-    def _forget_edges(self, oid: int):  # forget edge-blocking info for this obstacle
+    def _forget_edges(self, oid: int):  # 清除该障碍物的边阻塞信息
         for blockers in self.edge_blockers.values():
             blockers.discard(oid)
 
     def record_move_direction(self, oid: int, from_xy, to_xy):
-        """Remember which way this obstacle was last moved (pure rotations keep the old direction)"""
+        """记录该障碍物最近被移动的方向（纯旋转保留旧方向）。"""
         dx, dy = to_xy[0] - from_xy[0], to_xy[1] - from_xy[1]
         n = math.hypot(dx, dy)
         if n > 1e-3:
             self.move_dir[oid] = (dx / n, dy / n)
 
-    def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):  # update obstacle blocking info after relocation
+    def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):  # 障碍物重新落位后更新阻塞信息
         self._forget_edges(obs.oid)
         obs.x, obs.y, obs.theta = x, y, theta
         obs.removed = True
         self._update_edges_for(obs)
 
-    # --- robot self-collision ---
+    # --- 机器人自身碰撞 ---
     @staticmethod
     def _first_contact_t(from_pos, to_pos, poly: Polygon, radius: float,
                          coarse: int = 64, refine: int = 20) -> float:
@@ -201,7 +200,7 @@ class Belief:
         self, from_pos, to_pos,
         world_obstacles: List[MovableObstacle],
         cfg: Config,
-    ) -> Tuple[List[int], float]:  # check whether the robot hits any obstacle
+    ) -> Tuple[List[int], float]:  # 检查机器人是否撞上障碍物
         corridor = LineString([from_pos, to_pos]).buffer(cfg.robot_radius, cap_style=1)
         candidates = [w for w in world_obstacles
                       if w.oid not in self.perceived
@@ -214,12 +213,12 @@ class Belief:
         t_hit = min(ts)
         revealed: List[int] = []
         for w, t in zip(candidates, ts):
-            if t <= t_hit + 1e-6:          # group simultaneous hits together
+            if t <= t_hit + 1e-6:          # 同时命中的归为一组
                 self.force_reveal(w)
                 revealed.append(w.oid)
         return revealed, t_hit
 
-    # --- touch sensing ---
+    # --- 触觉感知 ---
     def touch_check(
         self, robot_pos,
         world_obstacles: List[MovableObstacle],
@@ -241,11 +240,7 @@ class Belief:
 
     def reveal_by_interaction(self, oid: int,
                               world_obstacles: List[MovableObstacle]) -> bool:
-        """Any physical interaction reveals the true difficulty, not only collisions.
-
-        Pushing requires contact by definition, so the robot cannot have moved an
-        obstacle while still being ignorant of how hard it was to move.
-        """
+        """任何物理交互（不只碰撞）都揭示真实难度：推动必然接触，搬过它就不可能还不知道它有多难推。"""
         if oid in self.touched:
             return False
         for w in world_obstacles:
@@ -255,12 +250,12 @@ class Belief:
                 return True
         return False
 
-    def get_difficulty(self, oid: int, estimator) -> float:  # return formal difficulty, preserving any previously known true value
+    def get_difficulty(self, oid: int, estimator) -> float:  # 返回正式难度，已知真实值则优先沿用
         if oid in self.touched_difficulty:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
 
-    # --- Query ---
+    # --- 查询 ---
     def blockers_of(self, key: EdgeKey) -> Set[int]:
         return self.edge_blockers.get(key, set())
 

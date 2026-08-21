@@ -1,3 +1,4 @@
+"""全局配置与参数校验。"""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -16,74 +17,54 @@ def validate_time_importance(value: float) -> float:
 
 @dataclass
 class Config:
-    # --- Robot ---
-    robot_radius: float = 0.3    # robot radius
+    # --- 机器人 ---
+    robot_radius: float = 0.3    # 机器人半径
 
-    # --- Robot dynamics (mission time only; they do not enter J) ---
-    # A differential-drive disc of this size: it turns in place, then drives
-    # straight. Numbers are in the range of an indoor service platform
-    # (TurtleBot/Jackal class). See timing.py for how they become seconds.
-    v_max: float = 0.8           # free-driving cruise speed [m/s]
-    a_max: float = 0.5           # free-driving linear acceleration [m/s^2]
-    w_max: float = 1.5           # free turn-in-place rate [rad/s]
-    alpha_max: float = 2.0       # free angular acceleration [rad/s^2]
-    # Escorting an obstacle: the robot is pressed against a load it must not let
-    # slip, so it drives and turns considerably more gently.
+    # --- 机器人动力学（只影响任务时间，不进入 J） ---
+    # 差速驱动圆盘：先原地转向再直线行驶；数值取室内服务机器人量级（TurtleBot/Jackal 级），换算成秒见 timing.py。
+    v_max: float = 0.8           # 空载巡航速度 [m/s]
+    a_max: float = 0.5           # 空载线加速度 [m/s^2]
+    w_max: float = 1.5           # 空载原地转向角速度 [rad/s]
+    alpha_max: float = 2.0       # 空载角加速度 [rad/s^2]
+    # 随行搬运时机器人贴着负载须防滑脱，行驶与转向都要温和得多。
     v_max_contact: float = 0.25      # [m/s]
     a_max_contact: float = 0.20      # [m/s^2]
     w_max_contact: float = 0.50      # [rad/s]
     alpha_max_contact: float = 0.80  # [rad/s^2]
-    grip_time: float = 2.0       # seconds to latch onto an obstacle, and again to release
+    grip_time: float = 2.0       # 抓上与松开障碍物各需这么多秒
 
-    # --- Cost function J = lambda * D + W ---
-    # Obstacle difficulty is a real friction force f = mu*rho*V*g [N], so W is in
-    # joules and lambda_distance is the equivalent driving resistance [N] the robot
-    # pays per metre travelled. It is calibrated (not the robot's bare rolling
-    # resistance) so that the detour-vs-move trade-off stays in a regime where
-    # moving light obstacles is still worthwhile.
-    lambda_distance: float = 350.0   # equivalent driving resistance [N]
+    # --- 代价函数 J = lambda * D + W ---
+    # 难度是真实摩擦力 f = mu*rho*V*g [N]，W 单位为焦耳；lambda_distance 是标定出的等效行驶阻力 [N]
+    # （并非裸滚动阻力），为的是让"绕行 vs 搬开"的权衡仍偏向搬开轻障碍物。
+    lambda_distance: float = 350.0   # 等效行驶阻力 [N]
 
-    # --- What the search optimises: C = (1-w)*J + w*(lambda*v_max)*T ---
-    # How much the robot cares about finishing quickly rather than cheaply.
-    #   0 -> pure J, the energy model, and the run is identical to before this
-    #        knob existed
-    #   1 -> pure T, the fastest route it can find, energy ignored
-    # A second is priced at lambda*v_max watts — what a second of cruising costs
-    # in joules — so no separate calibration is needed. See cost.time_price.
+    # --- 搜索优化目标：C = (1-w)*J + w*(lambda*v_max)*T ---
+    # 求快与求省的权重：0 为纯能量 J（与旧模型完全一致），1 为纯最快 T。
+    # 一秒按 lambda*v_max [W] 计价——即巡航一秒本就要花的能量，无需另行标定，见 cost.time_price。
     time_importance: float = 0.5
 
-    # --- Perception ---
-    R_perc: float = 10.0       # perception radius
-    sight_width: float = 0.1     # line-of-sight width
+    # --- 感知 ---
+    R_perc: float = 10.0       # 感知半径
+    sight_width: float = 0.1     # 视线宽度
 
-    # --- Manipulation ---
-    # "Manipulation" throughout means moving an obstacle in any direction, by
-    # pushing or by pulling — the robot grips wherever it likes on the perimeter,
-    # so there is no privileged direction. (The code used to say "push"
-    # everywhere, from when that was the only option.)
-    R_manip: float = 5.0      # obstacles can only be relocated within this radius around current pose
-    # Soft preference for dropping the obstacle ahead of the robot rather than
-    # behind it, so it does not end up blocking the way back. It is a bias on the
-    # candidate drop poses, not a restriction: the robot may still move an
-    # obstacle in any direction, and set this to 0 to remove even the bias.
+    # --- 搬运 ---
+    # "搬运"统指沿任意方向推或拉障碍物：机器人可在其周边任一点抓取，无优先方向。
+    R_manip: float = 5.0      # 障碍物只能移到当前位姿周围该半径之内
+    # 软性偏好把障碍物放在机器人前方而非身后，免得挡住回路；只是对候选放置点的偏置而非限制，置 0 可彻底去掉。
     manip_forward_penalty: float = 2.0
     manip_max_frames_per_action: int = 30
-    check_obstacle_collision: bool = True  # collision detection between obstacles
+    check_obstacle_collision: bool = True  # 障碍物之间的碰撞检测
     full_reveal_on_contact: bool = False
 
-    # --- Robot–obstacle contact ---
-    # The robot has to stay flush against the obstacle for the whole time the
-    # obstacle is moving. It may grip anywhere on the perimeter (so it can push
-    # or pull, in any direction) and may slide that grip along the surface while
-    # the obstacle moves. Its own travel is charged at lambda_distance, exactly
-    # like ordinary driving. Set contact_required = False to recover the older
-    # model where obstacles moved while the robot stood on its roadmap node.
+    # --- 机器人与障碍物接触 ---
+    # 障碍物移动全程机器人须贴住它：可在周边任一点抓取（任意方向推/拉），移动中抓取点还可沿表面滑移；
+    # 自身行程与普通行驶一样按 lambda_distance 计费。contact_required=False 退回旧模型（机器人在路网点上原地等待）。
     contact_required: bool = True
-    contact_station_spacing: float = 0.3   # spacing of candidate grip points around the obstacle [m]
-    contact_max_slide: float = 0.6         # how far the grip may slide per manipulation sub-step [m]
-    contact_clearance: float = 0.01        # tolerance separating "touching" from "overlapping" [m]
+    contact_station_spacing: float = 0.3   # 障碍物周边候选抓取点的间距 [m]
+    contact_max_slide: float = 0.6         # 每个搬运子步内抓取点可滑移的距离 [m]
+    contact_clearance: float = 0.01        # 区分"接触"与"重叠"的容差 [m]
 
-    # --- SE(2) path planner (the obstacle's own route) ---
+    # --- SE(2) 路径规划器（障碍物自身的路线） ---
     se2_use_planner: bool = True
     se2_cell: float = 0.15
     se2_n_theta: int = 12
@@ -91,46 +72,38 @@ class Config:
     se2_containment: str = "centroid"
     se2_rot_weight: float | None = None
 
-    # --- Roadmap ---
-    grid_step: float = 0.3    # roadmap node grid spacing
-    conn_radius: float =0.6   # roadmap node connection radius
+    # --- 路网 ---
+    grid_step: float = 0.3    # 路网节点网格间距
+    conn_radius: float =0.6   # 路网节点连接半径
 
-    # --- Search ---
+    # --- 搜索 ---
     strategy: str = "normal"    # "normal" | "shortest"
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
-    # --- Online loop ---
-    step_execute_edges: int = 1     # re-perception frequency
+    # --- 在线循环 ---
+    step_execute_edges: int = 1     # 重新感知的频率
     max_replans: int = 10000
 
     # --- LLM ---
-    # Reasoning is on, and the completion length is uncapped, because the prompt
-    # asks for a multi-step derivation (category -> mass -> bulk density -> mu ->
-    # product). Denied the room to run it, the model degenerates into copying a
-    # row out of the anchor table in the prompt: measured 6.1x typical error with
-    # 46% of answers collapsing onto a single value, and the collapse target
-    # moves when the table is reordered — i.e. the answer tracked the prompt
-    # layout, not the object. With reasoning enabled the same model on the same
-    # prompt reaches 1.33x typical error (Spearman 0.95). See bench/llm_test_out/.
+    # 推理必须开着：关掉时模型退化成照抄 prompt 锚点表的一行，典型误差 6.1x、
+    # 46% 答案塌缩到同一值；开着则降到 1.33x（Spearman 0.95）。详见 bench/llm_test_out/。
     deepseek_api_key: str = "sk-c1ea9b080fc444ceb1f5fa7901e3b92f"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash"
-    deepseek_thinking: bool = True    # False reproduces the old copy-a-row behaviour
-    llm_max_tokens: int | None = None  # None -> omit the cap; reasoning needs ~3-4k
-    # Reasoning takes seconds, not milliseconds: a single call was measured up to
-    # ~80 s. A short timeout here does not fail loudly, it silently falls back to
-    # the heuristic, so it is set well above the observed worst case.
+    deepseek_thinking: bool = True    # False 会复现照抄表格一行的旧行为
+    llm_max_tokens: int | None = None  # None 表示不设上限；推理约需 3-4k tokens
+    # 单次推理实测可达 ~80 s；超时不会报错而是静默回退启发式，故取远高于最坏观测值。
     llm_timeout: float = 300.0
     llm_max_retries: int = 2
 
-    # --- Other ---
+    # --- 其他 ---
     rng_seed: int = 0
     out_dir: str = "img"
-    save_frames: bool = False   # whether to save the per-step animation (GIF)
-    gif_fps: float = 5.0       # animation speed, frames per second
-    gif_end_hold_s: float = 2  # hold the last frame this long before looping
-    gif_dpi: int = 300         # per-frame render resolution inside the GIF
+    save_frames: bool = False   # 是否保存逐步动画（GIF）
+    gif_fps: float = 5.0       # 动画速度（帧/秒）
+    gif_end_hold_s: float = 2  # 循环前最后一帧的停留时长
+    gif_dpi: int = 300         # GIF 内每帧的渲染分辨率
     verbose: bool = True
 
     def __post_init__(self):

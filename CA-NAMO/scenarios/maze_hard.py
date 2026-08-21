@@ -1,10 +1,12 @@
+"""硬障碍迷宫场景：迷宫内分布高难度障碍，绕行代价高，考验搬走与绕行的取舍。"""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
-    """30x30 maze with 3 high-difficulty obstacles (steel_shelf 15 / steel_safe 20 / concrete_block 100)."""
+    """构建 30x30 硬障碍迷宫场景（steel_shelf 15 / steel_safe 20 / concrete_block 100）。"""
     workspace = box(0, 0, 30, 30)
     t = 0.45
     walls = [

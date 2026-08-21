@@ -1,3 +1,5 @@
+"""大型仓储场景：60x40 m 货架仓库，横向通道被杂物与门板阻断。"""
+
 from __future__ import annotations
 
 from shapely.geometry import box
@@ -7,22 +9,20 @@ from obstacle import MovableObstacle, StaticObstacle
 
 
 def create():
-    """60 m x 40 m hard warehouse map shown in the reference diagram."""
+    """按参考图构建 60 m x 40 m 仓储地图。"""
 
     workspace = box(0.0, 0.0, 60.0, 40.0)
     wall_t = 0.75
 
     static = [
-        # Outer warehouse walls.
+        # 仓库外墙
         StaticObstacle(box(0.0, 0.0, 60.0, wall_t), "outer_bottom"),
         StaticObstacle(box(0.0, 40.0 - wall_t, 60.0, 40.0), "outer_top"),
         StaticObstacle(box(0.0, 0.0, wall_t, 40.0), "outer_left"),
         StaticObstacle(box(60.0 - wall_t, 0.0, 60.0, 40.0), "outer_right"),
     ]
 
-    # Shelf columns 1--7. Their vertical gaps form cross-aisles
-    # A (y=29.0--32.0), B (21.5--24.5), C (13.0--16.0), and
-    # D (6.5--9.0), matching the map.
+    # 货架列 1--7；列间纵向空隙构成横向通道 A/B/C/D，与地图一致
     shelf_columns = (
         (7.0, 10.0),
         (13.5, 17.0),
@@ -33,13 +33,13 @@ def create():
         (54.0, 58.0),
     )
 
-    # Top shelf row exists only in columns 1--6; column 7 is the shipping area.
+    # 顶部货架排仅存在于第 1--6 列；第 7 列为发货区
     for column, (x0, x1) in enumerate(shelf_columns[:6], start=1):
         static.append(
             StaticObstacle(box(x0, 32.0, x1, 38.5), f"shelf_{column}_top")
         )
 
-    # Separate shelf banks on the left side of cross-aisle B.
+    # 通道 B 左侧为上下分开的两组货架
     for column, (x0, x1) in enumerate(shelf_columns[:4], start=1):
         static.extend(
             (
@@ -52,14 +52,14 @@ def create():
             )
         )
 
-    # In columns 5--7 the diagram has one continuous bank across aisle B.
+    # 第 5--7 列按参考图为横跨通道 B 的整排货架
     for column, (x0, x1) in enumerate(shelf_columns[4:], start=5):
         static.append(
             StaticObstacle(box(x0, 16.0, x1, 29.0),
                            f"shelf_{column}_middle_tall")
         )
 
-    # Shelf rows on either side of cross-aisle D.
+    # 通道 D 两侧的货架排
     for column, (x0, x1) in enumerate(shelf_columns, start=1):
         static.extend(
             (
@@ -72,31 +72,30 @@ def create():
             )
         )
 
-    # Shelf connections added from the annotated reference images. Some marked
-    # regions span two adjacent cross-aisle breaks.
+    # 据标注参考图添加的货架连接；个别区块横跨两条相邻通道
     shelf_bridges = (
-        # Cross-aisle A (y=29.0--32.0).
+        # 横向通道 A（y=29.0--32.0）
         (1, 29.0, 32.0, "A"),
         (3, 29.0, 32.0, "A"),
         (6, 29.0, 32.0, "A"),
 
-        # Cross-aisle B (y=21.5--24.5).
+        # 横向通道 B（y=21.5--24.5）
         (2, 21.5, 24.5, "B"),
         (4, 21.5, 24.5, "B"),
 
-        # Cross-aisle C (y=13.0--16.0).
+        # 横向通道 C（y=13.0--16.0）
         (1, 13.0, 16.0, "C"),
         (2, 13.0, 16.0, "C"),
         (3, 13.0, 16.0, "C"),
 
-        # Cross-aisle D (y=6.5--9.0).
+        # 横向通道 D（y=6.5--9.0）
         (1, 6.5, 9.0, "D"),
         (3, 6.5, 9.0, "D"),
         (4, 6.5, 9.0, "D"),
         (5, 6.5, 9.0, "D"),
         (7, 6.5, 9.0, "D"),
 
-        # Seal the marked bottom shelves flush against the inner wall edge.
+        # 将标注的底部货架与内墙边齐平封住
         (2, wall_t, 2.5, "floor"),
         (3, wall_t, 2.5, "floor"),
         (5, wall_t, 2.5, "floor"),
@@ -110,13 +109,13 @@ def create():
                            f"shelf_{column}_bridge_{region}")
         )
 
-    # Small fixed shelf at the far-right end of cross-aisle A.
+    # 通道 A 最右端的小型固定货架
     static.append(
         StaticObstacle(box(58.0, 29.0, 59.25, 32.0), "shelf_shipping_corner")
     )
 
     movable = [
-        # Left-side objects.
+        # 左侧物体
         MovableObstacle(
             x=19.2,
             y=10.5,
@@ -162,7 +161,7 @@ def create():
             oid="PL(H)",
         ),
 
-        # Central objects.
+        # 中部物体
         MovableObstacle(
             x=36.0,
             y=23.0,
@@ -197,7 +196,7 @@ def create():
             oid="SC",
         ),
 
-        # Right-side objects.
+        # 右侧物体
         MovableObstacle(
             x=52.0,
             y=16.0,
@@ -232,7 +231,7 @@ def create():
             oid="BX_D_2",
         ),
 
-        # Additional numbered objects.
+        # 其余编号物体
         MovableObstacle(
             x=16.0,
             y=7.35,
@@ -325,7 +324,7 @@ def create():
         ),
     ]
 
-    # Receiving-area start and shipping-area goal shown in the diagram.
+    # 图中所示的收货区起点与发货区终点
     start = (5.0, 1.25)
     goal = (56.0, 33.0)
 

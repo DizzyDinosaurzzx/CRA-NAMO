@@ -1,4 +1,4 @@
-"""CA-NAMO online "plan–execute–perceive–replan" loop"""
+"""CA-NAMO 在线"规划—执行—感知—重规划"主循环。"""
 
 from __future__ import annotations
 import math
@@ -22,38 +22,33 @@ import geometry
 import manipulation
 import timing
 
-# Simulation result summary
+# 仿真结果汇总
 @dataclass
 class RunResult:
-    success: bool                           # whether goal was reached
-    J: float = 0.0                          # total cost = walk_cost + work_cost
-    walk_cost: float = 0.0                  # motion cost = λ × total travel distance
-    manip_walk_cost: float = 0.0            # part of walk_cost spent escorting obstacles
-    work_cost: float = 0.0                  # manipulation cost = Σ(true difficulty × distance moved)
-    cycles: int = 0                         # number of replan cycles
-    # --- mission time: T = motion_time + plan_time (see timing.py) ---
-    motion_time: float = 0.0                # simulated seconds of robot motion
-    manip_motion_time: float = 0.0          # part of motion_time spent handling obstacles
-    plan_time: float = 0.0                  # measured seconds of decision compute (A* + LLM)
-    mission_time: float = 0.0               # motion_time + plan_time
-    first_plan_time: float = 0.0            # first plan time (seconds) — cold-start cost measure
-    total_expansions: int = 0               # total A* node expansions (all rounds combined)
-    llm_calls: int = 0                      # LLM API call count
-    llm_mode: str = "heuristic"             # LLM mode: heuristic / deepseek
-    removed: List[int] = field(default_factory=list)    # list of moved obstacle IDs
-    robot_track: List[Tuple[float, float]] = field(     # robot node coordinate sequence
+    success: bool                           # 是否到达目标
+    J: float = 0.0                          # 总代价 = 行走代价 + 搬运代价
+    walk_cost: float = 0.0                  # 行走代价 = λ × 总移动距离
+    manip_walk_cost: float = 0.0            # 其中护送障碍物所占的行走代价
+    work_cost: float = 0.0                  # 搬运代价 = Σ(真实难度 × 移动距离)
+    cycles: int = 0                         # 重规划轮数
+    # --- 任务时间：T = 运动时间 + 规划时间（见 timing.py）---
+    motion_time: float = 0.0                # 机器人运动的仿真秒数
+    manip_motion_time: float = 0.0          # 其中处理障碍物所占时间
+    plan_time: float = 0.0                  # 决策计算（A* + LLM）实测秒数
+    mission_time: float = 0.0               # 运动时间 + 规划时间
+    first_plan_time: float = 0.0            # 首次规划耗时（秒）——冷启动开销
+    total_expansions: int = 0               # A* 节点扩展总数（各轮累计）
+    llm_calls: int = 0                      # LLM API 调用次数
+    llm_mode: str = "heuristic"             # LLM 模式：heuristic / deepseek
+    removed: List[int] = field(default_factory=list)    # 已移动障碍物 ID 列表
+    robot_track: List[Tuple[float, float]] = field(     # 机器人途经节点坐标序列
         default_factory=list)
-    frames: List[dict] = field(default_factory=list)    # per-frame snapshots (for render_sequence)
-    message: str = ""                       # result description
+    frames: List[dict] = field(default_factory=list)    # 逐帧快照（供 render_sequence 用）
+    message: str = ""                       # 结果描述
 
-# Online simulator
+# 在线仿真器
 class OnlineNAMO:
-    """
-    Maintains two world models:
-    - self.world (real world)
-    - self.belief (robot belief)
-    The planner searches against belief only and cannot access the real world
-    """
+    """维护真实世界与机器人信念两套模型，规划器只基于信念搜索、无法访问真实世界。"""
     def __init__(self, workspace: Polygon,
                  static_obstacles: List[StaticObstacle],
                  movable_obstacles: List[MovableObstacle],
@@ -74,34 +69,32 @@ class OnlineNAMO:
         self.goal_point = self.roadmap.nodes[self.goal_node]
 
         self.estimator = DifficultyEstimator(cfg)
-        self.belief = Belief(self.roadmap, cfg)     # robot partial-observability belief
-        self._plan_paths: List[dict] = []           # all currently planned paths (for per-frame visualisation)
+        self.belief = Belief(self.roadmap, cfg)     # 机器人部分可观测信念
+        self._plan_paths: List[dict] = []           # 当前全部规划路径（用于逐帧可视化）
         self.failed_moves: set = set()
-        # true robot position. It equals the current roadmap node between actions,
-        # but during a manipulation the robot leaves the node to hold the obstacle.
+        # 机器人真实位置：动作间等于当前路网节点，搬运时离开节点贴住障碍物
         self.robot_xy: Tuple[float, float] = self.roadmap.nodes[self.start_node]
-        # mission clock. The robot starts already pointing at the goal, so the run
-        # does not open with an arbitrary pivot that depends on the world frame.
+        # 任务时钟：初始朝向对准目标，避免开局出现依赖坐标系的任意转向
         self.timer = timing.MotionTimer(
             timing.MotionProfile.from_config(cfg),
             heading=timing.heading_of(self.start_point, self.goal_point) or 0.0)
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
-        # insert start/goal into roadmap; snap to nearest valid node when the robot disc does not fit
+        # 将起点/终点插入路网；机器人圆盘放不下时吸附到最近有效节点
         cfg = self.cfg
         if not self.roadmap.free_eroded_prep.contains(Point(p)):
-            # point is inside a wall or too close -> degrade to nearest valid roadmap node
+            # 点在墙内或离墙太近 -> 退化为最近的有效路网节点
             p = self.roadmap.nodes[self.roadmap.nearest_node(p)]
         return self.roadmap.add_terminal(p)
 
-    # Main perception–action loop
+    # 主感知—动作循环
     def run(self) -> RunResult:
         cfg = self.cfg
         res = RunResult(success=False, llm_mode=self.estimator.mode)
-        node = self.start_node                           # robot current roadmap node
+        node = self.start_node                           # 机器人当前路网节点
         res.robot_track.append(self.roadmap.nodes[node])
         
-        # initial perception: scan visible obstacles around start
+        # 初始感知：扫描起点周围可见障碍物
         self.belief.perceive(self.world, self.roadmap.nodes[node])
         self._capture_frame(res, node, "start")
 
@@ -110,9 +103,8 @@ class OnlineNAMO:
 
         for cycle in range(cfg.max_replans):
             t0 = time.time()
-            # hand over where the robot is really pointing: with
-            # step_execute_edges=1 the first edge is the only one that gets
-            # driven, so its pivot is the one the plan should be paying for
+            # 传入机器人真实朝向：step_execute_edges=1 时只有首边会被真正
+            # 行驶，其转向代价应由规划来承担
             plan = planner.plan(node, self.goal_node, self.timer.heading)
             dt = time.time() - t0
             res.plan_time += dt
@@ -129,28 +121,26 @@ class OnlineNAMO:
             if node == self.goal_node:
                 break
 
-            # --- execute planned edges ---
+            # --- 执行规划边 ---
             moves_done = 0
             reached_goal = False
             for act in plan.actions:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
-                    # pre-move touch sensing: learn the true difficulty of this obstacle.
-                    # Moving is itself contact, so the moved obstacle is always revealed.
+                    # 搬运前触觉感知获取真实难度；推动本身就是接触，被搬障碍必被揭示
                     touched = self.belief.touch_check(self.robot_xy, self.world, cfg)
                     if self.belief.reveal_by_interaction(act["oid"], self.world):
                         touched.append(act["oid"])
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
-                    # escort the obstacle along its SE2 path, staying in contact
+                    # 贴身护送障碍物沿其 SE2 路径移动
                     move_success, hits, executed_dist, new_node = \
                         self._execute_move(act["oid"], obs, act, res, node, cfg)
-                    # a new node means the robot could not walk back to the one it
-                    # set out from, so the rest of this plan no longer applies
+                    # 出现新节点说明机器人回不到出发节点，本计划其余部分已失效
                     if new_node is not None:
                         node = new_node
-                    # charge only for the segment actually moved, using the true difficulty
+                    # 只按实际移动的路段、以真实难度计费
                     if executed_dist > 0.0:
                         true_diff = self._world_obstacle(act["oid"]).difficulty
                         executed_work = cost.manipulation_work(true_diff, executed_dist)
@@ -161,33 +151,31 @@ class OnlineNAMO:
                     elif not move_success and hits is not None:
                         self.failed_moves.add((move_signature(obs), act["key"]))
                     if not move_success:
-                        # hits is None when the robot itself ran into something
-                        # unknown — that is already recorded and framed inside
+                        # hits 为 None 表示机器人自身撞上未知物，已在内部记录并截图
                         if hits is not None:
-                            # collision — invalidate this placement and replan a new location
+                            # 碰撞：作废该放置位置，重规划新位置
                             self._handle_move_collision(res, node, act["oid"], hits)
                         break
                     if new_node is not None:
                         break
                 elif act["type"] == "move":
-                    prev_node = node    # remember where the move started
+                    prev_node = node    # 记录移动起点
                     from_pos = self.roadmap.nodes[prev_node]
                     to_pos = self.roadmap.nodes[act["v"]]
-                    # collision sensing
+                    # 碰撞感知
                     hit_oids, t_contact = self.belief.check_robot_collision(
                         from_pos, to_pos, self.world, cfg)
                     if hit_oids:
                         contact_pos = (
                             from_pos[0] + (to_pos[0] - from_pos[0]) * t_contact,
                             from_pos[1] + (to_pos[1] - from_pos[1]) * t_contact)
-                        # advance to contact point then retreat to previous node.
-                        # Both legs are charged; the return leg is driven in
-                        # reverse, so it costs a stop but not a pivot.
+                        # 前进到接触点再退回上一节点；两段都计费，
+                        # 退回是倒车，只付停车不付转向
                         leg = t_contact * act["dist"]
                         self._charge_walk(res, leg,
                                           heading=timing.heading_of(from_pos, to_pos))
                         self._charge_walk(res, leg)
-                        # collision is physical contact; the true difficulty of the hit object is revealed
+                        # 碰撞即物理接触，被撞物的真实难度被揭示
                         self.belief.touch_check(contact_pos, self.world, cfg)
                         self.belief.perceive(self.world, from_pos)
                         self._capture_frame(
@@ -198,13 +186,13 @@ class OnlineNAMO:
                     node = act["v"]
                     self._set_robot(res, self.roadmap.nodes[node])
                     moves_done += 1
-                    # touch sensing: learn true difficulty of touched obstacles
+                    # 触觉感知：获取所触障碍物的真实难度
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
-                    # perceive after each actual move (reveals exposed obstacles)
+                    # 每次实际移动后感知（揭示暴露出的障碍物）
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
                     self._capture_frame(res, node, f"move to node {node}")
                     if node == self.goal_node:
@@ -231,7 +219,7 @@ class OnlineNAMO:
         return res
 
     def _settle_time(self, res: RunResult):
-        """Close the mission clock: T = motion (simulated) + decision (measured)."""
+        """结算任务时间：T = 运动(仿真) + 决策(实测)。"""
         self.timer.flush()
         res.motion_time = round(self.timer.total, 4)
         res.manip_motion_time = round(self.timer.contact_total, 4)
@@ -287,7 +275,7 @@ class OnlineNAMO:
         cfg = self.cfg
         for oid_hit, region in hits:
             if oid_hit is None:
-                continue      # hit wall: walls are known static geometry, no new info to register
+                continue      # 撞墙：墙是已知静态几何，无新信息可登记
             if cfg.full_reveal_on_contact:
                 self.belief.force_reveal(self._world_obstacle(oid_hit))
             else:
@@ -307,15 +295,12 @@ class OnlineNAMO:
             return list(range(len(move_path)))
         return [int(i) for i in np.linspace(0, len(move_path) - 1, max_frames)]
 
-    # --- robot bookkeeping ---
+    # --- 机器人簿记 ---
     def _charge_walk(self, res: RunResult, dist: float, in_contact: bool = False,
                      heading: Optional[float] = None):
-        """Bill λ × dist of robot travel, and the seconds it takes.
+        """计收 λ × dist 的行走代价与耗时；搬运路程单独统计但同入 J 的 λ·D 项。
 
-        Manipulation travel is tracked separately for reporting but lands in the
-        same λ·D term of J. `heading` is the direction the robot drives in, so
-        the timer can charge the pivot it needs to get onto it; pass None when
-        the robot is reversing back over ground it just covered.
+        heading 为行进方向，计时器据此计转向；倒车重走刚走过的路时传 None。
         """
         charge = cost.motion_cost(self.cfg, dist)
         res.walk_cost += charge
@@ -329,10 +314,9 @@ class OnlineNAMO:
         res.robot_track.append(self.robot_xy)
 
     def _walk_robot(self, pts, res: RunResult, cfg: Config):
-        """Drive the robot through *pts* (pts[0] is where it already stands).
+        """驱动机器人依次通过 pts（pts[0] 为当前站位），遇到未知障碍即停。
 
-        Stops at the first obstacle it did not know about. Returns
-        (index reached, hit oids, stop position).
+        返回 (到达下标, 命中障碍 oid, 停止位置)。
         """
         for i in range(1, len(pts)):
             a, b = pts[i - 1], pts[i]
@@ -350,8 +334,7 @@ class OnlineNAMO:
         return len(pts) - 1, [], (pts[-1] if pts else self.robot_xy)
 
     def _retrace(self, res: RunResult, pts):
-        """Back out along ground the robot has just covered — no collision check
-        needed, it was clear a moment ago and nothing has moved since."""
+        """沿刚走过的路倒回，无需碰撞检测——刚才畅通且此后无物移动。"""
         for i in range(1, len(pts)):
             a, b = pts[i - 1], pts[i]
             self._charge_walk(res, math.dist(a, b), in_contact=True,
@@ -359,11 +342,7 @@ class OnlineNAMO:
             self._set_robot(res, pts[i])
 
     def _reanchor(self, res: RunResult, node: int) -> Optional[int]:
-        """Put the robot back on the roadmap after a manipulation.
-
-        Returns None when it made it back to the node the excursion started from
-        — the rest of the plan is then still valid — and the new node otherwise.
-        """
+        """搬运结束后让机器人回到路网；返回 None 表示回到出发节点（计划仍有效），否则返回新节点。"""
         blocked = self._known_obstacles_inflated()
         home = self.roadmap.nodes[node]
         if self.roadmap.can_drive(self.robot_xy, home, blocked):
@@ -390,14 +369,13 @@ class OnlineNAMO:
         shapely.prepare(geom)
         return geom
 
-    # --- manipulation ---
+    # --- 搬运 ---
     def _execute_move(self, oid: int, obs, act: dict,
                            res: RunResult, node: int, cfg: Config):
-        """Move one obstacle along its SE2 path with the robot holding on to it.
+        """机器人抓着障碍物沿其 SE2 路径移动。
 
-        Returns (success, hits, obstacle distance moved, new node or None).
-        ``hits`` is None when the *robot* — not the obstacle — ran into something
-        unknown; that case is fully handled here and only needs a replan.
+        返回 (成功, hits, 障碍物移动距离, 新节点或 None)；hits 为 None 表示
+        是机器人自身撞上未知物，该情况此处已处理完，只需重规划。
         """
         move_path = act["move_path"]
         frame_at = set(self._sample_move_path(move_path,
@@ -407,25 +385,20 @@ class OnlineNAMO:
         home = self.robot_xy
 
         cplan = act.get("contact")
-        # When the robot escorts the obstacle its own travel already accounts for
-        # the transport time. When it does not, the obstacle still takes time to
-        # cross its SE(2) path and the robot is stood waiting for it, so that has
-        # to be billed explicitly below.
+        # 贴身护送时机器人自身路程已含运输时间；否则障碍物走 SE(2) 路径期间
+        # 机器人原地等待，需在下面另行计费
         escorting = cfg.contact_required and cplan is not None and cplan.feasible
         if not escorting:
-            # contact model disabled: the obstacle moves while the robot waits on
-            # its node. Rebuilt around the robot's real position rather than
-            # reusing the planned one, which is anchored to the edge midpoint.
+            # 接触模型关闭：障碍物移动时机器人在节点上等待；以机器人真实位置
+            # 重建，而非复用锚定在边中点的规划位置
             cplan = contact.idle_plan(home, n)
         rp = list(cplan.robot_path)
-        # the plan measured the excursion from the edge midpoint; the robot is
-        # standing on one of that edge's endpoints, so re-anchor both ends to it
+        # 规划以边中点为基准测量往返程，机器人实际站在边的端点上，两端需重新锚定
         rp[0] = home
         rp[-1] = home
         off = cplan.move_offset
 
-        # Build STRtree once for all steps in this manipulation — avoids O(N) polygon
-        # scans on every sub-step of the manipulation trajectory.
+        # 整个搬运只建一次 STRtree，避免轨迹每个子步都做 O(N) 多边形扫描
         tree = None
         tree_items = None
         if cfg.check_obstacle_collision:
@@ -442,7 +415,7 @@ class OnlineNAMO:
                 tree = STRtree(polys)
                 tree_items = items
 
-        # --- approach ---
+        # --- 接近 ---
         reached, hits, stop = self._walk_robot(rp[:off + 1], res, cfg)
         if hits:
             self._retrace(res, [stop] + rp[reached::-1])
@@ -450,12 +423,11 @@ class OnlineNAMO:
             self._capture_frame(
                 res, node, f"robot hit {sorted(hits)} approaching {oid} -> replan")
             return (False, None, 0.0, None)
-        # latching on now and letting go later, billed once here so every exit
-        # path below pays for it
+        # 此处抓取、稍后松开，一次性计费，以下所有退出路径都要付这笔
         self.timer.grip()
         self._capture_frame(res, node, f"grip obstacle {oid}", move_oid=oid)
 
-        # --- move the obstacle ---
+        # --- 移动障碍物 ---
         last_i = 0
         for i in range(1, n):
             wx, wy, wth = move_path[i]
@@ -463,7 +435,7 @@ class OnlineNAMO:
                 obs_hits = self._world_collision(oid, wx, wy, wth, tree=tree,
                                                  tree_items=tree_items)
                 if obs_hits:
-                    # obstacle stopped at move_path[last_i]; belief syncs to that pose
+                    # 障碍物停在 move_path[last_i]，信念同步到该位姿
                     if last_i != 0:
                         self.belief.relocate(obs, *move_path[last_i])
                         self.belief.record_move_direction(oid, start_xy,
@@ -473,7 +445,7 @@ class OnlineNAMO:
                     return (False, obs_hits,
                             cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
                             new_node)
-            # the robot is holding the obstacle, so it can run into things too
+            # 机器人抓着障碍物，自身也可能撞上东西
             a, b = rp[off + i - 1], rp[off + i]
             hits, t = self.belief.check_robot_collision(a, b, self.world, cfg)
             if hits:
@@ -498,7 +470,7 @@ class OnlineNAMO:
                               heading=timing.heading_of(a, b))
             self._set_robot(res, b)
             if not escorting:
-                # robot waits on its node while the obstacle covers this sub-step
+                # 障碍物走过该子步期间机器人在节点上等待
                 self.timer.transport(
                     cost.se2_path_length(obs, move_path[i - 1:i + 1], cfg))
             last_i = i
@@ -506,7 +478,7 @@ class OnlineNAMO:
                 self._capture_frame(res, node, f"move {oid} step {i}/{n - 1}",
                                     move_oid=oid)
 
-        # update belief with final pose
+        # 以最终位姿更新信念
         self.belief.relocate(obs, *move_path[-1])
         self.belief.record_move_direction(oid, start_xy, move_path[-1])
         self.belief.perceive(self.world, self.robot_xy)
@@ -515,14 +487,11 @@ class OnlineNAMO:
 
     def _release_and_return(self, res: RunResult, rp: list, off: int, last_i: int,
                             completed: bool, node: int, cfg: Config) -> Optional[int]:
-        """Let go of the obstacle and get back onto the roadmap.
+        """松开障碍物并回到路网。
 
-        After a completed move the planned exit walk applies: round the obstacle
-        if need be, then back to the node the excursion started from, leaving the
-        rest of the plan valid. After an aborted one the robot is stranded at a
-        grip point the plan never expected it to let go at — the way home may now
-        be through the obstacle it was holding — so it drives to the nearest
-        roadmap node it can actually reach and the caller replans from there.
+        完成的搬运按规划退出路径走：必要时绕过障碍物回到出发节点，计划其余
+        部分仍有效。中断的搬运中机器人被困在规划外的抓持点——回家路可能被
+        手中障碍物挡住——故驶向实际可达的最近路网节点，由调用方重规划。
         """
         if not completed:
             return self._reanchor(res, node)
@@ -568,9 +537,9 @@ class OnlineNAMO:
         perceived = set(self.belief.perceived.keys())
         res.frames.append({
             "node": node,
-            "move_oid": move_oid,   # obstacle currently being moved (drawn above the robot)
-            "plan_paths": list(self._plan_paths),   # planned paths being executed at this frame
-            "robot": self.robot_xy,     # true position — off-node while holding an obstacle
+            "move_oid": move_oid,   # 当前被搬运的障碍物（画在机器人之上）
+            "plan_paths": list(self._plan_paths),   # 本帧正在执行的规划路径
+            "robot": self.robot_xy,     # 真实位置——抓着障碍物时不在节点上
             "track": list(res.robot_track),
             "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],
             "perceived": perceived,
@@ -579,8 +548,7 @@ class OnlineNAMO:
                 if oid in perceived
             },
             "touched_difficulty": dict(self.belief.touched_difficulty),
-            # running totals, so a frame's caption can carry the same figures
-            # the final summary does rather than a reduced version of them
+            # 累计值，使帧标题与最终汇总显示相同数字而非缩略版
             "J": round(res.J, 4),
             "walk_cost": round(res.walk_cost, 4),
             "work_cost": round(res.work_cost, 4),

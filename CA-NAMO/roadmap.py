@@ -1,4 +1,4 @@
-"""Augmented roadmap construction (uniform grid across the entire map)"""
+"""增强路网构建（整图均匀网格采样）"""
 
 from __future__ import annotations
 import math
@@ -17,13 +17,12 @@ class Roadmap:
         self.cfg = cfg
         self.workspace = workspace
         polys = [so.polygon for so in static_obstacles]
-        self.static_obstacles = static_obstacles  # for use by the SE(2) planner
-        # Three nested free-space sets, from largest to smallest. Keeping them
-        # named by what they are eroded by is the point: they differ only in that,
-        # and picking the wrong one is otherwise invisible.
-        #   static_free      — anywhere inside the workspace that is not a wall
-        #   free_eroded      — where the robot's *centre* may sit (eroded by r)
-        #   free_eroded_tol  — same, minus a contact_clearance hair of slack
+        self.static_obstacles = static_obstacles  # 供 SE(2) 规划器使用
+        # 三个嵌套的自由空间集合（从大到小），按"被谁腐蚀"命名——三者仅差在此，
+        # 选错不会有任何报错，只能靠命名区分：
+        #   static_free      — 工作区内除墙外的全部区域
+        #   free_eroded      — 机器人中心可处位置（按 r 腐蚀）
+        #   free_eroded_tol  — 同上，再减去 contact_clearance 的微小余量
         self.static_free = workspace.difference(unary_union(polys)) if polys else workspace
         self.static_free_prep = prep(self.static_free)
         self.free_eroded = self.static_free.buffer(-cfg.robot_radius, quad_segs=16)
@@ -40,15 +39,7 @@ class Roadmap:
 
     @property
     def free_eroded_tol(self):
-        """`free_eroded`, relaxed by `contact_clearance`.
-
-        Built lazily because only the contact model needs it. Roadmap
-        construction deliberately uses the strict `free_eroded`: a node is a place
-        the robot parks, and it should have real clearance. A grip point is not —
-        it is pressed flush against an obstacle that may itself be flush against a
-        wall, so it lands exactly on the strict boundary and gets rejected for a
-        rounding error. Hence the hair of slack, and hence two sets rather than one.
-        """
+        """free_eroded 放宽 contact_clearance 的版本；建图刻意用严格版（节点是停靠点，应有真实间隙），而抓取点恰好压在边界上会因舍入误差被拒，故另留松弛"""
         if self._free_eroded_tol is None:
             eps = max(1e-6, self.cfg.robot_radius - self.cfg.contact_clearance)
             geom = self.static_free.buffer(-eps, quad_segs=16)
@@ -56,14 +47,14 @@ class Roadmap:
             self._free_eroded_tol = geom
         return self._free_eroded_tol
 
-    # --- Construction ---
+    # --- 构建 ---
     def _build(self):
-        """Uniform grid across the entire map"""
+        """在全图上生成均匀网格路网"""
         cfg = self.cfg
         assert cfg.grid_step > 0 and cfg.conn_radius > 0
         minx, miny, maxx, maxy = self.workspace.bounds
         step = cfg.grid_step
-        # sample nodes on a grid, keeping only positions where the robot disc fits
+        # 网格采样节点，只保留机器人圆盘能容纳的位置
         buckets: Dict[Tuple[int, int], List[int]] = {}
         for iy in range(int((maxy - miny) / step) + 1):
             y = miny + iy * step
@@ -76,8 +67,8 @@ class Roadmap:
                 self.adj[nid] = []
                 b = (int(x // cfg.conn_radius), int(y // cfg.conn_radius))
                 buckets.setdefault(b, []).append(nid)
-        # connect nearby nodes whose inflated segment does not intersect walls. bucket size = conn_radius
-        #    so a 3×3 neighbourhood still covers every connectable pair.
+        # 连接邻近节点，要求膨胀后的线段不与墙相交；桶大小取 conn_radius，
+        # 这样 3×3 邻域即可覆盖所有可连接的点对
         for nid, (x, y) in enumerate(self.nodes):
             bx, by = int(x // cfg.conn_radius), int(y // cfg.conn_radius)
             for dbx in (-1, 0, 1):
@@ -101,14 +92,14 @@ class Roadmap:
         self.adj[u].append(v)
         self.adj[v].append(u)
 
-    # --- Query ---
+    # --- 查询 ---
     def neighbors(self, u: int):
         for v in self.adj[u]:
             key = (u, v) if u < v else (v, u)
             yield v, key, self.edge_len[key]
 
     def count_blocked_edges(self, poly: Polygon) -> int:
-        """How many edge corridors this footprint would block"""
+        """该形状会堵住多少条边走廊"""
         if self._corridor_tree is None:
             self._corridor_tree = STRtree(list(self.edge_corridor.values()))
         return len(self._corridor_tree.query(poly, predicate="intersects"))
@@ -127,14 +118,9 @@ class Roadmap:
 
     def can_drive(self, a: Tuple[float, float], b: Tuple[float, float],
                   blocked=None) -> bool:
-        """Can the robot drive straight from *a* to *b*?
-
-        *blocked* is an optional prepared geometry of robot-centre positions
-        ruled out by known movable obstacles.
-        """
+        """机器人能否从 a 直线驶达 b；blocked 为已知可动障碍对应的中心禁区（可选）"""
         if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9:
-            # degenerate segment: shapely predicates on a zero-length LineString
-            # are unreliable, and standing still is trivially possible anyway
+            # 零长线段上 shapely 谓词不可靠，且原地不动显然可行，只判点位即可
             return shapely.contains(self.free_eroded_tol, Point(a))
         seg = LineString([a, b])
         if not shapely.contains(self.free_eroded_tol, seg):
@@ -143,11 +129,7 @@ class Roadmap:
 
     def nearest_reachable_node(self, p: Tuple[float, float], blocked=None,
                                k: int = 24) -> int | None:
-        """Nearest node the robot can drive to from *p* in a straight line.
-
-        Used to put the robot back on the roadmap after a manipulation ended
-        somewhere off-graph.
-        """
+        """从 p 出发可直线驶达的最近节点；用于操作结束后把机器人放回路网"""
         if self._kdtree is None:
             return None
         k = min(k, len(self.nodes))
@@ -174,7 +156,7 @@ class Roadmap:
                 self.edge_corridor[key] = seg.buffer(cfg.robot_radius, cap_style=2)
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
-        self._corridor_tree = None      # new corridors, index is stale
+        self._corridor_tree = None      # 新增了走廊，索引已失效
         self._rebuild_kdtree()
         return nid
 

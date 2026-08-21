@@ -1,10 +1,4 @@
-"""Geometric primitives shared across the whole system.
-
-This module is deliberately dependency-free: it imports nothing from the rest of
-the project, so every other module can rely on it without creating a cycle. It
-holds the *maths* — rectangles, hulls, Minkowski sums, containment tests,
-separating-axis collision — and nothing about obstacles, planning, or costs.
-"""
+"""全系统共用的几何原语；刻意零依赖（矩形、凸包、闵可夫斯基和、包含判定、SAT 碰撞），供各模块引用而不产生循环依赖"""
 
 from __future__ import annotations
 
@@ -13,22 +7,15 @@ from typing import Tuple
 
 import numpy as np
 
-# How much overlap counts as "still clear". About 1 mm^2: purely there to absorb
-# convex-hull approximation and floating-point residue, not a licence for real
-# penetration. Planning and execution MUST share it — when planning is the more
-# permissive of the two, it hands the executor paths the executor then rejects,
-# and the manipulation gets blacklisted for a rounding error.
+# 判定"仍算无碰撞"的重叠面积阈值（约 1 mm^2），只为吸收凸包近似与浮点残差，不允许真实穿透。
+# 规划与执行必须共用：若规划侧更宽松，其给出的路径会被执行器拒收，操作将因舍入误差被拉黑。
 CONTACT_AREA_EPS = 1e-6
 
 
-# --- rectangles ---
+# --- 矩形 ---
 def rect_corners(cx: float, cy: float, w: float, h: float,
                  theta: float) -> np.ndarray:
-    """Corners of a w x h rectangle centred at (cx, cy), rotated by theta.
-
-    Counter-clockwise, which is what `inside_convex` and `convex_hull` assume.
-    Called with (0, 0, ...) it yields corner offsets in the body frame.
-    """
+    """以 (cx, cy) 为中心、旋转 theta 的 w×h 矩形顶点；逆时针排列（inside_convex / convex_hull 的约定），传 (0,0,...) 即得体坐标系偏移"""
     dx, dy = w / 2.0, h / 2.0
     local = np.array([[-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]], dtype=float)
     c, s = math.cos(theta), math.sin(theta)
@@ -64,11 +51,11 @@ def minkowski_sum(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 
 def c_obstacle(shape_poly: np.ndarray, obs_corners_local: np.ndarray) -> np.ndarray:
-    """Configuration-space obstacle: where the body centre may not go."""
+    """构型空间障碍：形体中心不可进入的区域"""
     return minkowski_sum(shape_poly, -obs_corners_local)
 
 
-# --- containment ---
+# --- 包含判定 ---
 def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
                   margin: float = 0.0) -> np.ndarray:
     poly = np.asarray(poly, dtype=float)
@@ -76,7 +63,7 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
     shape = np.broadcast(X, Y).shape
     if n == 0:
         return np.zeros(shape, dtype=bool)
-    if n < 3:  # degenerate case: point or line segment
+    if n < 3:  # 退化情形：点或线段
         a, b = poly[0], poly[-1]
         ab = b - a
         L2 = float(ab @ ab)
@@ -94,7 +81,7 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
         L = math.hypot(e[0], e[1])
         if L < 1e-12:
             continue
-        nx, ny = e[1] / L, -e[0] / L  # outward normal of counter-clockwise polygon
+        nx, ny = e[1] / L, -e[0] / L  # 逆时针多边形的外法向
         inside &= ((X - p[0]) * nx + (Y - p[1]) * ny) <= margin
     return inside
 
@@ -104,7 +91,7 @@ def offset_bbox(poly: np.ndarray, margin: float):
     n = len(poly)
     if n == 0:
         return None
-    if n < 3:      # degenerate point/segment: criterion is "distance <= margin", just expand bbox
+    if n < 3:      # 退化的点/线段：判定即"距离 <= margin"，直接外扩 bbox 即可
         return (poly[:, 0].min() - margin, poly[:, 0].max() + margin,
                 poly[:, 1].min() - margin, poly[:, 1].max() + margin)
 
@@ -127,7 +114,7 @@ def offset_bbox(poly: np.ndarray, margin: float):
         (ax, ay), ca = normals[i - 1], offsets[i - 1]
         (bx, by), cb = normals[i], offsets[i]
         det = ax * by - ay * bx
-        if abs(det) < 1e-12:      # adjacent edges collinear: vertex does not exist, skip
+        if abs(det) < 1e-12:      # 相邻边共线则顶点不存在，跳过
             continue
         xs.append((ca * by - cb * ay) / det)
         ys.append((ax * cb - bx * ca) / det)
@@ -136,13 +123,9 @@ def offset_bbox(poly: np.ndarray, margin: float):
     return (min(xs), max(xs), min(ys), max(ys))
 
 
-# --- rotation ---
+# --- 旋转 ---
 def mean_rotation_radius(w: float, h: float) -> float:
-    """Mean distance from the centroid to a point of a w x h rectangle.
-
-    Converts an angle into an equivalent translation distance, so rotating and
-    sliding can be summed into one path length.
-    """
+    """w×h 矩形质心到其上一点的平均距离；用于把转角折算成等效平移距离，使旋转与滑动可合并计入同一路径长"""
     if w <= 0.0 or h <= 0.0:
         return 0.0
     s = math.hypot(w, h)
@@ -152,18 +135,11 @@ def mean_rotation_radius(w: float, h: float) -> float:
 
 
 def wrap_dtheta(a: float, b: float) -> float:
-    """Shortest turn from a to b, modulo pi.
-
-    A rectangle at theta and theta+pi has the same footprint, so orientation is
-    only meaningful mod pi. Everything that follows a body's rotation — swept
-    volumes, rotation cost, contact grip points — must go through this, and
-    anything tracking a body-fixed point must *accumulate* it rather than read
-    the stored angle, or it will jump half a turn when the index wraps.
-    """
+    """a 到 b 的最短转角（模 pi）：矩形朝向仅模 pi 有意义；跟踪刚体固连点必须累加本值而非直接读存储角，否则索引回绕时会跳半圈"""
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
 
 
-# --- SAT collision test ---
+# --- SAT 碰撞检测 ---
 def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
     for poly in (A, B):
         n = len(poly)
@@ -180,9 +156,9 @@ def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
     return True
 
 
-# --- shapely I/O ---
+# --- shapely 输入输出 ---
 def polygon_exterior_coords(polygon) -> np.ndarray:
-    """Vertices of a shapely Polygon as an (N, 2) array, without the repeated last point."""
+    """shapely 多边形外环顶点，返回 (N, 2) 数组并去掉末尾重复点"""
     coords = list(polygon.exterior.coords)
     if len(coords) >= 2 and coords[0] == coords[-1]:
         coords = coords[:-1]

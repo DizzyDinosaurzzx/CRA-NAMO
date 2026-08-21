@@ -1,4 +1,4 @@
-"""See-over-a-low-obstacle demo"""
+"""越障可视场景：低矮宽障碍挡路但遮不住后方高处目标，考验遮挡推理。"""
 
 from __future__ import annotations
 from shapely.geometry import box
@@ -6,41 +6,38 @@ from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
+    """构建越障可视场景。"""
     workspace = box(0, 0, 20, 16)
 
     t = 0.4
-    # Three chambers stacked bottom-to-top, joined by two doorways. Both doorways
-    # are wide enough that every line of sight from the start to either obstacle
-    # stays clear of them — the low obstacle remains the only thing standing
-    # between the robot and oid 2.
+    # 三个房间上下排布、由两道门相连；门都足够宽，不会挡住起点到任一障碍的视线，
+    # 低矮障碍始终是机器人与 oid 2 之间唯一的遮挡。
     walls = [
         StaticObstacle(box(0.0, 0.0, 20.0, t), "outer_bottom"),
         StaticObstacle(box(0.0, 16.0 - t, 20.0, 16.0), "outer_top"),
         StaticObstacle(box(0.0, 0.0, t, 16.0), "outer_left"),
         StaticObstacle(box(20.0 - t, 0.0, 20.0, 16.0), "outer_right"),
 
-        # entrance divider — doorway x in [7.5, 12.5], straight ahead of the start
+        # 入口隔墙——门洞 x 在 [7.5, 12.5]，正对起点
         StaticObstacle(box(t, 4.0, 7.5, 4.0 + t), "entrance_left"),
         StaticObstacle(box(12.5, 4.0, 20.0 - t, 4.0 + t), "entrance_right"),
 
-        # flanks level with oid 1, closing the hall off on both sides so oid 1 is
-        # the only gate: the 0.4 m slivers left over beside it are narrower than
-        # the robot, so reaching the goal means pushing it out of the way.
+        # 与 oid 1 同层的两侧封壁，使其成为唯一闸口：两侧仅剩 0.4 m 缝隙窄于机器人，
+        # 通行必须把它推开。
         StaticObstacle(box(t, 6.5, 6.6, 7.5), "gate_flank_left"),
         StaticObstacle(box(13.4, 6.5, 20.0 - t, 7.5), "gate_flank_right"),
 
-        # alcove stubs, far enough out that no sight line reaches them
+        # 凹室短墙，足够远，视线不会触及
         StaticObstacle(box(t, 9.0, 3.5, 9.0 + t), "alcove_left"),
         StaticObstacle(box(16.5, 9.0, 20.0 - t, 9.0 + t), "alcove_right"),
 
-        # exit divider — doorway x in [6.0, 11.0], offset so the robot has to
-        # steer around oid 2 rather than walk straight at the goal
+        # 出口隔墙——门洞 x 在 [6.0, 11.0]，故意错开，逼机器人绕过 oid 2 而非直奔目标
         StaticObstacle(box(t, 12.5, 6.0, 12.5 + t), "exit_left"),
         StaticObstacle(box(11.0, 12.5, 20.0 - t, 12.5 + t), "exit_right"),
     ]
 
     movable = [
-        # front, low and wide — casts a full geometric shadow over oid 2
+        # 前方低矮宽大——在几何上完全遮挡 oid 2
         MovableObstacle(
             x=10.0,
             y=7.0,
@@ -52,7 +49,7 @@ def create():
             difficulty=2048.328,
             oid=1,
         ),
-        # behind, tall and narrow — visible over the top of oid 1
+        # 后方高瘦——可越过 oid 1 顶部被看到
         MovableObstacle(
             x=10.0,
             y=10.5,

@@ -1,10 +1,12 @@
+"""场景注册与加载：自动发现场景模块并统一校验。"""
+
 from __future__ import annotations
 import pkgutil
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-# ---- Default map ---- #
+# ---- 默认地图 ---- #
 DEFAULT_SCENARIO = "two_doors"
 REQUIRED_FIELDS = {
     "workspace",
@@ -18,14 +20,16 @@ REQUIRED_FIELDS = {
 _PKG_DIR = Path(__file__).resolve().parent
 _PACKAGE = __name__.rpartition(".")[0] or "scenarios"
 
-# -------- Load map -------- #
+# -------- 地图加载 -------- #
 
 def names() -> tuple[str, ...]:
+    """列出所有可用场景名。"""
     return tuple(sorted(
         m.name for m in pkgutil.iter_modules([str(_PKG_DIR)])
         if not m.name.startswith("_") and m.name != "registry"
     ))
 def load(name: str | None = None) -> dict[str, Any]:
+    """加载指定场景（缺省用默认地图），校验字段并归一化。"""
     selected = name or DEFAULT_SCENARIO
     available = names()
     if selected not in available:
@@ -40,13 +44,13 @@ def load(name: str | None = None) -> dict[str, Any]:
     if not isinstance(scenario, dict):
         raise TypeError(f"{selected}.create() must return a dict")
 
-    # Check required fields
+    # 校验必需字段
     missing = REQUIRED_FIELDS.difference(scenario)
     if missing:
         fields = ", ".join(sorted(missing))
         raise ValueError(f"Map {selected!r} is missing fields: {fields}")
 
-    # Normalise start/goal to float coordinates
+    # 起终点统一为 float 坐标
     for field in ("start", "goal"):
         point = scenario[field]
         if len(point) != 2:

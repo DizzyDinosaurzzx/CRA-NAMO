@@ -1,42 +1,8 @@
-"""Ground-truth dataset for benchmarking the LLM mu*rho estimator.
-
-The estimator in `llm_difficulty.py` short-circuits any label that is an exact
-PROMPT_ANCHORS entry (or a MATERIAL_ALIASES synonym): the prompt then orders the
-model to echo the calibrated number back. Testing those labels would only measure
-instruction following, not estimation. Every label below is therefore chosen to
-*miss* that short-circuit, so `DifficultyEstimator._deepseek` has to reason its
-way to a number. `assert_all_off_anchor()` enforces this.
-
-Where the ground truth comes from
----------------------------------
-Two different, independently defensible sources — kept in separate groups
-because they answer different questions:
-
-`paraphrase`
-    The label is a plain-language restatement of one of the project's own
-    anchors ("expanded polystyrene packing box" == `styrofoam_box`). Ground
-    truth is that anchor's calibrated mu*rho, so the reference number is exactly
-    the one CA-NAMO already commits to elsewhere — nothing new is asserted. This
-    group measures wording robustness: does dropping the magic string change the
-    number the planner sees?
-
-`novel` / `state` / `brand`
-    The object is not in the anchor table at all. Ground truth is *derived*, not
-    measured: mu * (mass_kg / (l*d*h)), with mass, bounding box and mu all
-    recorded per item so the number can be audited and argued with. These are
-    reference values from published spec sheets and standard friction
-    coefficients, not laboratory measurements — treat a 1.5x disagreement on a
-    single item as "the reference is arguable", and only the distribution over
-    the whole group as evidence.
-
-    `state` items exist in filled/empty pairs on purpose: bulk density is the
-    term that moves by an order of magnitude in practice, and a pair isolates
-    whether the model tracks it.
-"""
+"""LLM mu*rho 估计器的基准真值数据集：所有标签都刻意避开锚点短路，迫使模型真的估计。"""
 
 from __future__ import annotations
 
-# Run from anywhere: the library lives one directory up.
+# 任意目录均可运行：库位于上一级目录。
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
@@ -53,17 +19,17 @@ from llm_difficulty import (
 
 @dataclass(frozen=True)
 class Item:
-    """One benchmark object: a label to ask about, and what the answer should be."""
+    """一个基准物体：待询问的标签与应有的答案。"""
 
-    label: str                  # exactly what goes into the prompt as `material`
+    label: str                  # 原样进入 prompt 的 material 字段
     group: str                  # paraphrase | novel | state | brand
-    mu: float                   # reference friction / rolling-resistance coefficient
-    rho: float                  # reference BULK density [kg/m^3] = mass / bbox volume
-    l: float                    # representative bounding box [m]
+    mu: float                   # 参考摩擦/滚动阻力系数
+    rho: float                  # 参考堆积密度 [kg/m^3] = 质量 / 包围盒体积
+    l: float                    # 代表性包围盒尺寸 [m]
     d: float
     h: float
-    note: str                   # where mu and rho come from
-    anchor: Optional[str] = None    # paraphrase group: the anchor it restates
+    note: str                   # mu 与 rho 的出处
+    anchor: Optional[str] = None    # paraphrase 组：所复述的锚点
 
     @property
     def mu_rho(self) -> float:
@@ -74,11 +40,7 @@ class Item:
         return self.l * self.d * self.h
 
     def observation(self, oid: int = 0, scale: float = 1.0) -> dict:
-        """The dict shape `DifficultyEstimator.estimate` consumes.
-
-        `scale` multiplies every linear dimension, for the size-independence
-        probe: mu*rho is defined to be size-free, so the answer must not move.
-        """
+        """构造 `DifficultyEstimator.estimate` 消费的字典；scale 等比缩放线尺寸，用于尺寸无关性检验（mu*rho 不应随之变化）。"""
         return {
             "oid": oid,
             "material": self.label,
@@ -89,7 +51,7 @@ class Item:
 
 
 def _anchor_item(label: str, anchor: str, l: float, d: float, h: float) -> Item:
-    """A paraphrase item, taking mu and rho straight from the anchor tables."""
+    """paraphrase 条目：mu 与 rho 直接取自锚点表。"""
     return Item(
         label=label,
         group="paraphrase",
@@ -103,7 +65,7 @@ def _anchor_item(label: str, anchor: str, l: float, d: float, h: float) -> Item:
 
 def _derived(label: str, group: str, mass_kg: float, mu: float,
              l: float, d: float, h: float, note: str) -> Item:
-    """A novel object: rho is computed from mass over the bounding box."""
+    """表外物体：rho 由质量除以包围盒体积推得。"""
     return Item(
         label=label, group=group, mu=mu, rho=mass_kg / (l * d * h),
         l=l, d=d, h=h, note=f"{mass_kg:g} kg / {l*d*h:.4g} m^3, mu={mu:g}; {note}",
@@ -111,8 +73,7 @@ def _derived(label: str, group: str, mass_kg: float, mu: float,
 
 
 # --------------------------------------------------------------------------- #
-# Group 1 - paraphrases of the project's own anchors.
-# Ground truth = the anchor's calibrated mu*rho. Spans 1.0 -> 1440 kg/m^3.
+# 第 1 组：项目自身锚点的改述；真值 = 锚点标定的 mu*rho，跨度 1.0 -> 1440 kg/m^3。
 # --------------------------------------------------------------------------- #
 PARAPHRASE: List[Item] = [
     _anchor_item("unloaded push trolley",            "empty_cart",         1.0, 0.7, 1.0),
@@ -140,7 +101,7 @@ PARAPHRASE: List[Item] = [
 ]
 
 # --------------------------------------------------------------------------- #
-# Group 2 - objects outside the anchor table entirely.
+# 第 2 组：完全不在锚点表内的物体。
 # --------------------------------------------------------------------------- #
 NOVEL: List[Item] = [
     _derived("office water cooler with full 19 litre bottle", "novel",
@@ -196,7 +157,7 @@ NOVEL: List[Item] = [
 ]
 
 # --------------------------------------------------------------------------- #
-# Group 3 - filled vs empty. Same object, an order of magnitude apart in rho.
+# 第 3 组：满/空成对出现，同一物体的 rho 相差一个数量级。
 # --------------------------------------------------------------------------- #
 STATE: List[Item] = [
     _derived("cardboard box packed with hardcover books", "state",
@@ -218,8 +179,7 @@ STATE: List[Item] = [
 ]
 
 # --------------------------------------------------------------------------- #
-# Group 4 - brand and product names. The prompt tells the model to resolve these
-# to the real object; this group checks whether it does.
+# 第 4 组：品牌/产品名；prompt 要求模型还原成真实物体，本组检验是否照做。
 # --------------------------------------------------------------------------- #
 BRAND: List[Item] = [
     _derived("IKEA BILLY bookcase, empty", "brand",
@@ -238,20 +198,15 @@ BRAND: List[Item] = [
 
 DATASET: List[Item] = PARAPHRASE + NOVEL + STATE + BRAND
 
-# Anchor -> paraphrase label, used by the navigation experiment to relabel a map
-# without changing its physics: the paraphrase carries the same ground truth, so
-# only what the *estimator* sees differs between arms.
+# 锚点 -> 改述标签：导航实验用它重贴地图标签而不改变物理——真值相同，
+# 各 arm 之间只有估计器看到的字符串不同。
 PARAPHRASE_OF_ANCHOR: Dict[str, str] = {
     item.anchor: item.label for item in PARAPHRASE if item.anchor
 }
 
 
 def assert_all_off_anchor() -> None:
-    """Fail loudly if a label would take the echo-the-anchor short-circuit.
-
-    Such an item would score a perfect match without the model estimating
-    anything, quietly inflating every accuracy number in the report.
-    """
+    """校验没有标签会命中锚点短路：命中的条目无需估计即可满分，会悄悄虚增所有准确率数字。"""
     leaked = [it.label for it in DATASET if _canonical_anchor(it.label) is not None]
     if leaked:
         raise AssertionError(
