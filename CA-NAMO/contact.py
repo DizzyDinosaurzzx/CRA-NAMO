@@ -44,11 +44,6 @@ class ContactPlan:
                    for t in range(a, b))
 
 
-def idle_plan(robot_pos: XY, n_poses: int) -> ContactPlan:
-    """无需贴身接触时的退化方案:机器人原地不动,结构上与真实方案一致以便执行器统一处理,且不产生行程。"""
-    return ContactPlan(True, "", [tuple(robot_pos)] * (max(1, n_poses) + 2), 1, 0.0)
-
-
 # --- 抓持站 ---
 def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
     """与 l x d 矩形接触的机器人圆心位置。

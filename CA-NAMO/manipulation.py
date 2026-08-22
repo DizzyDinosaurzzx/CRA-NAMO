@@ -152,8 +152,6 @@ def plan_move_se2(
     path_accept=None,                   # (poses) -> bool, 对整条路径的额外硬约束
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
     """规划把 *obs* 挪到哪里才能不再挡路,以及怎么挪过去。"""
-    if not cfg.se2_use_planner:
-        return (False, None, math.inf, None)
     try:
         planner = _get_planner(obs, static_obstacles, bounds, robot_pos,
                                cfg, others_polys)

@@ -25,7 +25,6 @@ def _ring(ring):
 
 def _plot_poly(ax, poly, **kw):
     """填充 (Multi)Polygon（含洞）：所有环合成一条复合路径，由 Agg 按奇偶规则填充。
-
     只填 exterior 会把洞盖住——轨迹闭环时绕行的整片空地会被误涂成走过的区域。
     """
     geoms = poly.geoms if poly.geom_type.startswith("Multi") else [poly]
@@ -166,14 +165,14 @@ def _mode_tag(sim: OnlineNAMO) -> str:
     return "[" + " | ".join((
         cfg.strategy,
         f"w={cfg.time_importance:g}",
-        "SE2" if cfg.se2_use_planner else "teleport",
         sim.estimator.mode,
     )) + "]"
 
 
 def _cost_line(J, walk, work, motion_s, plan_s) -> str:
     return (f"J {J:,.1f} = λD {walk:,.1f} + W {work:,.1f}"
-            f"  |  move {motion_s:,.1f}s + plan {plan_s:,.1f}s")
+            f"  |  move {motion_s:,.1f}s + plan {plan_s:,.1f}s"
+            f" = total {motion_s + plan_s:,.1f}s")
 
 
 def _wrap_title(lines, width_inch: float) -> str:
@@ -299,6 +298,25 @@ def _shared_palette(buffers, colors: int = 255):
     return montage.quantize(colors=colors, method=Image.MEDIANCUT)
 
 
+def _frame_durations(frames: list, cfg) -> list:
+    """按相邻帧 motion_time(仿真物理耗时，不含 plan_time——思考时间只衡量算法，
+    不代表世界在动，见 executor._tick) 差值折算每帧停留的毫秒数；gif_speed 是相对
+    仿真时间的播放倍率，gif_fps/gif_max_frame_s 分别给单帧时长设下限与上限，
+    避免几毫秒的子步一闪而过、或一次缓慢搬运把动画卡住半天。"""
+    n = len(frames)
+    min_ms = max(20, int(round(1000.0 / cfg.gif_fps)))
+    max_ms = max(min_ms, int(round(cfg.gif_max_frame_s * 1000)))
+    speed = max(cfg.gif_speed, 1e-6)
+    out = []
+    for i in range(n):
+        dt = (max(0.0, frames[i + 1]["motion_time"] - frames[i]["motion_time"])
+              if i + 1 < n else 0.0)
+        ms = int(round(dt / speed * 1000.0))
+        out.append(min(max(ms, min_ms), max_ms))
+    out[-1] = max(out[-1], int(cfg.gif_end_hold_s * 1000))
+    return out
+
+
 def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
     """将全部运动帧渲染为一个 GIF 动画。"""
     cfg = sim.cfg
@@ -320,9 +338,7 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
     images = [Image.open(b).convert("RGB").quantize(palette=palette,
                                                     dither=Image.NONE)
               for b in buffers]
-    step_ms = max(20, int(round(1000.0 / cfg.gif_fps)))
-    durations = [step_ms] * len(images)
-    durations[-1] = max(step_ms, int(cfg.gif_end_hold_s * 1000))  # 在结果帧上停顿
+    durations = _frame_durations(res.frames, cfg)
     images[0].save(gif_path, save_all=True, append_images=images[1:],
                    duration=durations, loop=0, optimize=True)
     return total

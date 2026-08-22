@@ -21,6 +21,20 @@ def manipulation_work(difficulty: float, distance: float) -> float:
     return difficulty * distance
 
 
+def turn_cost(cfg: Config, dtheta: float) -> float:
+    """机器人原地转 dtheta 弧度所耗能量，即并入 J 的转弯项。
+
+    把机器人半径处的一点沿弧线拖出这么长一段位移，等效为走同样长度直线所需的功——
+    和 se2_path_length 用 mean_rotation_radius 把障碍物自转折算成距离是同一套物理
+    类比（那边算的是障碍物自己转，这边算的是机器人原地转）。恒定计入 J，与
+    time_importance 无关：转弯本来就要克服真实的滑动/转向阻力，不是只有赶时间才
+    该在乎的事。
+    """
+    if dtheta <= 0.0:
+        return 0.0
+    return motion_cost(cfg, cfg.robot_radius * dtheta)
+
+
 # --- 路径度量 ---
 def se2_path_length(obs, poses, cfg: Config) -> float:
     """SE(2) 路线长度；原地旋转也做功，按平均旋转半径折算成等效平移计入。"""
@@ -74,19 +88,23 @@ def search_motion_cost(cfg: Config, distance: float) -> float:
 
 
 def search_turn_cost(cfg: Config, dtheta: float) -> float:
-    """拐角处停车原地转 dtheta 的搜索代价：纯时间项，w=0 时恰为零，不影响纯能量模型；缺了它搜索会无视拐角，用一堆加减速换更短的路。"""
-    if cfg.time_importance <= 0.0 or dtheta <= 0.0:
+    """拐角处停车原地转 dtheta 的搜索代价：能量项 turn_cost 恒定计入(与 search_motion_cost
+    对行驶距离的处理是同一套逻辑，w=0 时 blend() 精确返回这一项、不多不少)；时间项只在
+    w>0 时通过 blend 混入。以前这里只有时间项、w=0 时恒为零，搜索会完全无视拐角——
+    不只是"用一堆加减速换更短的路"，更严重的是转弯本身产生的真实能耗(见 turn_cost)
+    从未进过 J，分支限界会剪掉本该更省的方案，见 README「时间权重」一节的实测案例。
+    """
+    if dtheta <= 0.0:
         return 0.0
-    return blend(cfg, 0.0, timing.turn_seconds(cfg, dtheta))
+    return blend(cfg, turn_cost(cfg, dtheta), timing.turn_seconds(cfg, dtheta))
 
 
-def removal_cost(cfg: Config, work: float, contact_travel: float,
-                 move_dist: float) -> float:
-    """搜索对搬走一个障碍物的计费；move_dist 仅在 --no-contact 模型下用于计时。
+def removal_cost(cfg: Config, work: float, contact_travel: float) -> float:
+    """搜索对搬走一个障碍物的计费。
 
-    work 为障碍物摩擦功的估计，contact_travel 为机器人接送随行所行驶的距离。
+    work 为障碍物摩擦功的估计，contact_travel 为机器人贴身接送随行所行驶的距离。
     """
     joules = (work * strategy_weights(cfg).work_mult
               + motion_cost(cfg, contact_travel))
-    return blend(cfg, joules, timing.removal_seconds(cfg, contact_travel, move_dist))
+    return blend(cfg, joules, timing.removal_seconds(cfg, contact_travel))
 

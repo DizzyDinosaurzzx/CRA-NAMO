@@ -41,11 +41,25 @@ class Config:
     # --- 搜索优化目标：C = (1-w)*J + w*(lambda*v_max)*T ---
     # 求快与求省的权重：0 为纯能量 J（与旧模型完全一致），1 为纯最快 T。
     # 一秒按 lambda*v_max [W] 计价——即巡航一秒本就要花的能量，无需另行标定，见 cost.time_price。
-    time_importance: float = 0.5
+    time_importance: float = 1
 
     # --- 感知 ---
     R_perc: float = 10.0       # 感知半径
     sight_width: float = 0.1     # 视线宽度
+    # 额外的重新感知触发阈值(见 executor._perc_poll)：累计位移/累计耗时任一超过就
+    # 补扫一次世界；默认 inf 即关闭，不影响现有场景——今天的按边/按动作感知点已经够用，
+    # 只有配合会自主移动的障碍物(drift.py)时才需要收紧。
+    perc_step: float = float("inf")        # 触发重新感知的累计位移 [m]
+    perc_time_step: float = float("inf")   # 触发重新感知的累计仿真耗时 [s]（不含 plan_time）
+
+    # --- 自主移动障碍物挡路时的应对 ---
+    # 机器人走到一半被挂了 drift 策略的障碍物挡住时，与其立刻重规划绕路，不如先原地
+    # 等它自己让开——这不是给 A* 加时空维度的"等待"动作(那需要预测 drift 的未来轨迹，
+    # 代价和风险都大得多，故未做)，只是执行层面"先等等看"的轻量策略。默认 0 即不等，
+    # 不影响任何不挂 drift 的场景；只在挡路的障碍物确实挂了 drift 时才会触发，见
+    # executor._wait / _any_drifting。
+    wait_on_block_s: float = 0.0       # 被 drift 障碍物挡路时先等待的秒数
+    wait_substep_s: float = 0.5        # 等待按多大步长切分推进(避免大 Δt 让漂移跳步)
 
     # --- 搬运 ---
     # "搬运"统指沿任意方向推或拉障碍物：机器人可在其周边任一点抓取，无优先方向。
@@ -58,14 +72,12 @@ class Config:
 
     # --- 机器人与障碍物接触 ---
     # 障碍物移动全程机器人须贴住它：可在周边任一点抓取（任意方向推/拉），移动中抓取点还可沿表面滑移；
-    # 自身行程与普通行驶一样按 lambda_distance 计费。contact_required=False 退回旧模型（机器人在路网点上原地等待）。
-    contact_required: bool = True
+    # 自身行程与普通行驶一样按 lambda_distance 计费。这是唯一的搬运模型，没有开关。
     contact_station_spacing: float = 0.3   # 障碍物周边候选抓取点的间距 [m]
     contact_max_slide: float = 0.6         # 每个搬运子步内抓取点可滑移的距离 [m]
     contact_clearance: float = 0.01        # 区分"接触"与"重叠"的容差 [m]
 
     # --- SE(2) 路径规划器（障碍物自身的路线） ---
-    se2_use_planner: bool = True
     se2_cell: float = 0.15
     se2_n_theta: int = 12
     se2_connectivity: int = 8
@@ -101,7 +113,13 @@ class Config:
     rng_seed: int = 0
     out_dir: str = "img"
     save_frames: bool = False   # 是否保存逐步动画（GIF）
-    gif_fps: float = 5.0       # 动画速度（帧/秒）
+    # 每帧停留时长按相邻帧 motion_time(仿真物理耗时，不含 plan_time) 差值折算，而非
+    # 固定帧率；gif_speed=1 即按仿真时间原速播放，>1 加快、<1 放慢。gif_fps 退化为
+    # 最小停留时长的下限(避免极短子步一闪而过)，gif_max_frame_s 是上限(避免一次
+    # 缓慢搬运把动画卡住半天)。
+    gif_speed: float = 1.0      # 播放速度倍率，相对仿真时间
+    gif_fps: float = 5.0       # 单帧最短停留对应的帧率上限
+    gif_max_frame_s: float = 5.0   # 单帧最长停留时长(仿真秒数按 gif_speed 折算后)[s]
     gif_end_hold_s: float = 2  # 循环前最后一帧的停留时长
     gif_dpi: int = 300         # GIF 内每帧的渲染分辨率
     verbose: bool = True

@@ -61,10 +61,9 @@ def turn_between(h_in: Optional[float], h_out: Optional[float]) -> float:
     return abs(_wrap_pi(h_out - h_in))
 
 
-def removal_seconds(cfg: Config, contact_travel: float, move_dist: float) -> float:
-    """估计搬走一个障碍物所需秒数；move_dist 仅在 --no-contact 模型（机器人不随行）下计时。"""
-    handling = (contact_travel if cfg.contact_required else move_dist)
-    return handling / cfg.v_max_contact + 2.0 * cfg.grip_time
+def removal_seconds(cfg: Config, contact_travel: float) -> float:
+    """估计搬走一个障碍物所需秒数：机器人全程贴身护送，按其自身接送路程计时。"""
+    return contact_travel / cfg.v_max_contact + 2.0 * cfg.grip_time
 
 
 @dataclass(frozen=True)
@@ -140,15 +139,11 @@ class MotionTimer:
         self.heading = heading
 
     def hold(self, seconds: float, in_contact: bool = True) -> None:
-        """机器人原地不动但被占用的时间——抓取、松开或等待非随行移动的障碍物。"""
+        """机器人原地不动但被占用的时间——抓取或松开。"""
         if seconds <= 0.0:
             return
         self.flush()
         self._add(seconds, in_contact)
-
-    def transport(self, distance: float) -> None:
-        """--no-contact 模型下机器人原地等待障碍物自行走 distance 米的时间；按接触巡航速且无加减速，因这只是连续运动的一个子步。"""
-        self.hold(distance / self.profile.v_max_contact)
 
     def grip(self) -> None:
         """抓上并松开障碍物各一次的耗时。"""

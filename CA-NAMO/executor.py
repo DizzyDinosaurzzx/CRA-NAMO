@@ -11,13 +11,13 @@ from shapely.geometry import Polygon, Point
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 from config import Config
-import contact
 from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
 from search import Planner, move_signature
 import cost
+import drift
 import geometry
 import manipulation
 import timing
@@ -59,6 +59,12 @@ class OnlineNAMO:
         self.workspace = workspace
         self.static_obstacles = static_obstacles
         self.world = movable_obstacles
+        # 挂了自主运动策略的障碍物；为空时 _tick 直接短路，默认行为与不存在 drift 完全一致
+        self._drift_obstacles = [w for w in self.world if w.drift is not None]
+        # 机器人当前正贴身搬运的障碍物 oid；非 None 时该障碍物暂停自己的 drift，
+        # 见 _tick 与 _execute_move——不能一边被机器人按 SE(2) 路径搬着走，
+        # 一边又被自己的时刻表接管，两条写入路径会互相打架
+        self._active_manip_oid: Optional[int] = None
         self.start = (float(start[0]), float(start[1]))
         self.goal = (float(goal[0]), float(goal[1]))
 
@@ -78,6 +84,9 @@ class OnlineNAMO:
         self.timer = timing.MotionTimer(
             timing.MotionProfile.from_config(cfg),
             heading=timing.heading_of(self.start_point, self.goal_point) or 0.0)
+        # 感知触发计数器，见 _perc_poll；默认阈值为 inf，不挂 drift 时永远不会额外触发
+        self._perc_dist_acc: float = 0.0
+        self._perc_time_anchor: float = self.timer.elapsed
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
         # 将起点/终点插入路网；机器人圆盘放不下时吸附到最近有效节点
@@ -178,8 +187,17 @@ class OnlineNAMO:
                         # 碰撞即物理接触，被撞物的真实难度被揭示
                         self.belief.touch_check(contact_pos, self.world, cfg)
                         self.belief.perceive(self.world, from_pos)
-                        self._capture_frame(
-                            res, node, f"collision revealed {hit_oids} -> replan")
+                        waited = False
+                        if cfg.wait_on_block_s > 0.0 and self._any_drifting(hit_oids):
+                            # 挡路的是会自己动的障碍物：先等等看它自己让不让开，
+                            # 好过每次都立刻重规划绕路，见 config.wait_on_block_s
+                            self._wait(res, cfg.wait_on_block_s)
+                            self.belief.perceive(self.world, from_pos)
+                            waited = True
+                        label = (f"collision revealed {hit_oids} -> waited "
+                                f"{cfg.wait_on_block_s:g}s -> replan" if waited else
+                                f"collision revealed {hit_oids} -> replan")
+                        self._capture_frame(res, node, label)
                         break
                     self._charge_walk(res, act["dist"],
                                       heading=timing.heading_of(from_pos, to_pos))
@@ -295,23 +313,103 @@ class OnlineNAMO:
             return list(range(len(move_path)))
         return [int(i) for i in np.linspace(0, len(move_path) - 1, max_frames)]
 
+    # --- 世界时钟 ---
+    def _tick(self, dt: float) -> None:
+        """世界时钟推进 dt 秒：只计入机器人自身产生的物理耗时(行走/转向/抓放/等待搬运)，
+        规划与 LLM 思考的耗时从不流经这里——那部分只用来衡量算法本身，不代表世界在动，
+        调用方见 _charge_walk / _execute_move 里 grip、transport 两处直接调用。
+
+        依次驱动两件事：挂了 drift 策略的障碍物前进，以及感知的时间阈值轮询
+        (_perc_poll)；没有任何障碍物挂 drift 时跳过前者，但感知轮询始终执行——
+        两者互不依赖对方是否启用。
+        """
+        if dt <= 0.0:
+            return
+        if self._drift_obstacles:
+            state = drift.DriftState(t=self.timer.elapsed, robot_xy=self.robot_xy,
+                                     obstacles={w.oid: w for w in self.world})
+            for w in self._drift_obstacles:
+                if w.oid == self._active_manip_oid:
+                    continue    # 正被机器人抓着搬，暂停它自己的时刻表
+                pose = w.drift.step(w, dt, state)
+                if pose is not None:
+                    self._drift_relocate(w.oid, *pose)
+        self._perc_poll()
+
+    def _drift_relocate(self, oid: int, x: float, y: float, theta: float) -> None:
+        """障碍物自主运动导致的位姿更新：只改真值，不碰 belief——机器人是否知情仍
+        取决于下一次 perceive()，也不置 removed(那个标志专指"被机器人挪开过")。"""
+        for w in self.world:
+            if w.oid == oid:
+                w.x, w.y, w.theta = x, y, theta
+                return
+
+    def _any_drifting(self, oids) -> bool:
+        """oids 里是否有任意一个挂了 drift 策略——只有这种障碍物"等等看"才可能有意义，
+        纯静态障碍物永远不会自己让开。"""
+        return any((w := self._world_obstacle(o)) is not None and w.drift is not None
+                   for o in oids)
+
+    def _wait(self, res: RunResult, seconds: float) -> None:
+        """原地等待 seconds 秒再重规划：给会自己让开的障碍物一个机会，见
+        config.wait_on_block_s。按 wait_substep_s 切成小步推进，不整段一口吞——
+        避免一次性 Δt 太大，让快速漂移的障碍物在两次检查之间跳过机器人所在的地方。"""
+        remaining = seconds
+        step = max(1e-6, self.cfg.wait_substep_s)
+        while remaining > 1e-9:
+            chunk = min(step, remaining)
+            t0 = self.timer.elapsed
+            self.timer.hold(chunk)
+            self._tick(self.timer.elapsed - t0)
+            remaining -= chunk
+
+    # --- 感知触发 ---
+    def _perc_poll(self, dist_delta: float = 0.0) -> None:
+        """按累计位移或累计仿真耗时两个阈值判断要不要补一次感知；用 self.robot_xy
+        当前值取景。两个阈值默认都是 inf，不配置就永远不触发，见
+        config.perc_step / perc_time_step。
+
+        位移阈值只在 _set_robot 真正挪动位置时才有增量，取景精确；时间阈值经
+        _tick 驱动，在 _charge_walk 已记账、_set_robot 尚未跟进的极短窗口内可能
+        取到上一位置——量级上最多滞后一个边长/子步，接受这个近似(和 search.py
+        用边中点近似抓持位置是同一数量级的取舍)。
+        """
+        self._perc_dist_acc += dist_delta
+        cfg = self.cfg
+        if (self._perc_dist_acc < cfg.perc_step
+                and self.timer.elapsed - self._perc_time_anchor < cfg.perc_time_step):
+            return
+        self.belief.perceive(self.world, self.robot_xy)
+        self._perc_dist_acc = 0.0
+        self._perc_time_anchor = self.timer.elapsed
+
     # --- 机器人簿记 ---
     def _charge_walk(self, res: RunResult, dist: float, in_contact: bool = False,
                      heading: Optional[float] = None):
-        """计收 λ × dist 的行走代价与耗时；搬运路程单独统计但同入 J 的 λ·D 项。
+        """计收 λ × dist 的行走代价与耗时，以及原地转弯的等效能耗；搬运路程单独统计
+        但同入 J 的 λ·D 项。
 
-        heading 为行进方向，计时器据此计转向；倒车重走刚走过的路时传 None。
+        heading 为行进方向，转弯代价按转向前(self.timer.heading，转向后才更新)与
+        heading 的夹角算，同一个夹角也交给计时器计入转向耗时——账目共用同一个源。
+        倒车重走刚走过的路时传 None：不转向，也不计这笔能耗。
         """
         charge = cost.motion_cost(self.cfg, dist)
+        if heading is not None:
+            dtheta = timing.turn_between(self.timer.heading, heading)
+            charge += cost.turn_cost(self.cfg, dtheta)
         res.walk_cost += charge
         res.J += charge
         if in_contact:
             res.manip_walk_cost += charge
+        t0 = self.timer.elapsed
         self.timer.travel(dist, heading, in_contact)
+        self._tick(self.timer.elapsed - t0)
 
     def _set_robot(self, res: RunResult, p: Tuple[float, float]):
+        moved = math.dist(self.robot_xy, p)
         self.robot_xy = (float(p[0]), float(p[1]))
         res.robot_track.append(self.robot_xy)
+        self._perc_poll(dist_delta=moved)
 
     def _walk_robot(self, pts, res: RunResult, cfg: Config):
         """驱动机器人依次通过 pts（pts[0] 为当前站位），遇到未知障碍即停。
@@ -384,14 +482,9 @@ class OnlineNAMO:
         start_xy = (obs.x, obs.y)
         home = self.robot_xy
 
-        cplan = act.get("contact")
-        # 贴身护送时机器人自身路程已含运输时间；否则障碍物走 SE(2) 路径期间
-        # 机器人原地等待，需在下面另行计费
-        escorting = cfg.contact_required and cplan is not None and cplan.feasible
-        if not escorting:
-            # 接触模型关闭：障碍物移动时机器人在节点上等待；以机器人真实位置
-            # 重建，而非复用锚定在边中点的规划位置
-            cplan = contact.idle_plan(home, n)
+        # 机器人全程贴身护送，自身路程已含运输时间；规划期只有 cplan.feasible
+        # 的方案才会被采纳，这里必然拿到一个可行的贴身轨迹
+        cplan = act["contact"]
         rp = list(cplan.robot_path)
         # 规划以边中点为基准测量往返程，机器人实际站在边的端点上，两端需重新锚定
         rp[0] = home
@@ -424,66 +517,70 @@ class OnlineNAMO:
                 res, node, f"robot hit {sorted(hits)} approaching {oid} -> replan")
             return (False, None, 0.0, None)
         # 此处抓取、稍后松开，一次性计费，以下所有退出路径都要付这笔
+        t0 = self.timer.elapsed
         self.timer.grip()
+        self._tick(self.timer.elapsed - t0)
         self._capture_frame(res, node, f"grip obstacle {oid}", move_oid=oid)
 
-        # --- 移动障碍物 ---
-        last_i = 0
-        for i in range(1, n):
-            wx, wy, wth = move_path[i]
-            if cfg.check_obstacle_collision:
-                obs_hits = self._world_collision(oid, wx, wy, wth, tree=tree,
-                                                 tree_items=tree_items)
-                if obs_hits:
-                    # 障碍物停在 move_path[last_i]，信念同步到该位姿
+        # 抓住了：这个障碍物这段时间不能再有自己的主张，暂停它的 drift，见 _tick；
+        # try/finally 保证不管从下面哪条 return 出去都会松开这个锁
+        self._active_manip_oid = oid
+        try:
+            # --- 移动障碍物 ---
+            last_i = 0
+            for i in range(1, n):
+                wx, wy, wth = move_path[i]
+                if cfg.check_obstacle_collision:
+                    obs_hits = self._world_collision(oid, wx, wy, wth, tree=tree,
+                                                     tree_items=tree_items)
+                    if obs_hits:
+                        # 障碍物停在 move_path[last_i]，信念同步到该位姿
+                        if last_i != 0:
+                            self.belief.relocate(obs, *move_path[last_i])
+                            self.belief.record_move_direction(oid, start_xy,
+                                                              move_path[last_i])
+                        new_node = self._release_and_return(res, rp, off, last_i,
+                                                            False, node, cfg)
+                        return (False, obs_hits,
+                                cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
+                                new_node)
+                # 机器人抓着障碍物，自身也可能撞上东西
+                a, b = rp[off + i - 1], rp[off + i]
+                hits, t = self.belief.check_robot_collision(a, b, self.world, cfg)
+                if hits:
                     if last_i != 0:
                         self.belief.relocate(obs, *move_path[last_i])
-                        self.belief.record_move_direction(oid, start_xy,
-                                                          move_path[last_i])
-                    new_node = self._release_and_return(res, rp, off, last_i,
-                                                        False, node, cfg)
-                    return (False, obs_hits,
+                        self.belief.record_move_direction(oid, start_xy, move_path[last_i])
+                    stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                    self._charge_walk(res, math.dist(a, stop), in_contact=True,
+                                      heading=timing.heading_of(a, b))
+                    self._set_robot(res, stop)
+                    self.belief.touch_check(stop, self.world, cfg)
+                    self.belief.perceive(self.world, self.robot_xy)
+                    new_node = self._reanchor(res, node)
+                    self._capture_frame(
+                        res, node if new_node is None else new_node,
+                        f"robot hit {sorted(hits)} while moving {oid} -> replan")
+                    return (False, None,
                             cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
                             new_node)
-            # 机器人抓着障碍物，自身也可能撞上东西
-            a, b = rp[off + i - 1], rp[off + i]
-            hits, t = self.belief.check_robot_collision(a, b, self.world, cfg)
-            if hits:
-                if last_i != 0:
-                    self.belief.relocate(obs, *move_path[last_i])
-                    self.belief.record_move_direction(oid, start_xy, move_path[last_i])
-                stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-                self._charge_walk(res, math.dist(a, stop), in_contact=True,
+                self._relocate_world(oid, wx, wy, wth)
+                self._charge_walk(res, math.dist(a, b), in_contact=True,
                                   heading=timing.heading_of(a, b))
-                self._set_robot(res, stop)
-                self.belief.touch_check(stop, self.world, cfg)
-                self.belief.perceive(self.world, self.robot_xy)
-                new_node = self._reanchor(res, node)
-                self._capture_frame(
-                    res, node if new_node is None else new_node,
-                    f"robot hit {sorted(hits)} while moving {oid} -> replan")
-                return (False, None,
-                        cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
-                        new_node)
-            self._relocate_world(oid, wx, wy, wth)
-            self._charge_walk(res, math.dist(a, b), in_contact=True,
-                              heading=timing.heading_of(a, b))
-            self._set_robot(res, b)
-            if not escorting:
-                # 障碍物走过该子步期间机器人在节点上等待
-                self.timer.transport(
-                    cost.se2_path_length(obs, move_path[i - 1:i + 1], cfg))
-            last_i = i
-            if i in frame_at:
-                self._capture_frame(res, node, f"move {oid} step {i}/{n - 1}",
-                                    move_oid=oid)
+                self._set_robot(res, b)
+                last_i = i
+                if i in frame_at:
+                    self._capture_frame(res, node, f"move {oid} step {i}/{n - 1}",
+                                        move_oid=oid)
 
-        # 以最终位姿更新信念
-        self.belief.relocate(obs, *move_path[-1])
-        self.belief.record_move_direction(oid, start_xy, move_path[-1])
-        self.belief.perceive(self.world, self.robot_xy)
-        new_node = self._release_and_return(res, rp, off, n - 1, True, node, cfg)
-        return (True, [], cost.se2_path_length(obs, move_path, cfg), new_node)
+            # 以最终位姿更新信念
+            self.belief.relocate(obs, *move_path[-1])
+            self.belief.record_move_direction(oid, start_xy, move_path[-1])
+            self.belief.perceive(self.world, self.robot_xy)
+            new_node = self._release_and_return(res, rp, off, n - 1, True, node, cfg)
+            return (True, [], cost.se2_path_length(obs, move_path, cfg), new_node)
+        finally:
+            self._active_manip_oid = None
 
     def _release_and_return(self, res: RunResult, rp: list, off: int, last_i: int,
                             completed: bool, node: int, cfg: Config) -> Optional[int]:

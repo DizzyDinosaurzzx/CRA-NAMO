@@ -3,10 +3,13 @@
 from __future__ import annotations
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from shapely.geometry import Polygon
 
 import geometry
+
+if TYPE_CHECKING:
+    from drift import DriftPolicy
 
 def _rect_polygon(x: float, y: float, l: float, d: float, theta: float) -> Polygon:
     """由 geometry.rect_corners 生成矩形角点，再包装成 shapely 多边形；一处实现两种表示。"""
@@ -31,6 +34,9 @@ class MovableObstacle:
 
     # 运行时状态
     removed: bool = False          # 是否已被实际挪开
+
+    # 自主运动：与机器人推拉(manip_/move_)无关，地图自己会变的口子，见 drift.py
+    drift: Optional["DriftPolicy"] = None
 
     def __post_init__(self):
         if self.difficulty < 0:

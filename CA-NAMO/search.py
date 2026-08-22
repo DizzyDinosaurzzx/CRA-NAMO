@@ -151,7 +151,7 @@ class Planner:
             feasible, work, drop, move_dist, move_path, cplan = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
-            extra += cost.removal_cost(self.cfg, work, cplan.travel, move_dist)
+            extra += cost.removal_cost(self.cfg, work, cplan.travel)
             removals.append((oid, drop, move_dist, work, move_path, cplan))
         return base + extra, removals
 
@@ -206,34 +206,32 @@ class Planner:
             contact_memo[id(poses)] = (poses, plan)
             return plan
 
-        if self.cfg.se2_use_planner:
-            path_accept = None
-            rejected: List[str] = []
-            if self.cfg.contact_required:
-                def path_accept(poses):
-                    plan = _contact_for(poses)
-                    if not plan.feasible:
-                        rejected.append(plan.reason)
-                    return plan.feasible
-            se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
-                obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
-                robot_pos, self.cfg, others_polys=others,
-                goal_accept=self._goal_filter(obs), path_accept=path_accept)
-            if se2_feasible and se2_path:
-                cplan = (_contact_for(se2_path) if self.cfg.contact_required
-                         else contact.idle_plan(mid, len(se2_path)))
-                if cplan.feasible:
-                    feasible = True
-                    move_path = se2_path
-                    drop = se2_goal
-                    move_dist = se2_cost
-                else:
-                    self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
-            elif rejected:
-                # 障碍物本身有处可去、只是机器人无法伴随护送——记录是哪一半约束不满足
-                counts = Counter(rejected).most_common(2)
-                self.cfg.log(f"[contact] oid={oid} rejected {len(rejected)} path(s): "
-                             + "; ".join(f"{why} x{n}" for why, n in counts))
+        rejected: List[str] = []
+
+        def path_accept(poses):
+            plan = _contact_for(poses)
+            if not plan.feasible:
+                rejected.append(plan.reason)
+            return plan.feasible
+
+        se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
+            obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
+            robot_pos, self.cfg, others_polys=others,
+            goal_accept=self._goal_filter(obs), path_accept=path_accept)
+        if se2_feasible and se2_path:
+            cplan = _contact_for(se2_path)
+            if cplan.feasible:
+                feasible = True
+                move_path = se2_path
+                drop = se2_goal
+                move_dist = se2_cost
+            else:
+                self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
+        elif rejected:
+            # 障碍物本身有处可去、只是机器人无法伴随护送——记录是哪一半约束不满足
+            counts = Counter(rejected).most_common(2)
+            self.cfg.log(f"[contact] oid={oid} rejected {len(rejected)} path(s): "
+                         + "; ".join(f"{why} x{n}" for why, n in counts))
 
         if not feasible:
             work = math.inf
