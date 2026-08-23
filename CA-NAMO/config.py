@@ -114,7 +114,7 @@ class Config:
     # --- 其他 ---
     rng_seed: int = 0
     out_dir: str = "img"
-    save_frames: bool = False   # 是否保存逐步动画（GIF）
+    save_frames: bool = True   # 是否保存逐步动画（GIF）
     gif_speed: float = 1.0      # 播放速度倍率，相对仿真时间
     gif_fps: float = 5.0       # 单帧最短停留对应的帧率上限
     gif_max_frame_s: float = 5.0   # 单帧最长停留时长(仿真秒数按 gif_speed 折算后)[s]
