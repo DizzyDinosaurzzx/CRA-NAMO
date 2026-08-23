@@ -1,6 +1,6 @@
 """全局配置与参数校验。"""
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 def validate_lambda(value: float) -> float:
     value = float(value)
@@ -21,7 +21,6 @@ class Config:
     robot_radius: float = 0.3    # 机器人半径
 
     # --- 机器人动力学（只影响任务时间，不进入 J） ---
-    # 差速驱动圆盘：先原地转向再直线行驶；数值取室内服务机器人量级（TurtleBot/Jackal 级），换算成秒见 timing.py。
     v_max: float = 0.8           # 空载巡航速度 [m/s]
     a_max: float = 0.5           # 空载线加速度 [m/s^2]
     w_max: float = 1.5           # 空载原地转向角速度 [rad/s]
@@ -44,7 +43,7 @@ class Config:
     time_importance: float = 1
 
     # --- 感知 ---
-    R_perc: float = 10.0       # 感知半径
+    R_perc: float = 100       # 感知半径
     sight_width: float = 0.1     # 视线宽度
     # 额外的重新感知触发阈值(见 executor._perc_poll)：累计位移/累计耗时任一超过就
     # 补扫一次世界；默认 inf 即关闭，不影响现有场景——今天的按边/按动作感知点已经够用，
@@ -62,17 +61,13 @@ class Config:
     wait_substep_s: float = 0.5        # 等待按多大步长切分推进(避免大 Δt 让漂移跳步)
 
     # --- 搬运 ---
-    # "搬运"统指沿任意方向推或拉障碍物：机器人可在其周边任一点抓取，无优先方向。
     R_manip: float = 5.0      # 障碍物只能移到当前位姿周围该半径之内
-    # 软性偏好把障碍物放在机器人前方而非身后，免得挡住回路；只是对候选放置点的偏置而非限制，置 0 可彻底去掉。
     manip_forward_penalty: float = 2.0
     manip_max_frames_per_action: int = 30
     check_obstacle_collision: bool = True  # 障碍物之间的碰撞检测
     full_reveal_on_contact: bool = False
 
     # --- 机器人与障碍物接触 ---
-    # 障碍物移动全程机器人须贴住它：可在周边任一点抓取（任意方向推/拉），移动中抓取点还可沿表面滑移；
-    # 自身行程与普通行驶一样按 lambda_distance 计费。这是唯一的搬运模型，没有开关。
     contact_station_spacing: float = 0.3   # 障碍物周边候选抓取点的间距 [m]
     contact_max_slide: float = 0.6         # 每个搬运子步内抓取点可滑移的距离 [m]
     contact_clearance: float = 0.01        # 区分"接触"与"重叠"的容差 [m]
@@ -83,6 +78,16 @@ class Config:
     se2_connectivity: int = 8
     se2_containment: str = "centroid"
     se2_rot_weight: float | None = None
+
+    # --- 次生风险评估（可选，默认关闭；见 risk.py） ---
+    risk_assessment_enabled: bool = False
+    risk_tier_penalty: dict = field(default_factory=lambda: {
+        "none": 0.0,
+        "low": 100.0,
+        "moderate": 1000.0,
+        "high":10000.0,
+        "critical": 100000.0,
+    })
 
     # --- 路网 ---
     grid_step: float = 0.3    # 路网节点网格间距
@@ -98,14 +103,11 @@ class Config:
     max_replans: int = 10000
 
     # --- LLM ---
-    # 推理必须开着：关掉时模型退化成照抄 prompt 锚点表的一行，典型误差 6.1x、
-    # 46% 答案塌缩到同一值；开着则降到 1.33x（Spearman 0.95）。详见 bench/llm_test_out/。
     deepseek_api_key: str = "sk-c1ea9b080fc444ceb1f5fa7901e3b92f"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
-    deepseek_model: str = "deepseek-v4-flash"
-    deepseek_thinking: bool = True    # False 会复现照抄表格一行的旧行为
+    deepseek_model: str = "deepseek-v4-flash-vision-exp"
+    deepseek_thinking: bool = True
     llm_max_tokens: int | None = None  # None 表示不设上限；推理约需 3-4k tokens
-    # 单次推理实测可达 ~80 s；超时不会报错而是静默回退启发式，故取远高于最坏观测值。
     llm_timeout: float = 300.0
     llm_max_retries: int = 2
 
@@ -113,10 +115,6 @@ class Config:
     rng_seed: int = 0
     out_dir: str = "img"
     save_frames: bool = False   # 是否保存逐步动画（GIF）
-    # 每帧停留时长按相邻帧 motion_time(仿真物理耗时，不含 plan_time) 差值折算，而非
-    # 固定帧率；gif_speed=1 即按仿真时间原速播放，>1 加快、<1 放慢。gif_fps 退化为
-    # 最小停留时长的下限(避免极短子步一闪而过)，gif_max_frame_s 是上限(避免一次
-    # 缓慢搬运把动画卡住半天)。
     gif_speed: float = 1.0      # 播放速度倍率，相对仿真时间
     gif_fps: float = 5.0       # 单帧最短停留对应的帧率上限
     gif_max_frame_s: float = 5.0   # 单帧最长停留时长(仿真秒数按 gif_speed 折算后)[s]
@@ -127,8 +125,23 @@ class Config:
     def __post_init__(self):
         self.lambda_distance = validate_lambda(self.lambda_distance)
         self.time_importance = validate_time_importance(self.time_importance)
+        self._log_last: str | None = None   # 折叠连续重复的 log() 内容，避免刷屏
+        self._log_repeat: int = 0
 
     def log(self, *args):
-        if self.verbose:
-            print(*args)
+        if not self.verbose:
+            return
+        msg = " ".join(str(a) for a in args)
+        if msg == self._log_last:
+            self._log_repeat += 1
+            return
+        self.flush_log()
+        print(msg)
+        self._log_last = msg
+
+    def flush_log(self):
+        if self._log_repeat:
+            print(f"  ↳ 上一条重复了 {self._log_repeat} 次，已折叠")
+            self._log_repeat = 0
+        self._log_last = None
 

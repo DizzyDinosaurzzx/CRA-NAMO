@@ -30,6 +30,10 @@ class MovableObstacle:
     theta: float = 0.0
     material: str = "unknown"      # 材质语义标签，供 LLM 推理
     difficulty: float = 1.0        # 真实滑动阻力 f = mu*rho*V*g [N]；做功 W = difficulty * 移动距离 [J]
+    # 场景相关的次生风险描述，供 risk.py 的风险评估读取（例如"地震后建筑，承重
+    # 柱，移位可能引发二次坍塌"）；只在 config.risk_assessment_enabled=True 时
+    # 才会被用到，默认空字符串对现有场景零影响。
+    context: str = ""
     oid: int = -1
 
     # 运行时状态
@@ -61,7 +65,8 @@ class MovableObstacle:
         """返回用于信念追踪的副本，difficulty 置为 NaN。"""
         return MovableObstacle(
             x=self.x, y=self.y, l=self.l, d=self.d, h=self.h, theta=self.theta,
-            material=self.material, difficulty=math.nan, oid=self.oid,
+            material=self.material, difficulty=math.nan, context=self.context,
+            oid=self.oid,
         )
 
     def polygon_at(self, x: float, y: float, theta: Optional[float] = None) -> Polygon:
@@ -78,6 +83,7 @@ class MovableObstacle:
             "area": round(self.area, 2),
             "volume": round(self.volume, 2),
             "material": self.material,
+            "context": self.context,
         }
 
     def __repr__(self):

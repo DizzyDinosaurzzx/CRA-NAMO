@@ -151,7 +151,8 @@ class Planner:
             feasible, work, drop, move_dist, move_path, cplan = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
-            extra += cost.removal_cost(self.cfg, work, cplan.travel)
+            risk_penalty = self.belief.get_risk_penalty(oid)
+            extra += cost.removal_cost(self.cfg, work, cplan.travel, risk_penalty)
             removals.append((oid, drop, move_dist, work, move_path, cplan))
         return base + extra, removals
 

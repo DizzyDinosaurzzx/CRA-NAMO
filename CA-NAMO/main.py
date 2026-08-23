@@ -102,6 +102,7 @@ def main():
     print("-" * 60)
 
     res = sim.run()
+    cfg.flush_log()  # 补上运行结束时还没打出来的折叠计数
     print("=" * 60)  # 分隔运行时 [se2] 日志与下方统计
 
     # 打印仿真统计
@@ -112,6 +113,9 @@ def main():
     print(f"{'  of which in contact':<{W}} : {res.manip_walk_cost:,.4f}"
           f"   (robot travel while holding an obstacle)")
     print(f"{'obstacle work W':<{W}} : {res.work_cost:,.4f}")
+    if cfg.risk_assessment_enabled:
+        print(f"{'risk penalty':<{W}} : {res.risk_cost:,.4f}"
+              f"   (see config.risk_tier_penalty)")
     print(f"{'Obstacles moved':<{W}} : {res.removed}")
     print(f"{'Replan cycles':<{W}} : {res.cycles}")
     print(f"{'A* expansions':<{W}} : {res.total_expansions:,}")

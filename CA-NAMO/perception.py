@@ -20,6 +20,7 @@ class Belief:
         self.contacts: List[Polygon] = []  # 仅通过搬运碰撞得知的障碍物
         self.touched: Set[int] = set()
         self.touched_difficulty: Dict[int, float] = {}  # 触觉获得的障碍物真实难度
+        self.touched_risk: Dict[int, str] = {}  # 触碰后评估过的次生风险档位，见 risk.py
         self.move_dir: Dict[int, Tuple[float, float]] = {}  # 各障碍物最近一次被移动的方向
 
     # --- 感知 ---
@@ -254,6 +255,22 @@ class Belief:
         if oid in self.touched_difficulty:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
+
+    # --- 次生风险（见 risk.py） ---
+    def assess_risk(self, oid: int, risk_estimator) -> str:
+        """触碰后调用一次：评估并缓存该障碍物搬运的次生风险档位，同一障碍物只问
+        一次 LLM。规划期从不主动调用——风险只在真正接触之后才有意义。"""
+        if oid not in self.touched_risk:
+            self.touched_risk[oid] = risk_estimator.assess(
+                self.perceived[oid].observation())
+        return self.touched_risk[oid]
+
+    def get_risk_penalty(self, oid: int) -> float:
+        """未触碰或功能关闭时视为零风险——规划期不能靠 LLM 瞎猜，只用已经问过的结果。"""
+        if not self.cfg.risk_assessment_enabled:
+            return 0.0
+        tier = self.touched_risk.get(oid)
+        return self.cfg.risk_tier_penalty.get(tier, 0.0) if tier else 0.0
 
     # --- 查询 ---
     def blockers_of(self, key: EdgeKey) -> Set[int]:

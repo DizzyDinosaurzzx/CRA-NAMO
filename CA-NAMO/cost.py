@@ -99,12 +99,17 @@ def search_turn_cost(cfg: Config, dtheta: float) -> float:
     return blend(cfg, turn_cost(cfg, dtheta), timing.turn_seconds(cfg, dtheta))
 
 
-def removal_cost(cfg: Config, work: float, contact_travel: float) -> float:
+def removal_cost(cfg: Config, work: float, contact_travel: float,
+                 risk_penalty: float = 0.0) -> float:
     """搜索对搬走一个障碍物的计费。
 
     work 为障碍物摩擦功的估计，contact_travel 为机器人贴身接送随行所行驶的距离。
+    risk_penalty 恒定加在 blend() 之后、不受 time_importance 影响——跟
+    search_turn_cost 对转弯能耗的处理是同一套道理：次生风险这种真实存在的代价，
+    不该因为"赶时间"（time_importance 靠近 1）就被打折甚至无视。默认 0，功能关闭
+    （config.risk_assessment_enabled=False）时逐位等价于旧行为，见 risk.py。
     """
     joules = (work * strategy_weights(cfg).work_mult
               + motion_cost(cfg, contact_travel))
-    return blend(cfg, joules, timing.removal_seconds(cfg, contact_travel))
+    return blend(cfg, joules, timing.removal_seconds(cfg, contact_travel)) + risk_penalty
 

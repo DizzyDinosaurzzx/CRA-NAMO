@@ -15,6 +15,7 @@ from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
+from risk import RiskEstimator
 from search import Planner, move_signature
 import cost
 import drift
@@ -30,6 +31,7 @@ class RunResult:
     walk_cost: float = 0.0                  # 行走代价 = λ × 总移动距离
     manip_walk_cost: float = 0.0            # 其中护送障碍物所占的行走代价
     work_cost: float = 0.0                  # 搬运代价 = Σ(真实难度 × 移动距离)
+    risk_cost: float = 0.0                  # 次生风险附加代价（见 config.risk_assessment_enabled）
     cycles: int = 0                         # 重规划轮数
     # --- 任务时间：T = 运动时间 + 规划时间（见 timing.py）---
     motion_time: float = 0.0                # 机器人运动的仿真秒数
@@ -75,6 +77,7 @@ class OnlineNAMO:
         self.goal_point = self.roadmap.nodes[self.goal_node]
 
         self.estimator = DifficultyEstimator(cfg)
+        self.risk_estimator = RiskEstimator(cfg)    # 默认关闭，见 config.risk_assessment_enabled
         self.belief = Belief(self.roadmap, cfg)     # 机器人部分可观测信念
         self._plan_paths: List[dict] = []           # 当前全部规划路径（用于逐帧可视化）
         self.failed_moves: set = set()
@@ -143,6 +146,12 @@ class OnlineNAMO:
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
+                    # 风险评估：先问清楚"挪它有没有次生风险"，再决定要不要真的执行
+                    # 这次搬运——新发现的非零风险会作废本轮执行，交给下一次
+                    # planner.plan() 带着这份代价重新权衡（见 config.risk_assessment_enabled）
+                    if cfg.risk_assessment_enabled and act["oid"] not in self.belief.touched_risk:
+                        if self._assess_risk_and_should_replan(act["oid"], res, node):
+                            break
                     # 贴身护送障碍物沿其 SE2 路径移动
                     move_success, hits, executed_dist, new_node = \
                         self._execute_move(act["oid"], obs, act, res, node, cfg)
@@ -157,6 +166,11 @@ class OnlineNAMO:
                         res.J += executed_work
                         if act["oid"] not in res.removed:
                             res.removed.append(act["oid"])
+                            # 风险代价只在真正开始搬运时结算一次，不按距离摊
+                            risk_penalty = self.belief.get_risk_penalty(act["oid"])
+                            if risk_penalty > 0.0:
+                                res.risk_cost += risk_penalty
+                                res.J += risk_penalty
                     elif not move_success and hits is not None:
                         self.failed_moves.add((move_signature(obs), act["key"]))
                     if not move_success:
@@ -228,8 +242,9 @@ class OnlineNAMO:
         res.walk_cost = round(res.walk_cost, 4)
         res.manip_walk_cost = round(res.manip_walk_cost, 4)
         res.work_cost = round(res.work_cost, 4)
+        res.risk_cost = round(res.risk_cost, 4)
         self._settle_time(res)
-        res.llm_calls = self.estimator.calls
+        res.llm_calls = self.estimator.calls + self.risk_estimator.calls
         if res.success and not res.message:
             res.message = "Reached goal."
         elif not res.success and not res.message:
@@ -306,6 +321,18 @@ class OnlineNAMO:
         else:
             label = f"move {oid} hit unknown obstruction -> replan"
         self._capture_frame(res, node, label)
+
+    def _assess_risk_and_should_replan(self, oid: int, res: RunResult, node: int) -> bool:
+        """触碰后评估一次次生风险；发现非零风险时不在本轮执行，让下一次
+        planner.plan() 带着这份代价重新权衡"值不值得搬"——先评估、再执行。"""
+        tier = self.belief.assess_risk(oid, self.risk_estimator)
+        penalty = self.risk_estimator.penalty(tier)
+        if penalty <= 0.0:
+            return False
+        self.cfg.log(f"[risk] oid={oid} tier={tier!r} +{penalty:g}J -> replan")
+        self._capture_frame(
+            res, node, f"risk assessed for {oid}: {tier} (+{penalty:g}J) -> replan")
+        return True
 
     @staticmethod
     def _sample_move_path(move_path: list, max_frames: int) -> list:

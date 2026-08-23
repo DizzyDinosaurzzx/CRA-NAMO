@@ -171,8 +171,7 @@ def _mode_tag(sim: OnlineNAMO) -> str:
 
 def _cost_line(J, walk, work, motion_s, plan_s) -> str:
     return (f"J {J:,.1f} = λD {walk:,.1f} + W {work:,.1f}"
-            f"  |  move {motion_s:,.1f}s + plan {plan_s:,.1f}s"
-            f" = total {motion_s + plan_s:,.1f}s")
+            f"  |  move {motion_s:,.1f}s & plan {plan_s:,.1f}s")
 
 
 def _wrap_title(lines, width_inch: float) -> str:

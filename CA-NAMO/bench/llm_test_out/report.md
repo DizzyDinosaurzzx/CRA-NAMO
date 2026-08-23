@@ -1,12 +1,11 @@
-# LLM mu*rho accuracy and its cost in navigation
+# LLM mu*rho estimator accuracy
 Model `deepseek-v4-flash`, 3 repeats per item, 61 items, 1357.8s of API time.
 
 ## Headline
 
 - The estimator is off by a typical factor of **1.4x**; only **84%** of objects land within 2x of the reference, and it over-estimates (1.3x median bias).
 - Cause: **2% of replies are exactly 1440**, the largest anchor in the prompt. It is copying a table row, not estimating.
-- Navigation still mostly survives it: over 40 runs at this error level the mean penalty is **+1.7%** of J and the worst is **+51.9%**. The planner's push-or-detour decision has wide margins, and touch sensing corrects the estimate on contact — so a bad mu*rho costs a wrong first choice, not a wrong final path.
-- Best request setting tested is `v4-flash, thinking on, 32k tok` at **1.3x** typical error (88% within 2x, 61/61 answered). Note `_deepseek` hardcodes `max_tokens=32` and `thinking=disabled`, so any setting that needs a reasoning budget is unreachable without a code change.
+- Best request setting tested is `v4-flash, thinking on, 32k tok` at **1.3x** typical error (88% within 2x, 61/61 answered). Set `Config.deepseek_model` / `deepseek_thinking` / `llm_max_tokens` to match — `llm_difficulty._deepseek` reads those fields directly, no code change needed.
 
 ## 1. Estimator accuracy
 `median_abs_factor` is the typical multiplicative miss: 1.0 is exact, 2.0 means the usual answer is off by a factor of two in either direction. `median_ratio` separates bias from spread — above 1.0 the model systematically over-estimates.
@@ -55,74 +54,7 @@ mu*rho must not depend on the object's size — the caller multiplies by volume 
 | cardboard box packed with hardcover books | 200.0 | 210.0 | 210.0 | 1.05x |
 | solid concrete cube | 1440.0 | 1440.0 | 1440.0 | 1.00x |
 
-## 3. Does the error reach the planner?
-The search only ever asks one question per obstacle: is `difficulty x push_distance` cheaper than `lambda x detour`? With lambda=350 N and a 2 m push, an error only matters if it moves an obstacle across that line.
-
-| detour available | obstacles | decisions flipped by the LLM error |
-|---|---|---|
-| 2 m | 61 | 8% |
-| 5 m | 61 | 10% |
-| 10 m | 61 | 3% |
-| 20 m | 61 | 3% |
-| 50 m | 61 | 2% |
-
-## 4. Navigation cost
-Same maps, same physics, same true difficulties — only the estimator's belief differs. `oracle` knows the reference mu*rho exactly and is the floor; the penalty column is the extra J each arm pays over it.
-
-| map | arm | goal reached | J | lambda*D | W | pushes | replans | penalty vs oracle |
-|---|---|---|---|---|---|---|---|---|
-| two_doors | oracle | True | 7154 | 7000 | 154 | 2 | 37 | - |
-| two_doors | llm | True | 7154 | 7000 | 154 | 2 | 37 | +0.0% |
-| two_doors | heuristic | True | 10871 | 10871 | 0 | 0 | 69 | +51.9% |
-| hidden_obstacle | oracle | True | 40335 | 19733 | 20602 | 2 | 117 | - |
-| hidden_obstacle | llm | True | 40335 | 19733 | 20602 | 2 | 117 | +0.0% |
-| hidden_obstacle | heuristic | True | 40335 | 19733 | 20602 | 2 | 117 | +0.0% |
-| maze_mixed | oracle | True | 21137 | 20717 | 420 | 2 | 122 | - |
-| maze_mixed | llm | True | 21137 | 20717 | 420 | 2 | 122 | +0.0% |
-| maze_mixed | heuristic | True | 21101 | 20792 | 309 | 2 | 122 | -0.2% |
-| corridor | oracle | True | 13588 | 12327 | 1261 | 1 | 65 | - |
-| corridor | llm | True | 13588 | 12327 | 1261 | 1 | 65 | +0.0% |
-| corridor | heuristic | True | 13588 | 12327 | 1261 | 1 | 65 | +0.0% |
-
-### Sensitivity sweep
-Every estimate multiplied by a fixed factor. A flat row means the map's decisions are not close to the break-even line and accuracy is free; a step means it is.
-
-| map | x0.05 | x0.125 | x0.25 | x0.5 | x1 | x2 | x4 | x8 | x20 |
-|---|---|---|---|---|---|---|---|---|---|
-| two_doors | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% | +7.8% | +7.8% |
-| hidden_obstacle | +35.6% | +8.3% | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% | +1.5% |
-| maze_mixed | +58.9% | +0.0% | +0.0% | +0.0% | +0.0% | -0.2% | -0.2% | -0.2% | -0.2% |
-| corridor | +0.5% | +0.5% | +0.5% | +0.5% | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% |
-
-### Realistic-error replicates
-The single `llm` row above is one draw, and one draw on four maps is not a measurement. These re-run each map with an independent per-obstacle lognormal error at the spread measured over all 61 items (sigma=0.195 in log10, a typical 1.57x miss), 5 seeds per map — what an estimator this noisy costs on average, rather than on the labels it happened to get right.
-
-| map | mean penalty | worst penalty | failed runs |
-|---|---|---|---|
-| two_doors | +0.0% | +0.0% | 0 |
-| hidden_obstacle | +0.0% | +0.0% | 0 |
-| maze_mixed | +0.0% | +0.0% | 0 |
-| corridor | +0.0% | +0.0% | 0 |
-
-### Is reasoning mode worth it, on the robot?
-The shipped estimator now reasons; the previous one did not (1.57x spread vs 5.71x). Accuracy is only worth buying if it changes what the robot does. `llm` and `llm_nothink` are the two estimators' actual predictions; the noise columns are 5 draws from each one's measured error distribution, which is the fairer comparison — a single point estimate can be lucky.
-
-| map | llm (reasoning, current) | llm (no reasoning, previous) | current noise mean/worst | previous noise mean/worst |
-|---|---|---|---|---|
-| two_doors | +0.0% | +0.0% | +0.0% / +0.0% | +13.5% / +51.9% |
-| hidden_obstacle | +0.0% | +0.0% | +0.0% / +0.0% | +0.0% / +0.0% |
-| maze_mixed | +0.0% | +0.0% | +0.0% / +0.0% | +0.0% / +0.0% |
-| corridor | +0.0% | +0.0% | +0.0% / +0.0% | +0.0% / +0.0% |
-
-## 4b. When does the error start to cost anything?
-`lambda_distance` is the exchange rate between detouring and pushing, so it decides how many obstacles sit near the break-even where a wrong mu*rho changes the answer. Each cell is the mean penalty over 5 noisy-estimate runs against the oracle at the same lambda. The shipped value is 350.
-
-| map | lambda=50 | lambda=100 | lambda=200 | lambda=350 | lambda=700 | lambda=1400 |
-|---|---|---|---|---|---|---|
-| two_doors | +18.6% | +12.6% | +12.8% | +13.5% | +2.5% | +0.0% |
-| maze_mixed | +0.5% | +0.8% | -0.2% | +0.0% | +7.5% | +2.7% |
-
-## 4c. Proof that it is copying, not estimating
+## 3. Proof that it is copying, not estimating
 The anchor table's row order is rewritten; every other byte of the prompt is unchanged, and only the 39 off-table objects are asked (a paraphrase item's correct answer *is* an anchor, so it cannot distinguish copying from being right). If the model were estimating, row order could not matter.
 
 | table order | first row | last row | modal answer | share | = first row | = largest | distinct answers |
@@ -134,7 +66,7 @@ The anchor table's row order is rewritten; every other byte of the prompt is unc
 
 Reordering moves the collapse target — the same objects are answered 1440, then 350, then 174 — so the answer is a function of prompt layout rather than of the object. Note this also rules out the two obvious single-cause stories: it is not 'the last row' (descending keeps 1440 while moving it to the top) and not 'the largest value' (shuffling drops the largest to a few percent). **Reordering is not a fix either** — it relocates the collapse rather than removing it. Only giving the model room to reason does that.
 
-## 5. Is it the model or the way it is asked?
+## 4. Is it the model or the way it is asked?
 Same prompt, same items, different request settings. `parsed` counts replies a number could be read out of — anything unparsed falls back to the heuristic in production, so a low count is itself a failure mode. `cut` counts replies truncated by the token budget; **scores on a variant with a non-zero `cut` are optimistic**, because the items that get truncated are the ones the model reasons longest about.
 
 | setting | parsed | cut | typ. factor | bias | <=2x | <=3x | Spearman | wall time |

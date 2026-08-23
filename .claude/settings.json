@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -m py_compile *.py)"
+      "Bash(python3 -m py_compile *.py)",
+      "Bash(sed -n '/^ABLATIONS/,/^\\)/p' bench/llm_accuracy.py)",
+      "Bash(sed -n '/def _ask_raw/,/^$/p' bench/llm_accuracy.py)",
+      "Bash(python3 llm_accuracy.py report)"
     ]
   }
 }

@@ -114,6 +114,9 @@ def create():
         StaticObstacle(box(58.0, 29.0, 59.25, 32.0), "shelf_shipping_corner")
     )
 
+    # 以下 difficulty 均按 material_mu_rho(material)*l*d*h*G 与所在行的 material/l/d/h
+    # 对齐重算（原硬编码值与该公式偏差 1.4×~8.2×，不在 [0.8, 1.2] 容忍带内）；
+    # l/d/h 本身未动，即便个别高度（BX_A_2 的 250、PL(H) 的 10）看着奇怪也保留原样。
     movable = [
         # 左侧物体
         MovableObstacle(
@@ -124,7 +127,7 @@ def create():
             h=0.8,
             theta=0.5,
             material="box",
-            difficulty=120.0,
+            difficulty=42.85,
             oid="BX-A",
         ),
         MovableObstacle(
@@ -135,7 +138,7 @@ def create():
             h=0.8,
             theta=1.0,
             material="box",
-            difficulty=120.0,
+            difficulty=85.7,
             oid="BX_A_1",
         ),
         MovableObstacle(
@@ -146,7 +149,7 @@ def create():
             h=250,
             theta=0.5,
             material="cart",
-            difficulty=3000.0,
+            difficulty=34764.188,
             oid="BX_A_2",
         ),
         MovableObstacle(
@@ -157,7 +160,7 @@ def create():
             h=10,
             theta=0.8,
             material="box",
-            difficulty=1500.0,
+            difficulty=10012.086,
             oid="PL(H)",
         ),
 
@@ -170,7 +173,7 @@ def create():
             h=1.1,
             theta=0.23,
             material="cart",
-            difficulty=600.0,
+            difficulty=72.839,
             oid="CT",
         ),
         MovableObstacle(
@@ -181,7 +184,7 @@ def create():
             h=0.15,
             theta=0.0,
             material="pallet",
-            difficulty=300.0,
+            difficulty=942.231,
             oid="PL(L)",
         ),
         MovableObstacle(
@@ -192,7 +195,7 @@ def create():
             h=2.0,
             theta=0.8,
             material="loaded_pallet",
-            difficulty=8000.0,
+            difficulty=5109.048,
             oid="SC",
         ),
 
@@ -205,7 +208,7 @@ def create():
             h=0.8,
             theta=0.0,
             material="box",
-            difficulty=120.0,
+            difficulty=709.773,
             oid="BX_D",
         ),
         MovableObstacle(
@@ -216,7 +219,7 @@ def create():
             h=0.8,
             theta=0.0,
             material="box",
-            difficulty=120.0,
+            difficulty=74.713,
             oid="BX_D_1",
         ),
         MovableObstacle(
@@ -227,7 +230,7 @@ def create():
             h=0.8,
             theta=0.3,
             material="box",
-            difficulty=120.0,
+            difficulty=457.068,
             oid="BX_D_2",
         ),
 
@@ -240,7 +243,7 @@ def create():
             h=0.3,
             theta=0.0,
             material="wooden_crate",
-            difficulty=66.218,
+            difficulty=19.865,
             oid="33",
         ),
         MovableObstacle(
@@ -251,19 +254,23 @@ def create():
             h=0.3,
             theta=0.0,
             material="wooden_crate",
-            difficulty=66.218,
+            difficulty=19.865,
             oid="33_1",
         ),
 
+        # 以下六个此前 h 是复制拖填时留下的离谱占位值（250~5000 米），
+        # difficulty 也照抄了上面 33 号 wooden_crate 的 66.218，跟 material="cart"
+        # 对不上；现按 material_mu_rho("cart")*l*d*h*G 重新算，h 统一取
+        # MATERIAL_HEIGHT["cart"]=1.1（仓储小车典型高度）。
         MovableObstacle(
             x=33.5,
             y=30.5,
             l=1.5,
             d=1.5,
-            h=1000,
+            h=1.1,
             theta=0.70,
             material="cart",
-            difficulty=66.218,
+            difficulty=109.259,
             oid="35",
         ),
 
@@ -272,10 +279,10 @@ def create():
             y=1.8,
             l=0.5,
             d=0.5,
-            h=300,
+            h=1.1,
             theta=0.70,
             material="cart",
-            difficulty=66.218,
+            difficulty=12.14,
             oid="34_1",
         ),
         MovableObstacle(
@@ -283,10 +290,10 @@ def create():
             y=1.8,
             l=0.5,
             d=0.5,
-            h=10.0,
+            h=1.1,
             theta=0.5,
             material="cart",
-            difficulty=66.218,
+            difficulty=12.14,
             oid="36_1",
         ),
         MovableObstacle(
@@ -294,10 +301,10 @@ def create():
             y=14.6,
             l=0.1,
             d=1.8,
-            h=1000.0,
+            h=1.1,
             theta=0.3,
             material="cart",
-            difficulty=66.218,
+            difficulty=8.741,
             oid="38",
         ),
         MovableObstacle(
@@ -305,10 +312,10 @@ def create():
             y=14.6,
             l=0.1,
             d=1.8,
-            h=5000.0,
+            h=1.1,
             theta=0.0,
             material="cart",
-            difficulty=66.218,
+            difficulty=8.741,
             oid="38_2",
         ),
         MovableObstacle(
@@ -316,10 +323,10 @@ def create():
             y=7.8,
             l=0.1,
             d=1.6,
-            h=100.0,
+            h=1.1,
             theta=0.4,
             material="cart",
-            difficulty=66.218,
+            difficulty=7.77,
             oid="39",
         ),
     ]
