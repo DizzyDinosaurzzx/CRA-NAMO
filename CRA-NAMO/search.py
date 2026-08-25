@@ -7,8 +7,6 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-import shapely
-from shapely.ops import unary_union
 from config import Config
 from roadmap import Roadmap, EdgeKey
 from perception import Belief
@@ -26,7 +24,6 @@ class Plan:
 
 
 _MOVE_DIR_EPS = 1e-3    # below this displacement a drop pose carries no move direction
-_INFLATED_CACHE_MAX = 64
 
 
 def move_signature(obs) -> tuple:
@@ -46,7 +43,6 @@ class Planner:
         self.failed_moves = set() if failed_moves is None else failed_moves
         self._robot_pos: Tuple[float, float] = (0.0, 0.0)
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
-        self._inflated_cache: Dict[bytes, object] = {}
 
     # --- planning ---
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
@@ -165,20 +161,17 @@ class Planner:
         """Compute work and drop pose needed to move an obstacle aside, also plan its SE(2) route"""
         obs = self.belief.obstacle(oid)
         cache_key = (move_signature(obs), key)
-        if cache_key in self._persistent_removal_cache:
-            return self._persistent_removal_cache[cache_key]
+        # A move the executor has since given up on comes first: what is cached
+        # is what looked possible before it was tried, and re-serving that would
+        # have the planner keep proposing the move that just failed.
         if cache_key in self.failed_moves:
             res = (False, math.inf, None, 0.0, None, None)
             self._persistent_removal_cache[cache_key] = res
             return res
+        if cache_key in self._persistent_removal_cache:
+            return self._persistent_removal_cache[cache_key]
         clear_polys = [self.roadmap.edge_corridor[key]]
-        polys = [ob.polygon for oid2, ob in self.belief.perceived.items()
-                 if oid2 != oid]
-        for c in self.belief.contacts:
-            part = c.difference(obs.polygon)
-            if not part.is_empty and part.area > 1e-9:
-                polys.append(part)
-        others = unary_union(polys) if polys else None
+        others = self.belief.others_union(oid)
 
         estimated_diff = self.belief.get_difficulty(oid, self.est)
         move_path = None
@@ -209,7 +202,8 @@ class Planner:
                 return hit[1]
             plan = contact.plan_contact(obs, poses, mid, mid,
                                         self.roadmap.free_eroded_tol,
-                                        self._others_inflated(others), self.cfg)
+                                        contact.inflate_others(others, self.cfg),
+                                        self.cfg)
             contact_memo[id(poses)] = (poses, plan)
             return plan
 
@@ -250,27 +244,6 @@ class Planner:
         res = (feasible, work, drop, move_dist, move_path, cplan)
         self._persistent_removal_cache[cache_key] = res
         return res
-
-    def _others_inflated(self, others):
-        """Robot-centre positions ruled out by the *other* movable obstacles.
-
-        Content-addressed by WKB: the union is rebuilt from scratch for every
-        removal candidate, but the same set of obstacles recurs constantly across
-        edges and cycles, and inflating it is the expensive half.
-        """
-        if others is None or others.is_empty:
-            return None
-        key = others.wkb
-        cached = self._inflated_cache.get(key)
-        if cached is not None:
-            return cached
-        geom = others.buffer(max(self.cfg.robot_radius - self.cfg.contact_clearance,
-                                 1e-6))
-        shapely.prepare(geom)
-        self._inflated_cache[key] = geom
-        while len(self._inflated_cache) > _INFLATED_CACHE_MAX:
-            self._inflated_cache.pop(next(iter(self._inflated_cache)))
-        return geom
 
     def _goal_filter(self, obs):
         """Reject drop poses that leave the obstacle blocking more edges than it does

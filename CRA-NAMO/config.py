@@ -141,7 +141,7 @@ class Config:
     rng_seed: int = 0
     out_dir: str = "img"
     save_frames: bool = True   # whether to save the per-step animation (GIF)
-    gif_fps: float = 5.0       # animation speed, frames per second
+    gif_fps: float = 10       # animation speed, frames per second
     gif_end_hold_s: float = 2  # hold the last frame this long before looping
     gif_dpi: int = 300         # per-frame render resolution inside the GIF
     # The animation runs on the simulated clock, not on the event list: one frame

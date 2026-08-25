@@ -293,6 +293,22 @@ class Belief:
         return estimator.estimate(self.perceived[oid].observation())
 
     # --- Query ---
+    def others_union(self, oid: int):
+        """Everything known to be in the way apart from obstacle *oid*.
+
+        The perceived obstacles plus the anonymous contact regions, minus
+        whatever part of a contact region is *oid* itself — a bump recorded
+        against the obstacle being moved is not a second thing to steer around.
+        Returns None when nothing else is known.
+        """
+        body = self.perceived[oid].polygon if oid in self.perceived else None
+        polys = [ob.polygon for other, ob in self.perceived.items() if other != oid]
+        for c in self.contacts:
+            part = c if body is None else c.difference(body)
+            if not part.is_empty and part.area > 1e-9:
+                polys.append(part)
+        return unary_union(polys) if polys else None
+
     def blockers_of(self, key: EdgeKey) -> Set[int]:
         return self.edge_blockers.get(key, set())
 

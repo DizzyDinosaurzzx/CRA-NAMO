@@ -38,6 +38,8 @@ matplotlib.rcParams["font.serif"] = ["Times New Roman", "Times", "STIXGeneral",
                                      "DejaVu Serif"]
 matplotlib.rcParams["mathtext.fontset"] = "stix"
 from matplotlib.collections import LineCollection
+from matplotlib.colors import ListedColormap, LogNorm
+from matplotlib.patches import Rectangle
 from PIL import Image
 from shapely.geometry import LineString, Point
 
@@ -74,27 +76,34 @@ _DIFFICULTY_CMAP = "YlOrBr"
 _DIFFICULTY_SHADE = (0.18, 0.92)   # crop the colormap: pure white reads as absent
 
 
+def _difficulty_cmap():
+    """The colormap, cropped to the shades actually used.
+
+    Built once here and used for both the obstacle fills and the colourbar, so
+    the key under the plot cannot drift out of step with what it is explaining.
+    """
+    base = matplotlib.colormaps[_DIFFICULTY_CMAP]
+    lo, hi = _DIFFICULTY_SHADE
+    return ListedColormap([base(lo + (hi - lo) * i / 255.0) for i in range(256)])
+
+
 def difficulty_palette(world):
     """Map each obstacle id to a fill colour, shading by true difficulty.
 
     Log scale, because difficulty spans four orders of magnitude across the
-    scenarios — on a linear ramp every obstacle in a map with one heavy item
-    collapses to the same pale shade. Returns (colours, low, high) so the legend
-    can label the two ends with the numbers they stand for.
+    scenarios — on a linear ramp every obstacle in a map holding one heavy item
+    collapses to the same pale shade. Returns (colours, low, high) so the key
+    below the plot can be drawn over the same range.
     """
     values = {w.oid: max(float(w.difficulty), 1e-6) for w in world}
     if not values:
         return {}, 0.0, 0.0
     low, high = min(values.values()), max(values.values())
-    cmap = matplotlib.colormaps[_DIFFICULTY_CMAP]
-    lo_shade, hi_shade = _DIFFICULTY_SHADE
-    span = math.log10(high) - math.log10(low)
-    colours = {}
-    for oid, value in values.items():
-        # a map whose obstacles are all equally hard has no gradient to show
-        t = 0.5 if span < 1e-9 else (math.log10(value) - math.log10(low)) / span
-        colours[oid] = cmap(lo_shade + t * (hi_shade - lo_shade))
-    return colours, low, high
+    cmap = _difficulty_cmap()
+    if high - low < 1e-9:      # every obstacle equally hard: no gradient to show
+        return {oid: cmap(0.5) for oid in values}, low, high
+    norm = LogNorm(vmin=low, vmax=high)
+    return {oid: cmap(norm(v)) for oid, v in values.items()}, low, high
 
 
 def _label_colour(fill) -> str:
@@ -109,24 +118,60 @@ def _label_colour(fill) -> str:
     return "#111111" if luminance > 0.55 else "#ffffff"
 
 
-def _draw_difficulty_key(ax, colours, low, high):
-    """Two legend proxies naming the ends of the gradient.
+def _draw_obstacle_key(ax, show_unperceived: bool):
+    """Legend proxies for what an obstacle's *outline* means.
 
-    A full colourbar would need its own axes and a different canvas layout; two
-    swatches carry the same information in the space already reserved.
+    Fill shades difficulty, so the state of an obstacle had to move to the
+    outline — and an encoding nobody can read is not an encoding. Zero-size
+    rectangles carry the styling into the legend without drawing on the plot.
+    """
+    ax.add_patch(Rectangle((0, 0), 0, 0, facecolor="none",
+                           edgecolor=_MOVED_EDGE, lw=2.0,
+                           label="moved by the robot"))
+    if show_unperceived:
+        ax.add_patch(Rectangle((0, 0), 0, 0, facecolor="none",
+                               edgecolor=_UNPERCEIVED, lw=1.0, ls=":",
+                               label="not yet perceived"))
+
+
+def _draw_difficulty_key(fig, ax, colours, low, high):
+    """Explain what an obstacle's shade means, below the plot.
+
+    A colourbar rather than swatches: two squares can name the ends but cannot
+    show that the ramp between them is continuous and logarithmic, and that is
+    the part that makes a 66 N door and a 167 kN block legible on one map. Ticks
+    are placed at the two ends and the geometric middle, which are meaningful for
+    any range, rather than at whatever decades happen to fall inside it.
+
+    A map whose obstacles are all equally hard has no ramp to draw, so it falls
+    back to a single labelled swatch in the ordinary legend.
     """
     if not colours:
         return
-    cmap = matplotlib.colormaps[_DIFFICULTY_CMAP]
-    lo_shade, hi_shade = _DIFFICULTY_SHADE
-    if abs(high - low) < 1e-9:
-        ax.scatter([], [], marker="s", s=40, color=cmap(0.5),
-                   label=f"difficulty {low:,.0f} N")
+    if high - low < 1e-9:
+        ax.scatter([], [], marker="s", s=40, color=_difficulty_cmap()(0.5),
+                   label=f"obstacle difficulty {low:,.0f} N")
         return
-    ax.scatter([], [], marker="s", s=40, color=cmap(lo_shade),
-               label=f"easiest {low:,.0f} N")
-    ax.scatter([], [], marker="s", s=40, color=cmap(hi_shade),
-               label=f"hardest {high:,.0f} N")
+    fw, fh = fig.get_figwidth(), fig.get_figheight()
+    width = min(0.5 * fw, 3.4)
+    cax = fig.add_axes(((fw - width) / 2.0 / fw, (_LEGEND_H + 0.17) / fh,
+                        width / fw, 0.10 / fh))
+    bar = fig.colorbar(
+        plt.cm.ScalarMappable(norm=LogNorm(vmin=low, vmax=high),
+                              cmap=_difficulty_cmap()),
+        cax=cax, orientation="horizontal")
+    ticks = [low, math.sqrt(low * high), high]
+    bar.set_ticks(ticks)
+    bar.set_ticklabels([f"{t:,.0f}" for t in ticks])
+    # a log scale labels its minor ticks too, which over a range narrower than
+    # two decades writes "3 x 10^1" on top of the three ticks actually wanted
+    bar.ax.minorticks_off()
+    bar.ax.tick_params(labelsize=6, length=2, pad=1)
+    bar.outline.set_linewidth(0.5)
+    # the title sits above the bar; a colourbar label would land under the ticks,
+    # which is where the ordinary legend already is
+    bar.ax.set_title("obstacle difficulty — push force [N], shown for the reader "
+                     "only", fontsize=6.5, pad=3)
 
 
 def _plot_poly(ax, poly, **kw):  # draw basic polygon
@@ -238,8 +283,9 @@ _TOP_PAD = 0.12            # whitespace above title, inches
 _TITLE_LINE = 0.24         # height per title line, inches
 _TITLE_LINES = 4           # height reserved above every animation frame
 _LEGEND_H = 0.5            # bottom legend strip height, inches
+_CBAR_H = 0.46             # difficulty colourbar strip, above the legend, inches
 _TITLE_FS = 9              # title font size
-_LEGEND_NCOL = 5
+_LEGEND_NCOL = 6
 
 
 def _lay_out_title(groups, width_inch: float, max_lines: int = _TITLE_LINES) -> str:
@@ -293,10 +339,11 @@ def _new_canvas(sim: OnlineNAMO, title_lines: int = _TITLE_LINES):
 
     title_h = _TITLE_LINE * title_lines
     fw = pw + 2 * _MARGIN
-    fh = _LEGEND_H + _MARGIN + ph + title_h + _TOP_PAD
+    fh = _LEGEND_H + _CBAR_H + _MARGIN + ph + title_h + _TOP_PAD
 
     fig = plt.figure(figsize=(fw, fh))
-    ax = fig.add_axes((_MARGIN / fw, (_LEGEND_H + _MARGIN) / fh, pw / fw, ph / fh))
+    ax = fig.add_axes((_MARGIN / fw, (_LEGEND_H + _CBAR_H + _MARGIN) / fh,
+                       pw / fw, ph / fh))
     return fig, ax
 
 
@@ -354,7 +401,8 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
                                            sim.risk.level),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4,
                 color=_label_colour(colours[w.oid]))
-    _draw_difficulty_key(ax, colours, low, high)
+    _draw_difficulty_key(fig, ax, colours, low, high)
+    _draw_obstacle_key(ax, show_unperceived=False)
 
     # draw robot motion trail corridor:
     if len(res.robot_track) >= 2:
@@ -412,7 +460,8 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     robot_circle = Point(rx, ry).buffer(sim.cfg.robot_radius)
     _plot_poly(ax, robot_circle, facecolor=_ROBOT, alpha=0.9, zorder=7)
     ax.plot(rx, ry, marker="o", color=_ROBOT_CORE, ms=4, zorder=8, label="robot")
-    _draw_difficulty_key(ax, colours, low, high)
+    _draw_difficulty_key(fig, ax, colours, low, high)
+    _draw_obstacle_key(ax, show_unperceived=True)
 
     # every frame reserves the same title height, or the GIF frames differ in size
     title = _lay_out_title([

@@ -32,11 +32,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import shapely
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
+from shapely.ops import nearest_points
 
 import geometry
 
@@ -46,6 +47,30 @@ XY = Tuple[float, float]
 _INF = float("inf")
 _MIN_STATIONS = 8
 _MAX_STATIONS = 64
+_INFLATED_CACHE_MAX = 64
+_INFLATED_CACHE: Dict[Tuple[bytes, float], object] = {}
+
+
+def inflate_others(others, cfg):
+    """Robot-centre positions ruled out by the obstacles that are *not* being moved.
+
+    Content-addressed by WKB: the union is rebuilt from scratch for every removal
+    candidate, but the same set of obstacles recurs constantly across edges and
+    cycles, and inflating it is the expensive half.
+    """
+    if others is None or others.is_empty:
+        return None
+    pad = max(cfg.robot_radius - cfg.contact_clearance, 1e-6)
+    key = (others.wkb, round(pad, 9))     # a different robot inflates it differently
+    cached = _INFLATED_CACHE.get(key)
+    if cached is not None:
+        return cached
+    geom = others.buffer(pad)
+    shapely.prepare(geom)
+    _INFLATED_CACHE[key] = geom
+    while len(_INFLATED_CACHE) > _INFLATED_CACHE_MAX:
+        _INFLATED_CACHE.pop(next(iter(_INFLATED_CACHE)))
+    return geom
 
 
 @dataclass
@@ -181,6 +206,32 @@ def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
     return not shapely.intersects(blocked_geom, inner)
 
 
+def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
+    """The nearest spot to *p* the robot could actually be standing on.
+
+    The reference point a manipulation is measured from is a roadmap position,
+    and roadmap positions ignore movable obstacles — so it routinely lies within
+    a robot radius of the very obstacle being moved, which is nowhere the robot
+    could be. Testing a drive-in from there is meaningless, but *skipping* the
+    test makes every grip point on the obstacle look directly reachable,
+    including the ones on the far face: that is how the robot ends up crossing
+    the obstacle instead of walking round it. Shifting the test out to the
+    nearest place it could stand keeps the test.
+
+    Returns *p* unchanged when it already is such a place, and None when there is
+    nowhere to shift it to — the caller then genuinely has no line to test.
+    """
+    if not shapely.intersects_xy(blockers, *p):
+        return p
+    boundary = blockers.boundary
+    if boundary.is_empty:
+        return None
+    q = nearest_points(boundary, Point(p))[0]
+    if not shapely.contains_xy(free_geom, q.x, q.y):
+        return None
+    return (q.x, q.y)
+
+
 # --- planner ---
 def plan_contact(obs,
                  poses: Sequence[Pose],
@@ -240,20 +291,19 @@ def plan_contact(obs,
     approach_blockers = _with_body(poses[0])
     exit_blockers = approach_blockers if len(poses) == 1 else _with_body(poses[-1])
 
-    # The reference point is a roadmap position, and roadmap positions ignore
-    # movable obstacles — so it can lie *under* the very obstacle being moved.
-    # There is no drive-in to validate from a spot the robot could not be standing
-    # on in the first place; the distance is still charged, only the line test for
-    # that leg is meaningless and gets skipped.
-    start_under = bool(shapely.intersects_xy(approach_blockers, *robot_start))
-    end_under = bool(shapely.intersects_xy(exit_blockers, *robot_end))
+    # Where the drive-in and drive-out get tested from. Both reference points are
+    # roadmap positions, so either may lie under the obstacle itself; the test
+    # then runs from the nearest spot the robot could stand on instead. Distances
+    # are still charged from the original points — only the line test moves.
+    start_ref = _standable(robot_start, approach_blockers, free_geom)
+    end_ref = _standable(robot_end, exit_blockers, free_geom)
 
     # --- entry costs ---
     cost = np.full(k, _INF)
     for s in np.flatnonzero(feas[0]):
         p = (float(world[0, s, 0]), float(world[0, s, 1]))
-        if start_under or _clear_line(robot_start, p, free_geom,
-                                      approach_blockers, r):
+        if start_ref is None or _clear_line(start_ref, p, free_geom,
+                                            approach_blockers, r):
             cost[s] = math.dist(robot_start, p)
     if not np.isfinite(cost).any():
         return ContactPlan(False, "cannot reach any grip point on this obstacle")
@@ -293,7 +343,7 @@ def plan_contact(obs,
         if not np.isfinite(total[s]):
             break
         p = (float(world[-1, s, 0]), float(world[-1, s, 1]))
-        if end_under or _clear_line(p, robot_end, free_geom, exit_blockers, r):
+        if end_ref is None or _clear_line(p, end_ref, free_geom, exit_blockers, r):
             chosen = int(s)
             break
     if chosen < 0:

@@ -25,6 +25,12 @@ import kinematics
 import log
 import manipulation
 
+# How many of the nearest roadmap nodes to try when putting the robot back on the
+# graph after a manipulation. At a 0.3 m grid step this reaches roughly 1.5 m out,
+# far enough to clear the obstacle it has just let go of.
+_REANCHOR_CANDIDATES = 64
+
+
 # Simulation result summary
 @dataclass
 class RunResult:
@@ -83,6 +89,7 @@ class OnlineNAMO:
         # and by touching, both of which happen in there
         self.belief = Belief(self.roadmap, cfg, self.risk)
         self._risk_charged: set = set()             # oids whose surcharge is already paid
+        self.stranded = False       # robot ended a manipulation with no roadmap node in reach
         self._plan_paths: List[dict] = []           # all currently planned paths (for per-frame visualisation)
         self.failed_moves: set = set()
         # true robot position. It equals the current roadmap node between actions,
@@ -206,7 +213,7 @@ class OnlineNAMO:
                             # collision — invalidate this placement and replan a new location
                             self._handle_move_collision(res, node, act["oid"], hits)
                         break
-                    if new_node is not None:
+                    if new_node is not None or self.stranded:
                         break
                 elif act["type"] == "move":
                     prev_node = node    # remember where the move started
@@ -250,6 +257,12 @@ class OnlineNAMO:
                         break
 
             res.cycles = cycle + 1
+            if self.stranded:
+                # `node` no longer says where the robot is, so there is nothing
+                # left to plan from — better to stop than to drive from a
+                # position the robot is not at
+                res.message = "Robot ended a manipulation with no roadmap node in reach."
+                break
             if reached_goal or node == self.goal_node:
                 break
 
@@ -402,13 +415,30 @@ class OnlineNAMO:
         self.robot_xy = (float(p[0]), float(p[1]))
         res.robot_track.append(self.robot_xy)
 
+    def _walk_frames(self, pts, cfg: Config) -> set:
+        """Which legs of a walk to capture a frame after.
+
+        Only the legs that actually move — a contact plan holds its grip point
+        still for several steps at a time — and no more of those than one
+        manipulation is allowed. Walking round a stationary obstacle to reach the
+        far face is travel that takes time, and a frame list that skips it is
+        what makes the robot appear to jump across the obstacle.
+        """
+        moving = [i for i in range(1, len(pts))
+                  if math.dist(pts[i - 1], pts[i]) > 1e-9]
+        return {moving[j] for j in
+                self._sample_move_path(moving, cfg.manip_max_frames_per_action)}
+
     def _walk_robot(self, pts, res: RunResult, cfg: Config,
-                    loaded: bool = False):
+                    loaded: bool = False, node: Optional[int] = None,
+                    label: str = "", move_oid: Optional[int] = None):
         """Drive the robot through *pts* (pts[0] is where it already stands).
 
         Stops at the first obstacle it did not know about. Returns
-        (index reached, hit oids, stop position).
+        (index reached, hit oids, stop position). Given *node*, the walk is
+        animated as well as driven.
         """
+        frame_at = self._walk_frames(pts, cfg) if node is not None else ()
         for i in range(1, len(pts)):
             a, b = pts[i - 1], pts[i]
             hits, t = self.belief.check_robot_collision(a, b, self.world, cfg)
@@ -418,28 +448,42 @@ class OnlineNAMO:
                 self.belief.touch_check(stop, self.world, cfg)
                 return i - 1, hits, stop
             self._drive(res, a, b, in_contact=True, loaded=loaded)
+            if i in frame_at:
+                self._capture_frame(res, node, label, move_oid=move_oid)
         return len(pts) - 1, [], (pts[-1] if pts else self.robot_xy)
 
-    def _retrace(self, res: RunResult, pts):
+    def _retrace(self, res: RunResult, pts, node: Optional[int] = None,
+                 label: str = "", move_oid: Optional[int] = None):
         """Back out along ground the robot has just covered — no collision check
         needed, it was clear a moment ago and nothing has moved since."""
+        frame_at = self._walk_frames(pts, self.cfg) if node is not None else ()
         for i in range(1, len(pts)):
             self._drive(res, pts[i - 1], pts[i], in_contact=True)
+            if i in frame_at:
+                self._capture_frame(res, node, label, move_oid=move_oid)
 
     def _reanchor(self, res: RunResult, node: int) -> Optional[int]:
         """Put the robot back on the roadmap after a manipulation.
 
         Returns None when it made it back to the node the excursion started from
         — the rest of the plan is then still valid — and the new node otherwise.
+        Every node it settles for is one it can reach in a straight line it has
+        checked: driving to the nearest node regardless, which is what used to
+        happen when none was reachable, put the robot through whatever stood in
+        between. If nothing is reachable it stays put and the run ends there.
         """
         blocked = self._known_obstacles_inflated()
         home = self.roadmap.nodes[node]
         if self.roadmap.can_drive(self.robot_xy, home, blocked):
             self._drive(res, self.robot_xy, home, in_contact=True)
             return None
-        target = self.roadmap.nearest_reachable_node(self.robot_xy, blocked)
+        target = self.roadmap.nearest_reachable_node(self.robot_xy, blocked,
+                                                     k=_REANCHOR_CANDIDATES)
         if target is None:
-            target = self.roadmap.nearest_node(self.robot_xy)
+            self.stranded = True
+            self.cfg.log(f"[reanchor] no roadmap node reachable from "
+                         f"({self.robot_xy[0]:,.2f}, {self.robot_xy[1]:,.2f})")
+            return None
         self._drive(res, self.robot_xy, self.roadmap.nodes[target], in_contact=True)
         return target
 
@@ -454,6 +498,20 @@ class OnlineNAMO:
         return geom
 
     # --- manipulation ---
+    def _contact_plan(self, oid: int, obs, move_path) -> contact.ContactPlan:
+        """Plan the escort for one manipulation from where the robot is standing.
+
+        Same inputs the search used, with one difference that matters: the real
+        robot position rather than the edge midpoint that stood in for it. That
+        is what makes the walk to the grip point a route the robot could drive
+        instead of a straight line through the obstacle it is about to push.
+        """
+        return contact.plan_contact(
+            obs, move_path, self.robot_xy, self.robot_xy,
+            self.roadmap.free_eroded_tol,
+            contact.inflate_others(self.belief.others_union(oid), self.cfg),
+            self.cfg)
+
     def _execute_move(self, oid: int, obs, act: dict,
                            res: RunResult, node: int, cfg: Config):
         """Move one obstacle along its SE2 path with the robot holding on to it.
@@ -475,11 +533,20 @@ class OnlineNAMO:
             # its node. Rebuilt around the robot's real position rather than
             # reusing the planned one, which is anchored to the edge midpoint.
             cplan = contact.idle_plan(home, n)
+        else:
+            # The planned escort was measured from the edge *midpoint*, which
+            # stands in for either endpoint during the search. The robot is on
+            # one of them, up to conn_radius away, so the approach and exit legs
+            # that plan validated are not the ones about to be driven. Plan them
+            # again from where the robot actually stands.
+            cplan = self._contact_plan(oid, obs, move_path)
+            if not cplan.feasible:
+                self.failed_moves.add((move_signature(obs), act["key"]))
+                self._capture_frame(
+                    res, node,
+                    f"cannot escort {oid} from node {node}: {cplan.reason} -> replan")
+                return (False, None, 0.0, None)
         rp = list(cplan.robot_path)
-        # the plan measured the excursion from the edge midpoint; the robot is
-        # standing on one of that edge's endpoints, so re-anchor both ends to it
-        rp[0] = home
-        rp[-1] = home
         off = cplan.move_offset
 
         # Build STRtree once for all steps in this manipulation — avoids O(N) polygon
@@ -500,9 +567,11 @@ class OnlineNAMO:
             tree_items = items
 
         # --- approach ---
-        reached, hits, stop = self._walk_robot(rp[:off + 1], res, cfg)
+        reached, hits, stop = self._walk_robot(
+            rp[:off + 1], res, cfg, node=node, label=f"walk round to grip {oid}")
         if hits:
-            self._retrace(res, [stop] + rp[reached::-1])
+            self._retrace(res, [stop] + rp[reached::-1], node=node,
+                          label=f"back off from {oid}")
             self.belief.perceive(self.world, self.robot_xy)
             self._capture_frame(
                 res, node, f"robot hit {sorted(hits)} approaching {oid} -> replan")
@@ -521,7 +590,7 @@ class OnlineNAMO:
                     self.belief.relocate(obs, *move_path[last_i])
                     self.belief.record_move_direction(oid, start_xy,
                                                       move_path[last_i])
-                new_node = self._release_and_return(res, rp, off, last_i,
+                new_node = self._release_and_return(res, oid, rp, off, last_i,
                                                     False, node, cfg)
                 return (False, obs_hits,
                         cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
@@ -555,11 +624,13 @@ class OnlineNAMO:
         self.belief.relocate(obs, *move_path[-1])
         self.belief.record_move_direction(oid, start_xy, move_path[-1])
         self.belief.perceive(self.world, self.robot_xy)
-        new_node = self._release_and_return(res, rp, off, n - 1, True, node, cfg)
+        new_node = self._release_and_return(res, oid, rp, off, n - 1, True,
+                                            node, cfg)
         return (True, [], cost.se2_path_length(obs, move_path, cfg), new_node)
 
-    def _release_and_return(self, res: RunResult, rp: list, off: int, last_i: int,
-                            completed: bool, node: int, cfg: Config) -> Optional[int]:
+    def _release_and_return(self, res: RunResult, oid: int, rp: list, off: int,
+                            last_i: int, completed: bool, node: int,
+                            cfg: Config) -> Optional[int]:
         """Let go of the obstacle and get back onto the roadmap.
 
         After a completed move the planned exit walk applies: round the obstacle
@@ -571,7 +642,9 @@ class OnlineNAMO:
         """
         if not completed:
             return self._reanchor(res, node)
-        _reached, hits, _stop = self._walk_robot(rp[off + last_i:], res, cfg)
+        _reached, hits, _stop = self._walk_robot(
+            rp[off + last_i:], res, cfg, node=node,
+            label=f"let go of {oid} and walk back")
         if hits:
             self.belief.perceive(self.world, self.robot_xy)
             new_node = self._reanchor(res, node)
