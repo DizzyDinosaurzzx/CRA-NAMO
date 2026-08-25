@@ -8,17 +8,24 @@ The animation is keyed to the simulated clock rather than to the frame list, so
 a second of dragging an obstacle takes as much of the GIF as a second of driving
 free, and a replan is a visible pause. See `_time_sampled`.
 
-Colour vocabulary:
-    robot           yellow disc, dark goldenrod centre
-    planned route   blue solid (where the robot intends to drive)
-    obstacle route  blue dashed (where an obstacle is to be carried)
-    planned contact dark goldenrod dotted (where the robot grips it)
-    obstacle        crimson if untouched, orange once moved
-    robot trail     translucent blue corridor
+Colour vocabulary — three families that never borrow from each other, so no two
+unrelated things can be confused at a glance:
+
+    warm (obstacles)  fill shades an obstacle by how hard it is to move, light
+                      cream through dark brown on a log scale (`difficulty_palette`)
+    blue (intent)     everything the planner decided: route, obstacle route,
+                      trail already driven
+    green (the robot) the disc itself, the start flag, and the outline of any
+                      obstacle it has actually moved
+
+Grey is reserved for what the robot cannot act on — walls, the roadmap, and the
+dotted outline of an obstacle it has not yet perceived. Red appears once, on the
+goal flag.
 """
 
 from __future__ import annotations
 import io
+import math
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -35,6 +42,92 @@ from PIL import Image
 from shapely.geometry import LineString, Point
 
 from executor import OnlineNAMO
+
+# --- palette ---
+# Everything that has a colour has it named here, so a change is one edit and
+# two things can never drift into the same shade by accident.
+_BACKGROUND     = "#f6f6f3"      # workspace fill
+_WALL           = "#585d63"      # static obstacles
+_WALL_EDGE      = "#3a3e42"
+_ROADMAP_EDGE   = "#e4e4e4"      # the graph is context, not content: keep it faint
+_ROADMAP_NODE   = "#d2d2d2"
+_CURRENT_NODE   = "#08519c"
+_ROUTE          = "#08519c"      # where the robot intends to drive
+_OBSTACLE_ROUTE = "#3182bd"      # where an obstacle is to be carried
+_CONTACT        = "#6a51a3"      # where the robot grips it
+_TRAIL          = "#9ecae1"      # ground already covered
+_ROBOT          = "#31a354"
+_ROBOT_CORE     = "#00441b"
+_START          = "#31a354"
+_GOAL           = "#d73027"
+_GHOST          = "#b4b4b4"      # where an obstacle started
+_OBSTACLE_EDGE  = "#8c510a"      # outline of a perceived obstacle
+_MOVED_EDGE     = "#1a9850"      # ... once the robot has moved it
+_UNPERCEIVED    = "#9a9a9a"      # outline of one it has not seen yet
+_DIFFICULTY_CMAP = "YlOrBr"
+
+# The gradient runs over the *true* difficulties, which is ground truth the robot
+# does not have. That is deliberate and safe: it reaches the picture only, never
+# the belief or the planner, exactly as the dashed "original pose" outlines
+# already do. Reading the map, a human can see at a glance what the robot has to
+# work out by touching things.
+_DIFFICULTY_SHADE = (0.18, 0.92)   # crop the colormap: pure white reads as absent
+
+
+def difficulty_palette(world):
+    """Map each obstacle id to a fill colour, shading by true difficulty.
+
+    Log scale, because difficulty spans four orders of magnitude across the
+    scenarios — on a linear ramp every obstacle in a map with one heavy item
+    collapses to the same pale shade. Returns (colours, low, high) so the legend
+    can label the two ends with the numbers they stand for.
+    """
+    values = {w.oid: max(float(w.difficulty), 1e-6) for w in world}
+    if not values:
+        return {}, 0.0, 0.0
+    low, high = min(values.values()), max(values.values())
+    cmap = matplotlib.colormaps[_DIFFICULTY_CMAP]
+    lo_shade, hi_shade = _DIFFICULTY_SHADE
+    span = math.log10(high) - math.log10(low)
+    colours = {}
+    for oid, value in values.items():
+        # a map whose obstacles are all equally hard has no gradient to show
+        t = 0.5 if span < 1e-9 else (math.log10(value) - math.log10(low)) / span
+        colours[oid] = cmap(lo_shade + t * (hi_shade - lo_shade))
+    return colours, low, high
+
+
+def _label_colour(fill) -> str:
+    """Black or white, whichever stays readable on `fill`.
+
+    The gradient runs from near-white to dark brown, so a single fixed text
+    colour is illegible at one end or the other. Relative luminance (Rec. 709)
+    decides, with the threshold where the two contrast ratios cross.
+    """
+    r, g, b = fill[:3]
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return "#111111" if luminance > 0.55 else "#ffffff"
+
+
+def _draw_difficulty_key(ax, colours, low, high):
+    """Two legend proxies naming the ends of the gradient.
+
+    A full colourbar would need its own axes and a different canvas layout; two
+    swatches carry the same information in the space already reserved.
+    """
+    if not colours:
+        return
+    cmap = matplotlib.colormaps[_DIFFICULTY_CMAP]
+    lo_shade, hi_shade = _DIFFICULTY_SHADE
+    if abs(high - low) < 1e-9:
+        ax.scatter([], [], marker="s", s=40, color=cmap(0.5),
+                   label=f"difficulty {low:,.0f} N")
+        return
+    ax.scatter([], [], marker="s", s=40, color=cmap(lo_shade),
+               label=f"easiest {low:,.0f} N")
+    ax.scatter([], [], marker="s", s=40, color=cmap(hi_shade),
+               label=f"hardest {high:,.0f} N")
+
 
 def _plot_poly(ax, poly, **kw):  # draw basic polygon
     if poly.geom_type == "Polygon":
@@ -88,16 +181,15 @@ def _draw_flag(ax, sim: OnlineNAMO, point, color: str, label: str):  # draw flag
 def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
     rm = sim.roadmap
     segs = [(rm.nodes[u], rm.nodes[v]) for u, v in rm.edge_len]
-    ax.add_collection(LineCollection(segs, colors="lightgray", linewidths=0.2,
+    ax.add_collection(LineCollection(segs, colors=_ROADMAP_EDGE, linewidths=0.2,
                                      zorder=0.3))
-    # roadmap nodes: silver-grey scatter
     xs = [p[0] for p in rm.nodes]
     ys = [p[1] for p in rm.nodes]
-    ax.scatter(xs, ys, color="silver", s=0.5, zorder=0.4)
-    # highlight current node (blue square); reachable neighbours are not drawn separately
+    ax.scatter(xs, ys, color=_ROADMAP_NODE, s=0.5, zorder=0.4)
+    # highlight current node; reachable neighbours are not drawn separately
     if cur_node is not None and 0 <= cur_node < len(rm.nodes):
         hx, hy = rm.nodes[cur_node]
-        ax.scatter([hx], [hy], color="dodgerblue", s=20, marker="s", zorder=4.7)
+        ax.scatter([hx], [hy], color=_CURRENT_NODE, s=20, marker="s", zorder=4.7)
 
 
 def _draw_plan_paths(ax, frame):  # draw the planned paths being executed at this frame (blue)
@@ -108,35 +200,35 @@ def _draw_plan_paths(ax, frame):  # draw the planned paths being executed at thi
         if path["kind"] == "route":
             # robot planned route: blue solid line + small dots at via-nodes
             label = None if "route" in labeled else "planned path"
-            ax.plot(xs, ys, color="blue", lw=1.8, alpha=0.9, zorder=6,
+            ax.plot(xs, ys, color=_ROUTE, lw=1.8, alpha=0.9, zorder=6,
                     solid_capstyle="round", label=label)
-            ax.scatter(xs, ys, color="blue", s=6, zorder=6.1)
+            ax.scatter(xs, ys, color=_ROUTE, s=6, zorder=6.1)
         elif path["kind"] == "contact":
             # where the robot holds the obstacle while it moves — the contact path
             label = None if "contact" in labeled else "planned contact"
-            ax.plot(xs, ys, color="darkgreen", lw=1.1, ls=":", alpha=0.85, zorder=6,
+            ax.plot(xs, ys, color=_CONTACT, lw=1.2, ls=":", alpha=0.9, zorder=6,
                     label=label)
         else:
-            # obstacle's own SE2 route: blue dashed line
+            # obstacle's own SE2 route
             label = None if "obstacle" in labeled else "planned obstacle route"
-            ax.plot(xs, ys, color="blue", lw=1.3, ls="--", alpha=0.75, zorder=6,
-                    label=label)
+            ax.plot(xs, ys, color=_OBSTACLE_ROUTE, lw=1.3, ls="--", alpha=0.85,
+                    zorder=6, label=label)
         labeled.add(path["kind"])
 
 
 def _draw_static(ax, sim: OnlineNAMO, original_poses):
     # workspace background
-    _plot_poly(ax, sim.workspace, color="whitesmoke", zorder=0)
-    ax.plot(*sim.workspace.exterior.xy, color="black", lw=1)
+    _plot_poly(ax, sim.workspace, facecolor=_BACKGROUND, zorder=0)
+    ax.plot(*sim.workspace.exterior.xy, color=_WALL_EDGE, lw=1)
     # static obstacles (walls etc. that are never moved)
     for so in sim.static_obstacles:
-        _plot_poly(ax, so.polygon, color="dimgray", zorder=1)
-    # start (blue) and goal (red) flags
-    _draw_flag(ax, sim, sim.start_point, "royalblue", "start")
-    _draw_flag(ax, sim, sim.goal_point, "red", "goal")
-    # original positions of movable obstacles (red dashed), for comparison with final positions
+        _plot_poly(ax, so.polygon, facecolor=_WALL, edgecolor=_WALL_EDGE,
+                   lw=0.5, zorder=1)
+    _draw_flag(ax, sim, sim.start_point, _START, "start")
+    _draw_flag(ax, sim, sim.goal_point, _GOAL, "goal")
+    # where each movable obstacle started, for comparison with where it ended up
     for oid, poly in original_poses.items():
-        ax.plot(*poly.exterior.xy, color="crimson", lw=1, ls="--", alpha=0.5, zorder=2)
+        ax.plot(*poly.exterior.xy, color=_GHOST, lw=1, ls="--", alpha=0.8, zorder=2)
 
 
 # --- Canvas layout ---
@@ -251,24 +343,27 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     fig, ax = _new_canvas(sim, title_lines=title.count("\n") + 1)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim)
-    # iterate over all movable obstacles, colour by whether they were moved
+    # fill shades true difficulty; the outline says whether the robot moved it
+    colours, low, high = difficulty_palette(sim.world)
     for w in sim.world:
-        col = "orange" if w.removed else "crimson"
-        _plot_poly(ax, w.polygon, color=col, alpha=0.6, zorder=3)
-        # label obstacle centroid with ID, estimate, and true difficulty if known
+        _plot_poly(ax, w.polygon, facecolor=colours[w.oid], alpha=0.9,
+                   edgecolor=_MOVED_EDGE if w.removed else _OBSTACLE_EDGE,
+                   lw=2.0 if w.removed else 0.8, zorder=3)
         ax.text(w.x, w.y, _obstacle_label(w.oid, sim.estimator.cache,
                                            sim.belief.touched_difficulty,
                                            sim.risk.level),
-                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4)
+                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4,
+                color=_label_colour(colours[w.oid]))
+    _draw_difficulty_key(ax, colours, low, high)
 
     # draw robot motion trail corridor:
     if len(res.robot_track) >= 2:
         corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
-        _plot_poly(ax, corridor, color="royalblue", alpha=0.3, zorder=5)
+        _plot_poly(ax, corridor, facecolor=_TRAIL, alpha=0.45, zorder=5)
     elif res.robot_track:
         # if only a single point (robot did not move), draw a circle
         p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
-        _plot_poly(ax, p, color="royalblue", alpha=0.3, zorder=5)
+        _plot_poly(ax, p, facecolor=_TRAIL, alpha=0.45, zorder=5)
     _finish_ax(ax, sim, title)
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -281,30 +376,33 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim, cur_node=cur_node)
     # draw obstacles classified by perception state
+    colours, low, high = difficulty_palette(sim.world)
     perceived = frame["perceived"]
     for oid, poly, removed in frame["obstacles"]:
         if oid not in perceived:
             # unperceived: grey dotted outline only (robot doesn't know where this obstacle is)
-            ax.plot(*poly.exterior.xy, color="gray", lw=1, ls=":", alpha=0.5, zorder=3)
+            ax.plot(*poly.exterior.xy, color=_UNPERCEIVED, lw=1, ls=":",
+                    alpha=0.6, zorder=3)
             continue
-        # perceived: colour by whether it has been moved
-        col = "orange" if removed else "crimson"
         # the obstacle being moved sits above the robot, so a piece carried past
         # the robot is not hidden by it; on collisions the robot stays on top
         z = 8.5 if oid == frame.get("move_oid") else 3
-        _plot_poly(ax, poly, color=col, alpha=0.6, zorder=z)
+        _plot_poly(ax, poly, facecolor=colours.get(oid, _OBSTACLE_EDGE), alpha=0.9,
+                   edgecolor=_MOVED_EDGE if removed else _OBSTACLE_EDGE,
+                   lw=2.0 if removed else 0.8, zorder=z)
         cx, cy = poly.centroid.x, poly.centroid.y
         estimates = frame.get("estimated_difficulty", {})
         touched = frame.get("touched_difficulty", {})
         ax.text(cx, cy, _obstacle_label(oid, estimates, touched,
                                         frame.get("risk")),
-                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=z + 1)
+                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=z + 1,
+                color=_label_colour(colours.get(oid, (1.0, 1.0, 1.0))))
 
     # draw robot motion trail up to this frame (semi-transparent blue corridor)
     track = frame["track"]
     if len(track) >= 2:
         buf = LineString(track).buffer(sim.cfg.robot_radius, cap_style=1)
-        _plot_poly(ax, buf, color="royalblue", alpha=0.25, zorder=5)
+        _plot_poly(ax, buf, facecolor=_TRAIL, alpha=0.4, zorder=5)
 
     # draw all paths given by the planner at this frame (blue lines)
     _draw_plan_paths(ax, frame)
@@ -312,8 +410,9 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     # draw current robot position (filled green circle + dark green centre dot)
     rx, ry = frame["robot"]
     robot_circle = Point(rx, ry).buffer(sim.cfg.robot_radius)
-    _plot_poly(ax, robot_circle, color="limegreen", alpha=0.85, zorder=7)
-    ax.plot(rx, ry, marker="o", color="darkgreen", ms=4, zorder=8, label="robot")
+    _plot_poly(ax, robot_circle, facecolor=_ROBOT, alpha=0.9, zorder=7)
+    ax.plot(rx, ry, marker="o", color=_ROBOT_CORE, ms=4, zorder=8, label="robot")
+    _draw_difficulty_key(ax, colours, low, high)
 
     # every frame reserves the same title height, or the GIF frames differ in size
     title = _lay_out_title([

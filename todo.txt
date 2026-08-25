@@ -28,13 +28,15 @@ ii. event触发，被机器人移动某一个障碍物后触发 or 机器人到�
 优化图片上面的文字，换行，不显示是LLM还是离线式搜索，展示J和plan time move time不显示合计的时间，不显示C，显示time_importance字体换成Times New Roman ✅
 
 颜色换成更好的，更清楚的
-不同移动难度的障碍物对应不同梯度的颜色，但是只用于可视化，不告诉机器人
+不同移动难度的障碍物对应不同梯度的颜色，但是只用于可视化，不告诉机器人 ✅
 
 5 LLM—benchmark 优化
 LLM DATAset优化，group1+group2 合并，引入更多不同品类的东西
 LLM risk评估优化
 可视化优化，展示LLM的准确度
 根据LLM的准确度人为制造一个基准化地图来展示LLM不准确对结果的影响（用离线式数据来模拟LLM的误差）来展示LLM对路径规划的影响
+
+
 
 6 代码结构优化（最低优先级）
 注释格式统一，减少注释的量，删除无用注释
@@ -47,7 +49,6 @@ full_reveal_on_contact: bool = False
 
 
 7 Scenario更新
-
 i. corridor 展示SE2 push planner的成果
 ii. 双门地图展示基础策略算法，绕行还是搬东西，搬哪个东西
 iii. 家庭地图
