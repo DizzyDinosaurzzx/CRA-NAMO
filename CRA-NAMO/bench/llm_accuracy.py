@@ -549,7 +549,7 @@ def stage_lambda(maps: List[str], lambdas: List[float],
                 row["lambda"] = lam
                 runs.append(row)
             log(f"  {map_name:<14s} lambda={lam:<6g} "
-                f"oracle J={runs[-len(arms)]['J']:.0f}")
+                f"oracle J={runs[-len(arms)]['J']:,.0f}")
     payload = {"maps": maps, "lambdas": lambdas,
                "sigma_log10": round(sigma, 4), "runs": runs}
     _save("lambda.json", payload)
@@ -601,7 +601,7 @@ def stage_nav(maps: List[str], accuracy: Optional[dict]) -> dict:
         for arm, mapping in arms:
             row = _run_map(map_name, arm, mapping)
             runs.append(row)
-            log(f"  {map_name:<18s} {arm:<12s} J={row['J']:>12.1f} "
+            log(f"  {map_name:<18s} {arm:<12s} J={row['J']:>14,.1f} "
                 f"pushes={row['pushes']} ok={row['success']} ({row['wall_s']}s)")
 
     payload = {"maps": maps, "sigma_log10": round(sigma, 4),
@@ -1013,8 +1013,8 @@ def stage_report(cfg: Config) -> str:
                     continue
                 pen = ("-" if arm == "oracle" or not base or not base["J"]
                        else f"{100.0 * (row['J'] - base['J']) / base['J']:+.1f}%")
-                body.append([map_name, arm, row["success"], f"{row['J']:.0f}",
-                             f"{row['walk_cost']:.0f}", f"{row['work_cost']:.0f}",
+                body.append([map_name, arm, row["success"], f"{row['J']:,.0f}",
+                             f"{row['walk_cost']:,.0f}", f"{row['work_cost']:,.0f}",
                              row["pushes"], row["cycles"], pen])
         parts.append(_table(
             ["map", "arm", "goal reached", "J", "lambda*D", "W", "pushes",

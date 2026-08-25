@@ -1,6 +1,25 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
+import kinematics
+import log
+
+
+STRATEGIES = ("normal", "shortest")
+
+
+def validate_strategy(value: str) -> str:
+    if value not in STRATEGIES:
+        raise ValueError(f"strategy must be one of {', '.join(STRATEGIES)}")
+    return value
+
+
+def validate_time_importance(value: float) -> float:
+    value = float(value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("time_importance must lie in [0, 1]")
+    return value
+
 def validate_lambda(value: float) -> float:
     value = float(value)
     if value <= 0:
@@ -10,7 +29,41 @@ def validate_lambda(value: float) -> float:
 @dataclass
 class Config:
     # --- Robot ---
-    robot_radius: float = 0.3    # robot radius
+    robot_radius: float = 0.2    # robot radius
+
+    # --- Robot kinematics ---
+    # What the robot can physically do, which is what turns a route into a
+    # duration. The model is turn-in-place-then-drive (see `kinematics`), so the
+    # angular limits are as load-bearing as the linear ones: a route made of many
+    # short segments at sharp angles can easily spend more time turning than
+    # driving, and that is the whole reason a time-aware search picks different
+    # routes from a distance-aware one.
+    robot_v_max: float = 0.6         # [m/s]
+    robot_a_max: float = 0.5         # [m/s^2]
+    robot_w_max: float = 1.5         # [rad/s]
+    robot_alpha_max: float = 2.0     # [rad/s^2]
+    # Holding an obstacle, the robot is slower on every axis: it is pushing a
+    # loaded mass through floor friction, and it has to keep its grip. These are
+    # the limits that apply from grip to release.
+    robot_v_max_loaded: float = 0.25
+    robot_a_max_loaded: float = 0.2
+    robot_w_max_loaded: float = 0.6
+    robot_alpha_max_loaded: float = 0.8
+
+    # --- Time vs. energy: C = (1 - w) * J + w * (time_value * T) ---
+    # w = 0 recovers the pure-energy objective exactly, and is the default: every
+    # result predating the time axis still reproduces.
+    #
+    # `time_value` is what converts seconds into the joules J is measured in.
+    # Adding a raw count of seconds to a five-figure joule total would leave w
+    # doing nothing until it was within a whisker of 1 — with these maps J is
+    # ~1e4 and T is ~1e2, so the honest exchange rate is ~1e2 J/s. Read it as the
+    # power the robot burns just by being switched on: idling for a second costs
+    # `time_value` joules, so time and work are traded at a rate with units,
+    # rather than by adding a length to a mass. Set it to 1.0 for the literal
+    # C = (1-w)J + wT.
+    time_importance: float = 0.0     # w in [0, 1]
+    time_value: float = 100.0        # [J/s], i.e. watts
 
     # --- Cost function J = lambda * D + W ---
     # Obstacle difficulty is a real friction force f = mu*rho*V*g [N], so W is in
@@ -61,10 +114,10 @@ class Config:
 
     # --- Roadmap ---
     grid_step: float = 0.3    # roadmap node grid spacing
-    conn_radius: float =0.6   # roadmap node connection radius
+    conn_radius: float = 0.6   # roadmap node connection radius
 
     # --- Search ---
-    strategy: str = "normal"    # "normal" | "shortest" | "easiest"
+    strategy: str = "normal"    # "normal" | "shortest"
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
@@ -73,17 +126,9 @@ class Config:
     max_replans: int = 10000
 
     # --- LLM ---
-    # Reasoning is on, and the completion length is uncapped, because the prompt
-    # asks for a multi-step derivation (category -> mass -> bulk density -> mu ->
-    # product). Denied the room to run it, the model degenerates into copying a
-    # row out of the anchor table in the prompt: measured 6.1x typical error with
-    # 46% of answers collapsing onto a single value, and the collapse target
-    # moves when the table is reordered — i.e. the answer tracked the prompt
-    # layout, not the object. With reasoning enabled the same model on the same
-    # prompt reaches 1.33x typical error (Spearman 0.95). See bench/llm_test_out/.
-    deepseek_api_key: str = ""
+    deepseek_api_key: str = "sk-c1ea9b080fc444ceb1f5fa7901e3b92f"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
-    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_thinking: bool = True    # False reproduces the old copy-a-row behaviour
     llm_max_tokens: int | None = None  # None -> omit the cap; reasoning needs ~3-4k
     # Reasoning takes seconds, not milliseconds: a single call was measured up to
@@ -99,12 +144,35 @@ class Config:
     gif_fps: float = 5.0       # animation speed, frames per second
     gif_end_hold_s: float = 2  # hold the last frame this long before looping
     gif_dpi: int = 300         # per-frame render resolution inside the GIF
+    # The animation runs on the simulated clock, not on the event list: one frame
+    # per `gif_time_step` seconds, so a slow loaded drag takes visibly longer on
+    # screen than the same distance driven free. `gif_max_frames` stretches the
+    # step when a run is long enough that honouring it would produce a GIF nobody
+    # can open.
+    gif_time_step: float = 1.0   # simulated seconds per animation frame
+    gif_max_frames: int = 400
     verbose: bool = True
 
     def __post_init__(self):
         self.lambda_distance = validate_lambda(self.lambda_distance)
+        self.time_importance = validate_time_importance(self.time_importance)
+        # a stale "easiest" would otherwise be silently treated as "normal"
+        self.strategy = validate_strategy(self.strategy)
+
+    # --- kinematics ---
+    def free_profile(self) -> kinematics.MotionProfile:
+        """What the robot can do driving on its own."""
+        return kinematics.MotionProfile(
+            self.robot_v_max, self.robot_a_max,
+            self.robot_w_max, self.robot_alpha_max)
+
+    def loaded_profile(self) -> kinematics.MotionProfile:
+        """What it can do from the moment it grips an obstacle until it lets go."""
+        return kinematics.MotionProfile(
+            self.robot_v_max_loaded, self.robot_a_max_loaded,
+            self.robot_w_max_loaded, self.robot_alpha_max_loaded)
 
     def log(self, *args):
         if self.verbose:
-            print(*args)
+            log.emit(" ".join(str(a) for a in args))
 

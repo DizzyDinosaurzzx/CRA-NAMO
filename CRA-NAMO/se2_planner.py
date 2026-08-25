@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
+import log
 from geometry import (
     c_obstacle,
     convex_hull,
@@ -104,9 +105,9 @@ class SE2Planner:
         self._cache: Optional[Tuple[np.ndarray, np.ndarray, int]] = None
 
         if verbose:
-            print(f"[se2] oid={self.oid} | "
-                  f"free {self.free.mean() * 100:.0f}% "
-                  f"-> reachable {self.allowed.mean() * 100:.0f}%")
+            log.emit(f"[se2] oid={self.oid} | "
+                     f"free {self.free.mean() * 100:.0f}% "
+                     f"-> reachable {self.allowed.mean() * 100:.0f}%")
 
     # --- move definitions ---
     def _build_moves(self) -> None:
@@ -250,8 +251,8 @@ class SE2Planner:
             self._unstuck_for = start_idx
             if self.verbose:
                 x, y, _ = self._pose(*start_idx)
-                print(f"[se2] oid={self.oid} unstuck {freed} states at ({x:.1f}, {y:.1f}) "
-                      f"clearance={clearance:.3f}")
+                log.emit(f"[se2] oid={self.oid} unstuck {freed:,} states at "
+                         f"({x:.1f}, {y:.1f}) clearance={clearance:.3f}")
         return freed
 
     # --- index helpers ---

@@ -179,6 +179,6 @@ class Roadmap:
         return nid
 
     def __repr__(self):
-        return (f"Roadmap(nodes={len(self.nodes)}, edges={len(self.edge_len)}, "
+        return (f"Roadmap(nodes={len(self.nodes):,}, edges={len(self.edge_len):,}, "
                 f"step={self.cfg.grid_step:g}m)")
 

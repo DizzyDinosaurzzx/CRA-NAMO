@@ -19,16 +19,21 @@ from llm_difficulty import DifficultyEstimator
 from search import Planner, move_signature
 import cost
 import geometry
+import kinematics
+import log
 import manipulation
 
 # Simulation result summary
 @dataclass
 class RunResult:
     success: bool                           # whether goal was reached
-    J: float = 0.0                          # total cost = walk_cost + work_cost
+    C: float = 0.0                          # objective actually minimised: (1-w)J + w*time_value*T
+    J: float = 0.0                          # energy cost = walk_cost + work_cost
     walk_cost: float = 0.0                  # motion cost = λ × total travel distance
     manip_walk_cost: float = 0.0            # part of walk_cost spent escorting obstacles
     work_cost: float = 0.0                  # manipulation cost = Σ(true difficulty × distance moved)
+    T: float = 0.0                          # simulated time elapsed = move_time + plan_time [s]
+    move_time: float = 0.0                  # of which spent driving and turning [s]
     cycles: int = 0                         # number of replan cycles
     plan_time: float = 0.0                  # total planning time (seconds)
     first_plan_time: float = 0.0            # first plan time (seconds) — cold-start cost measure
@@ -75,6 +80,18 @@ class OnlineNAMO:
         # true robot position. It equals the current roadmap node between actions,
         # but during a manipulation the robot leaves the node to hold the obstacle.
         self.robot_xy: Tuple[float, float] = self.roadmap.nodes[self.start_node]
+        # The simulated clock, shared by everything that takes time: driving,
+        # turning, and standing still while the planner thinks. Frames are
+        # stamped with it, which is what lets the animation play on the clock
+        # instead of on the list of events.
+        self.clock: float = 0.0
+        # Which way the robot points. Its disc footprint has no orientation to
+        # collide with, but a differential drive still has to face where it is
+        # going, and that turn is charged for. It starts facing +x, so the first
+        # move pays for whatever turn that costs.
+        self.robot_heading: float = 0.0
+        self._free_profile = cfg.free_profile()
+        self._loaded_profile = cfg.loaded_profile()
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
         # insert start/goal into roadmap; snap to nearest valid node when the robot disc does not fit
@@ -86,6 +103,18 @@ class OnlineNAMO:
 
     # Main perception–action loop
     def run(self) -> RunResult:
+        """Drive the online loop to completion.
+
+        Wraps `_run` for one reason: to close the folded console log however the
+        loop exits. Whatever a caller prints next — the summary in `main`, a
+        line of its own — must not land inside a run of repeats still counting.
+        """
+        try:
+            return self._run()
+        finally:
+            log.flush()
+
+    def _run(self) -> RunResult:
         cfg = self.cfg
         res = RunResult(success=False, llm_mode=self.estimator.mode)
         node = self.start_node                           # robot current roadmap node
@@ -103,13 +132,15 @@ class OnlineNAMO:
             plan = planner.plan(node, self.goal_node)
             dt = time.time() - t0
             res.plan_time += dt
+            # the robot is standing still while this runs, and that is time too
+            self._advance_clock(res, dt, moving=False)
             if cycle == 0:
                 res.first_plan_time = dt
             self._plan_paths = self._plan_to_paths(plan)
             if plan is None:
                 res.message = "No feasible plan under current belief."
                 res.cycles = cycle + 1
-                return res
+                return self._finalize(res, node)
             res.total_expansions += plan.expansions
 
             if node == self.goal_node:
@@ -166,18 +197,20 @@ class OnlineNAMO:
                         contact_pos = (
                             from_pos[0] + (to_pos[0] - from_pos[0]) * t_contact,
                             from_pos[1] + (to_pos[1] - from_pos[1]) * t_contact)
-                        # advance to contact point then retreat to previous node; charge both legs
-                        blocked_dist = 2.0 * t_contact * act["dist"]
-                        self._charge_walk(res, blocked_dist)
+                        # advance to the contact point, then retreat to the
+                        # node it set out from; both legs are real travel, real
+                        # time, and leave it facing back the way it came
+                        leg = t_contact * act["dist"]
+                        self._drive(res, from_pos, contact_pos, dist=leg)
+                        self._drive(res, contact_pos, from_pos, dist=leg)
                         # collision is physical contact; the true difficulty of the hit object is revealed
                         self.belief.touch_check(contact_pos, self.world, cfg)
                         self.belief.perceive(self.world, from_pos)
                         self._capture_frame(
                             res, node, f"collision revealed {hit_oids} -> replan")
                         break
-                    self._charge_walk(res, act["dist"])
+                    self._drive(res, from_pos, to_pos, dist=act["dist"])
                     node = act["v"]
-                    self._set_robot(res, self.roadmap.nodes[node])
                     moves_done += 1
                     # touch sensing: learn true difficulty of touched obstacles
                     touched = self.belief.touch_check(
@@ -198,11 +231,19 @@ class OnlineNAMO:
             if reached_goal or node == self.goal_node:
                 break
 
+        return self._finalize(res, node)
+
+    def _finalize(self, res: RunResult, node: int) -> RunResult:
+        """Close the books. Both ways out of the loop come through here, so a run
+        that gave up reports the same fields as one that reached the goal."""
         res.success = (node == self.goal_node)
+        res.C = round(cost.combine(self.cfg, res.J, self.clock), 4)
         res.J = round(res.J, 4)
         res.walk_cost = round(res.walk_cost, 4)
         res.manip_walk_cost = round(res.manip_walk_cost, 4)
         res.work_cost = round(res.work_cost, 4)
+        res.T = round(self.clock, 4)
+        res.move_time = round(res.move_time, 4)
         res.plan_time = round(res.plan_time, 4)
         res.llm_calls = self.estimator.calls
         if res.success and not res.message:
@@ -290,11 +331,42 @@ class OnlineNAMO:
         if in_contact:
             res.manip_walk_cost += charge
 
+    def _advance_clock(self, res: RunResult, seconds: float, moving: bool = True):
+        """Let `seconds` of simulated time pass. Motion and thinking share one clock."""
+        if seconds <= 0.0:
+            return
+        self.clock += seconds
+        if moving:
+            res.move_time += seconds
+
+    def _drive(self, res: RunResult, a, b, in_contact: bool = False,
+               loaded: bool = False, dist: Optional[float] = None):
+        """Take the robot from *a* to *b*: bill the joules, spend the time, face the way it went.
+
+        The single place the robot moves, so no journey can be charged in one
+        currency and not the other. `loaded` selects the slower profile, which
+        applies from the moment it grips an obstacle until it lets go.
+
+        `dist` overrides the billed length for callers holding the authoritative
+        figure. A roadmap edge is charged at the length the planner costed it
+        with — `edge_len`, which is rounded — rather than at one recomputed from
+        the endpoints, so what execution bills and what the plan predicted agree
+        to the last decimal instead of drifting apart by a rounding step an edge.
+        """
+        self._charge_walk(res, math.dist(a, b) if dist is None else dist,
+                          in_contact)
+        profile = self._loaded_profile if loaded else self._free_profile
+        seconds, self.robot_heading = kinematics.segment_time(
+            profile, a, b, self.robot_heading)
+        self._advance_clock(res, seconds)
+        self._set_robot(res, b)
+
     def _set_robot(self, res: RunResult, p: Tuple[float, float]):
         self.robot_xy = (float(p[0]), float(p[1]))
         res.robot_track.append(self.robot_xy)
 
-    def _walk_robot(self, pts, res: RunResult, cfg: Config):
+    def _walk_robot(self, pts, res: RunResult, cfg: Config,
+                    loaded: bool = False):
         """Drive the robot through *pts* (pts[0] is where it already stands).
 
         Stops at the first obstacle it did not know about. Returns
@@ -305,20 +377,17 @@ class OnlineNAMO:
             hits, t = self.belief.check_robot_collision(a, b, self.world, cfg)
             if hits:
                 stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-                self._charge_walk(res, math.dist(a, stop), in_contact=True)
-                self._set_robot(res, stop)
+                self._drive(res, a, stop, in_contact=True, loaded=loaded)
                 self.belief.touch_check(stop, self.world, cfg)
                 return i - 1, hits, stop
-            self._charge_walk(res, math.dist(a, b), in_contact=True)
-            self._set_robot(res, b)
+            self._drive(res, a, b, in_contact=True, loaded=loaded)
         return len(pts) - 1, [], (pts[-1] if pts else self.robot_xy)
 
     def _retrace(self, res: RunResult, pts):
         """Back out along ground the robot has just covered — no collision check
         needed, it was clear a moment ago and nothing has moved since."""
         for i in range(1, len(pts)):
-            self._charge_walk(res, math.dist(pts[i - 1], pts[i]), in_contact=True)
-            self._set_robot(res, pts[i])
+            self._drive(res, pts[i - 1], pts[i], in_contact=True)
 
     def _reanchor(self, res: RunResult, node: int) -> Optional[int]:
         """Put the robot back on the roadmap after a manipulation.
@@ -329,15 +398,12 @@ class OnlineNAMO:
         blocked = self._known_obstacles_inflated()
         home = self.roadmap.nodes[node]
         if self.roadmap.can_drive(self.robot_xy, home, blocked):
-            self._charge_walk(res, math.dist(self.robot_xy, home), in_contact=True)
-            self._set_robot(res, home)
+            self._drive(res, self.robot_xy, home, in_contact=True)
             return None
         target = self.roadmap.nearest_reachable_node(self.robot_xy, blocked)
         if target is None:
             target = self.roadmap.nearest_node(self.robot_xy)
-        self._charge_walk(res, math.dist(self.robot_xy, self.roadmap.nodes[target]),
-                          in_contact=True)
-        self._set_robot(res, self.roadmap.nodes[target])
+        self._drive(res, self.robot_xy, self.roadmap.nodes[target], in_contact=True)
         return target
 
     def _known_obstacles_inflated(self):
@@ -433,8 +499,7 @@ class OnlineNAMO:
                     self.belief.relocate(obs, *move_path[last_i])
                     self.belief.record_move_direction(oid, start_xy, move_path[last_i])
                 stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-                self._charge_walk(res, math.dist(a, stop), in_contact=True)
-                self._set_robot(res, stop)
+                self._drive(res, a, stop, in_contact=True, loaded=True)
                 self.belief.touch_check(stop, self.world, cfg)
                 self.belief.perceive(self.world, self.robot_xy)
                 new_node = self._reanchor(res, node)
@@ -445,8 +510,7 @@ class OnlineNAMO:
                         cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
                         new_node)
             self._relocate_world(oid, wx, wy, wth)
-            self._charge_walk(res, math.dist(a, b), in_contact=True)
-            self._set_robot(res, b)
+            self._drive(res, a, b, in_contact=True, loaded=True)
             last_i = i
             if i in frame_at:
                 self._capture_frame(res, node, f"move {oid} step {i}/{n - 1}",
@@ -526,6 +590,7 @@ class OnlineNAMO:
             },
             "touched_difficulty": dict(self.belief.touched_difficulty),
             "J": round(res.J, 4),
+            "t": round(self.clock, 3),      # simulated seconds; the animation runs on this
             "label": label,
         })
 

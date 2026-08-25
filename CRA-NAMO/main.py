@@ -17,16 +17,19 @@ def main():
     ap.add_argument("--lambda", "--lambda_distance", dest="lambda_distance",
                     type=float, default=None,
                     help="Motion cost λ weight (larger values favour moving obstacles rather than detouring)")
+    ap.add_argument("--time-importance", "-w", dest="time_importance",
+                    type=float, default=None,
+                    help="w in [0, 1] for C = (1-w)J + w*(time_value*T): 0 minimises "
+                         "energy alone (default), 1 minimises time alone")
     ap.add_argument("--no-llm-order", action="store_true",
                     help="Disable LLM-based intelligent ordering of obstacle processing")
     ap.add_argument("--frames", action="store_true",
                     help="Save the per-step robot motion as an animated GIF: "
                          "img/frames_<map_name>.gif")
     ap.add_argument("--strategy", default=None,
-                    choices=["normal", "shortest", "easiest"],
+                    choices=["normal", "shortest"],
                     help="Planning strategy: normal (optimal J=λD+W), "
-                         "shortest (minimise path, ignore W), "
-                         "easiest (detour around all obstacles)")
+                         "shortest (minimise path, ignore W)")
     ap.add_argument("--no-contact", action="store_true",
                     help="Drop the requirement that the robot stays in contact with "
                          "an obstacle while moving it (obstacles then move while the "
@@ -48,6 +51,13 @@ def main():
     if args.lambda_distance is not None:
         try:
             cfg.lambda_distance = config.validate_lambda(args.lambda_distance)
+        except ValueError as e:
+            ap.error(str(e))
+
+    # command-line override of the energy/time trade-off
+    if args.time_importance is not None:
+        try:
+            cfg.time_importance = config.validate_time_importance(args.time_importance)
         except ValueError as e:
             ap.error(str(e))
 
@@ -84,16 +94,20 @@ def main():
     # print simulation statistics
     W = 22  # label field width – everything left-aligned
     print(f"{'Success':<{W}} : {res.success}   ({res.message})")
-    print(f"{'Total cost J':<{W}} : {res.J}")
-    print(f"{'motion lambda*D':<{W}} : {res.walk_cost}")
-    print(f"{'  of which in contact':<{W}} : {res.manip_walk_cost}"
+    print(f"{'Objective C':<{W}} : {res.C:,}"
+          f"   (w={cfg.time_importance:g}: C = (1-w)J + w*{cfg.time_value:,g}*T)")
+    print(f"{'Total cost J':<{W}} : {res.J:,}")
+    print(f"{'motion lambda*D':<{W}} : {res.walk_cost:,}")
+    print(f"{'  of which in contact':<{W}} : {res.manip_walk_cost:,}"
           f"   (robot travel while holding an obstacle)")
-    print(f"{'obstacle work W':<{W}} : {res.work_cost}")
+    print(f"{'obstacle work W':<{W}} : {res.work_cost:,}")
     print(f"{'Obstacles moved':<{W}} : {res.removed}")
-    print(f"{'Replan cycles':<{W}} : {res.cycles}")
-    print(f"{'Total plan time (s)':<{W}} : {res.plan_time}")
-    print(f"{'A* expansions':<{W}} : {res.total_expansions}")
-    print(f"{'LLM calls':<{W}} : {res.llm_calls}  (mode={res.llm_mode})")
+    print(f"{'Replan cycles':<{W}} : {res.cycles:,}")
+    print(f"{'Total time T (s)':<{W}} : {res.T:,}   (simulated clock: moving + thinking)")
+    print(f"{'  of which moving':<{W}} : {res.move_time:,}   (driving and turning)")
+    print(f"{'Total plan time (s)':<{W}} : {res.plan_time:,}")
+    print(f"{'A* expansions':<{W}} : {res.total_expansions:,}")
+    print(f"{'LLM calls':<{W}} : {res.llm_calls:,}  (mode={res.llm_mode})")
 
     # render summary plot
     strategy_suffix = f"_{cfg.strategy}" if cfg.strategy != "normal" else ""
@@ -104,8 +118,9 @@ def main():
     # render every motion frame into one animation
     if cfg.save_frames:
         gif_path = os.path.join(cfg.out_dir, f"frames_{s['name']}{strategy_suffix}.gif")
-        n = viz.render_sequence(sim, res, original_poses, gif_path)
-        print(f"Saved {n}-frame animation ({cfg.gif_fps:g} fps) -> {gif_path}")
+        n, step = viz.render_sequence(sim, res, original_poses, gif_path)
+        print(f"Saved {n:,}-frame animation ({step:g}s of simulated time per frame, "
+              f"{cfg.gif_fps:g} fps) -> {gif_path}")
     return res
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ class Planner:
 
         def h(node):
             x, y = rm.nodes[node]
-            return cost.motion_cost(cfg, math.hypot(x - gx, y - gy))
+            return cost.heuristic(cfg, math.hypot(x - gx, y - gy))
 
         counter = itertools.count()
         open_heap = [(h(start_node), 0.0, next(counter), start_node)]
@@ -125,10 +125,12 @@ class Planner:
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
         """Cost of traversing one edge, including clearing whatever blocks it.
 
-        How the strategies weigh obstacle work lives in `cost.strategy_weights`;
-        this function only decides *what* has to be moved.
+        Returns C, not J: how energy and time are weighed against each other
+        lives in `cost.combine`, and how the strategies weigh obstacle work in
+        `cost.work_multiplier`. This function only decides *what* has to be
+        moved.
         """
-        base = cost.motion_cost(self.cfg, self.roadmap.edge_len[key])
+        base = cost.edge_cost(self.cfg, self.roadmap.edge_len[key])
         blockers = self.belief.blockers_of(key)
         if not blockers:
             return base, []
@@ -139,7 +141,9 @@ class Planner:
             feasible, work, drop, move_dist, move_path, cplan = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
-            extra += cost.removal_cost(self.cfg, work, cplan.travel)
+            seconds = cost.manipulation_time(self.cfg, cplan, len(move_path or []),
+                                             move_dist)
+            extra += cost.removal_cost(self.cfg, work, cplan.travel, seconds)
             removals.append((oid, drop, move_dist, work, move_path, cplan))
         return base + extra, removals
 
@@ -224,8 +228,8 @@ class Planner:
                 # the obstacle could go somewhere, the robot just could not
                 # escort it there — say which half of the constraint bit
                 counts = Counter(rejected).most_common(2)
-                self.cfg.log(f"[contact] oid={oid} rejected {len(rejected)} path(s): "
-                             + "; ".join(f"{why} x{n}" for why, n in counts))
+                self.cfg.log(f"[contact] oid={oid} rejected {len(rejected):,} path(s): "
+                             + "; ".join(f"{why} x{n:,}" for why, n in counts))
 
         if not feasible:
             work = math.inf

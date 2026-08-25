@@ -4,6 +4,10 @@ Split out of `main.py`, which is now just the command-line entry point. Nothing
 here is used by the simulation itself — it reads a finished `RunResult` and the
 frame snapshots the executor recorded along the way.
 
+The animation is keyed to the simulated clock rather than to the frame list, so
+a second of dragging an obstacle takes as much of the GIF as a second of driving
+free, and a replan is a visible pause. See `_time_sampled`.
+
 Colour vocabulary:
     robot           yellow disc, dark goldenrod centre
     planned route   blue solid (where the robot intends to drive)
@@ -41,11 +45,11 @@ def _obstacle_label(oid: int, estimates, touched=None) -> str:
     true = touched.get(oid) if touched else None
     parts = [str(oid)]
     if est is not None:
-        parts.append(f"est={est:g}")
+        parts.append(f"est={est:,g}")
     if true is not None:
-        parts.append(f"true={true:g}")
+        parts.append(f"true={true:,g}")
         if est is not None and abs(est - true) > 1e-6:
-            parts[-1] = f"T={true:g}"  # highlight mismatch with estimate
+            parts[-1] = f"T={true:,g}"  # highlight mismatch with estimate
     return "\n".join(parts)
 
 
@@ -121,7 +125,7 @@ _PLOT_BOX = (8.0, 7.0)     # max plot area (width, height), inches
 _MARGIN = 0.5              # left/right + bottom tick-label margin, inches
 _TOP_PAD = 0.12            # whitespace above title, inches
 _TITLE_LINE = 0.24         # height per title line, inches
-_TITLE_LINES = 2           # always reserve height for two title lines
+_TITLE_LINES = 3           # always reserve height for three title lines
 _LEGEND_H = 0.5            # bottom legend strip height, inches
 _TITLE_FS = 9              # title font size
 _LEGEND_NCOL = 5
@@ -192,8 +196,10 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     strategy = sim.cfg.strategy
     moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
              else (str(res.removed) if res.removed else "none"))
-    title = (f"[{strategy}] {res.message}  |  J={res.J} "
-             f"(lambda*D={res.walk_cost}, W={res.work_cost})  |  "
+    title = (f"[{strategy}] {res.message}  |  J={res.J:,} "
+             f"(lambda*D={res.walk_cost:,}, W={res.work_cost:,})  |  "
+             f"T={res.T:,g}s (moving {res.move_time:,g}s, planning {res.plan_time:,g}s)"
+             f"  |  C={res.C:,} (w={sim.cfg.time_importance:g})  |  "
              f"moved={moved}  |  manip={manip_mode}  |  LLM={res.llm_mode}")
     _finish_ax(ax, sim, title)
     fig.savefig(out_path, dpi=130)
@@ -241,7 +247,8 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     ax.plot(rx, ry, marker="o", color="darkgreen", ms=4, zorder=8, label="robot")
 
     # title: step N / total | action label | cumulative cost
-    title = f"[{sim.cfg.strategy}] step {idx}/{total - 1}  |  {frame['label']}  |  J={frame['J']}"
+    title = (f"[{sim.cfg.strategy}] step {idx}/{total - 1}  |  {frame['label']}"
+             f"  |  J={frame['J']:,}  |  T={frame.get('t', 0.0):,.1f}s")
     _finish_ax(ax, sim, title)
     return fig
 
@@ -262,23 +269,65 @@ def _shared_palette(buffers, colors: int = 255):
     return montage.quantize(colors=colors, method=Image.MEDIANCUT)
 
 
+def _time_sampled(frames, step: float, max_frames: int):
+    """Indices of the frames to show, one per `step` seconds of simulated time.
+
+    Frames are recorded at events — a node reached, a grip taken, a collision —
+    and events are not evenly spaced in time: dragging an obstacle one metre
+    takes several times longer than driving that metre free, and a replan takes
+    seconds during which nothing moves at all. Playing the event list back at a
+    fixed frame rate flattens all of that, which hides the very thing the time
+    axis is for. So the animation is resampled onto the clock: at each tick it
+    shows whichever frame was current then, repeating one that is still current
+    and skipping past any that came and went inside a single tick.
+
+    `step` is stretched if a run is long enough that honouring it would produce
+    more frames than `max_frames` — a GIF too big to open shows nothing at all.
+    Returns the indices and the step actually used, since a caller reporting the
+    configured one would be quoting a number the animation does not run at.
+    """
+    times = [float(f.get("t", i)) for i, f in enumerate(frames)]
+    span = times[-1] - times[0]
+    if span <= 0.0:                       # no clock to speak of, show it as recorded
+        return list(range(len(frames))), step
+    step = max(step, span / max(1, max_frames))
+    picks = []
+    j = 0
+    t = times[0]
+    while t <= times[-1] + 1e-9:
+        while j + 1 < len(frames) and times[j + 1] <= t + 1e-9:
+            j += 1
+        picks.append(j)
+        t += step
+    if picks[-1] != len(frames) - 1:      # always land on the finished world
+        picks.append(len(frames) - 1)
+    return picks, step
+
+
 def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
-    """Render every motion frame into one animated GIF"""
+    """Render the run into one animated GIF, played on the simulated clock.
+
+    Returns (frames written, simulated seconds each one stands for).
+    """
     cfg = sim.cfg
     total = len(res.frames)
     if total == 0:
-        return 0
+        return 0, cfg.gif_time_step
+    picks, step = _time_sampled(res.frames, cfg.gif_time_step, cfg.gif_max_frames)
     # keep the frames as encoded PNG bytes rather than decoded bitmaps: a long
-    # run on a large map would otherwise hold hundreds of MB of pixels at once
-    buffers = []
-    for i, frame in enumerate(res.frames):
+    # run on a large map would otherwise hold hundreds of MB of pixels at once.
+    # A frame still current across several ticks is drawn once and shown again.
+    rendered = {}
+    for i in sorted(set(picks)):
+        frame = res.frames[i]
         fig = render_frame(sim, frame, original_poses, i, total,
                            cur_node=frame.get("node"))
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=cfg.gif_dpi)
         plt.close(fig)
         buf.seek(0)
-        buffers.append(buf)
+        rendered[i] = buf
+    buffers = [rendered[i] for i in picks]
 
     palette = _shared_palette(buffers)
     images = [Image.open(b).convert("RGB").quantize(palette=palette,
@@ -289,6 +338,6 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
     durations[-1] = max(step_ms, int(cfg.gif_end_hold_s * 1000))  # pause on the result
     images[0].save(gif_path, save_all=True, append_images=images[1:],
                    duration=durations, loop=0, optimize=True)
-    return total
+    return len(images), step
 
 
