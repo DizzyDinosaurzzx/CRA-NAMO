@@ -1,22 +1,22 @@
-# CA-NAMO requirements
-# Python >= 3.9
+# CRA-NAMO runtime dependencies
+# Python >= 3.10
+# Versions below are pinned to the environment used for the current smoke test.
 
 # Geometry engine: free-space computation, collision detection,
 # swept-volume construction, STRtree spatial indexing
-shapely>=2.0
+shapely==2.1.2
 
-# Numerical arrays: configuration-space grids, vectorised Dijkstra,
-# Minkowski sums (push_planner.py)
-numpy>=1.22
+# Numerical arrays: configuration-space grids and vectorised search operations
+numpy==2.5.1
 
 # Spatial indexing: KDTree for roadmap nearest-neighbour queries (roadmap.py)
-scipy>=1.9
+scipy==1.18.0
 
 # Visualisation: summary plots + per-step frame rendering (main.py)
-matplotlib>=3.5
+matplotlib==3.11.1
 
 # GIF assembly: per-step frames -> img/frames_<map>.gif (main.py)
-pillow>=9.0
+Pillow==12.3.0
 
 # HTTP client: LLM difficulty estimation via DeepSeek API (llm_difficulty.py)
-requests>=2.28
+requests==2.34.2

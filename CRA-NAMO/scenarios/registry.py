@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 # ---- Default map ---- #
-DEFAULT_SCENARIO = "two_doors"
+DEFAULT_SCENARIO = "corridor"
 REQUIRED_FIELDS = {
     "workspace",
     "static",
