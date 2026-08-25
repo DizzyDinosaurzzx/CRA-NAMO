@@ -1,21 +1,4 @@
-"""How long a motion takes.
-
-Dependency-free like `geometry`, and the same division of labour: this module
-holds the *physics* of moving — velocity limits, acceleration limits, the time a
-trapezoidal profile needs — and nothing about robots, roadmaps or costs.
-
-The robot is a disc, so its footprint has no heading, but a real differential
-drive still has to point itself before it can go anywhere. The model here is
-turn-in-place-then-drive: at every waypoint the robot stops, rotates to face the
-next one, and drives that segment from rest to rest. It matches how the
-simulation already executes a route — node by node, stopping at each to perceive
-and replan — and it is what makes an angular acceleration limit observable at
-all. A robot that never stopped would need a smoothed trajectory, which the
-roadmap does not produce.
-
-Everything is rest-to-rest, so times add: the time of a polyline is the sum of
-its turns and its segments, with no cross-terms to keep track of.
-"""
+"""Compute rest-to-rest translation and rotation times."""
 
 from __future__ import annotations
 

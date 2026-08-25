@@ -1,10 +1,4 @@
-"""Geometric primitives shared across the whole system.
-
-This module is deliberately dependency-free: it imports nothing from the rest of
-the project, so every other module can rely on it without creating a cycle. It
-holds the *maths* — rectangles, hulls, Minkowski sums, containment tests,
-separating-axis collision — and nothing about obstacles, planning, or costs.
-"""
+"""Provide shared geometric and collision primitives."""
 
 from __future__ import annotations
 
@@ -21,7 +15,6 @@ import numpy as np
 CONTACT_AREA_EPS = 1e-6
 
 
-# --- rectangles ---
 def rect_corners(cx: float, cy: float, w: float, h: float,
                  theta: float) -> np.ndarray:
     """Corners of a w x h rectangle centred at (cx, cy), rotated by theta.
@@ -68,7 +61,6 @@ def c_obstacle(shape_poly: np.ndarray, obs_corners_local: np.ndarray) -> np.ndar
     return minkowski_sum(shape_poly, -obs_corners_local)
 
 
-# --- containment ---
 def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
                   margin: float = 0.0) -> np.ndarray:
     poly = np.asarray(poly, dtype=float)
@@ -136,7 +128,6 @@ def offset_bbox(poly: np.ndarray, margin: float):
     return (min(xs), max(xs), min(ys), max(ys))
 
 
-# --- rotation ---
 def mean_rotation_radius(w: float, h: float) -> float:
     """Mean distance from the centroid to a point of a w x h rectangle.
 
@@ -163,7 +154,6 @@ def wrap_dtheta(a: float, b: float) -> float:
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
 
 
-# --- SAT collision test ---
 def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
     for poly in (A, B):
         n = len(poly)
@@ -180,7 +170,6 @@ def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
     return True
 
 
-# --- shapely I/O ---
 def polygon_exterior_coords(polygon) -> np.ndarray:
     """Vertices of a shapely Polygon as an (N, 2) array, without the repeated last point."""
     coords = list(polygon.exterior.coords)

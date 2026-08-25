@@ -31,7 +31,6 @@ import manipulation
 _REANCHOR_CANDIDATES = 64
 
 
-# Simulation result summary
 @dataclass
 class RunResult:
     success: bool                           # whether goal was reached
@@ -56,14 +55,8 @@ class RunResult:
     frames: List[dict] = field(default_factory=list)    # per-frame snapshots (for render_sequence)
     message: str = ""                       # result description
 
-# Online simulator
 class OnlineNAMO:
-    """
-    Maintains two world models:
-    - self.world (real world)
-    - self.belief (robot belief)
-    The planner searches against belief only and cannot access the real world
-    """
+    """Run online NAMO while keeping ground truth separate from robot belief."""
     def __init__(self, workspace: Polygon,
                  static_obstacles: List[StaticObstacle],
                  movable_obstacles: List[MovableObstacle],
@@ -85,45 +78,28 @@ class OnlineNAMO:
 
         self.estimator = DifficultyEstimator(cfg)
         self.risk = RiskEstimator(cfg)
-        # the belief owns the risk estimator: assessment is triggered by seeing
-        # and by touching, both of which happen in there
         self.belief = Belief(self.roadmap, cfg, self.risk)
         self._risk_charged: set = set()             # oids whose surcharge is already paid
         self.stranded = False       # robot ended a manipulation with no roadmap node in reach
         self._plan_paths: List[dict] = []           # all currently planned paths (for per-frame visualisation)
         self.failed_moves: set = set()
-        # true robot position. It equals the current roadmap node between actions,
-        # but during a manipulation the robot leaves the node to hold the obstacle.
+        # Manipulation may move the robot away from its current roadmap node.
         self.robot_xy: Tuple[float, float] = self.roadmap.nodes[self.start_node]
-        # The simulated clock, shared by everything that takes time: driving,
-        # turning, and standing still while the planner thinks. Frames are
-        # stamped with it, which is what lets the animation play on the clock
-        # instead of on the list of events.
+        # Driving, turning, and planning advance the same simulated clock.
         self.clock: float = 0.0
-        # Which way the robot points. Its disc footprint has no orientation to
-        # collide with, but a differential drive still has to face where it is
-        # going, and that turn is charged for. It starts facing +x, so the first
-        # move pays for whatever turn that costs.
+        # The disc footprint is symmetric, but turning still costs time.
         self.robot_heading: float = 0.0
         self._free_profile = cfg.free_profile()
         self._loaded_profile = cfg.loaded_profile()
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
-        # insert start/goal into roadmap; snap to nearest valid node when the robot disc does not fit
         cfg = self.cfg
         if not self.roadmap.free_eroded_prep.contains(Point(p)):
-            # point is inside a wall or too close -> degrade to nearest valid roadmap node
             p = self.roadmap.nodes[self.roadmap.nearest_node(p)]
         return self.roadmap.add_terminal(p)
 
-    # Main perception–action loop
     def run(self) -> RunResult:
-        """Drive the online loop to completion.
-
-        Wraps `_run` for one reason: to close the folded console log however the
-        loop exits. Whatever a caller prints next — the summary in `main`, a
-        line of its own — must not land inside a run of repeats still counting.
-        """
+        """Run to completion and flush folded console output."""
         try:
             return self._run()
         finally:
@@ -135,7 +111,6 @@ class OnlineNAMO:
         node = self.start_node                           # robot current roadmap node
         res.robot_track.append(self.roadmap.nodes[node])
         
-        # initial perception: scan visible obstacles around start
         self.belief.perceive(self.world, self.roadmap.nodes[node])
         self._capture_frame(res, node, "start")
 
@@ -147,7 +122,6 @@ class OnlineNAMO:
             plan = planner.plan(node, self.goal_node)
             dt = time.time() - t0
             res.plan_time += dt
-            # the robot is standing still while this runs, and that is time too
             self._advance_clock(res, dt, moving=False)
             if cycle == 0:
                 res.first_plan_time = dt
@@ -161,14 +135,12 @@ class OnlineNAMO:
             if node == self.goal_node:
                 break
 
-            # --- execute planned edges ---
             moves_done = 0
             reached_goal = False
             for act in plan.actions:
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
-                    # pre-move touch sensing: learn the true difficulty of this obstacle.
-                    # Moving is itself contact, so the moved obstacle is always revealed.
+                    # Moving requires contact, which reveals the true difficulty.
                     risk_before = self.risk.level_of(act["oid"])
                     touched = self.belief.touch_check(self.robot_xy, self.world, cfg)
                     if self.belief.reveal_by_interaction(act["oid"], self.world):
@@ -176,10 +148,7 @@ class OnlineNAMO:
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
-                    # Touching re-assesses the risk. If it came back worse than it
-                    # looked from a distance, this plan was chosen against a
-                    # belief that no longer holds — drop it and think again rather
-                    # than shove something the robot now knows it should not.
+                    # A higher contact risk invalidates the current plan.
                     risk_after = self.risk.level_of(act["oid"])
                     if (risk_before is not None
                             and risk.higher(risk_before, risk_after) != risk_before):
@@ -188,14 +157,10 @@ class OnlineNAMO:
                             f"contact re-rated {act['oid']} {risk_before} -> "
                             f"{risk_after} -> replan")
                         break
-                    # escort the obstacle along its SE2 path, staying in contact
                     move_success, hits, executed_dist, new_node = \
                         self._execute_move(act["oid"], obs, act, res, node, cfg)
-                    # a new node means the robot could not walk back to the one it
-                    # set out from, so the rest of this plan no longer applies
                     if new_node is not None:
                         node = new_node
-                    # charge only for the segment actually moved, using the true difficulty
                     if executed_dist > 0.0:
                         true_diff = self._world_obstacle(act["oid"]).difficulty
                         executed_work = cost.manipulation_work(true_diff, executed_dist)
@@ -207,10 +172,7 @@ class OnlineNAMO:
                     elif not move_success and hits is not None:
                         self.failed_moves.add((move_signature(obs), act["key"]))
                     if not move_success:
-                        # hits is None when the robot itself ran into something
-                        # unknown — that is already recorded and framed inside
                         if hits is not None:
-                            # collision — invalidate this placement and replan a new location
                             self._handle_move_collision(res, node, act["oid"], hits)
                         break
                     if new_node is not None or self.stranded:
@@ -219,7 +181,6 @@ class OnlineNAMO:
                     prev_node = node    # remember where the move started
                     from_pos = self.roadmap.nodes[prev_node]
                     to_pos = self.roadmap.nodes[act["v"]]
-                    # collision sensing
                     hit_oids, t_contact = self.belief.check_robot_collision(
                         from_pos, to_pos, self.world, cfg)
                     if hit_oids:
@@ -232,7 +193,6 @@ class OnlineNAMO:
                         leg = t_contact * act["dist"]
                         self._drive(res, from_pos, contact_pos, dist=leg)
                         self._drive(res, contact_pos, from_pos, dist=leg)
-                        # collision is physical contact; the true difficulty of the hit object is revealed
                         self.belief.touch_check(contact_pos, self.world, cfg)
                         self.belief.perceive(self.world, from_pos)
                         self._capture_frame(
@@ -241,13 +201,11 @@ class OnlineNAMO:
                     self._drive(res, from_pos, to_pos, dist=act["dist"])
                     node = act["v"]
                     moves_done += 1
-                    # touch sensing: learn true difficulty of touched obstacles
                     touched = self.belief.touch_check(
                         self.roadmap.nodes[node], self.world, cfg)
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
-                    # perceive after each actual move (reveals exposed obstacles)
                     self.belief.perceive(self.world, self.roadmap.nodes[node])
                     self._capture_frame(res, node, f"move to node {node}")
                     if node == self.goal_node:
@@ -258,9 +216,6 @@ class OnlineNAMO:
 
             res.cycles = cycle + 1
             if self.stranded:
-                # `node` no longer says where the robot is, so there is nothing
-                # left to plan from — better to stop than to drive from a
-                # position the robot is not at
                 res.message = "Robot ended a manipulation with no roadmap node in reach."
                 break
             if reached_goal or node == self.goal_node:
@@ -353,7 +308,6 @@ class OnlineNAMO:
             return list(range(len(move_path)))
         return [int(i) for i in np.linspace(0, len(move_path) - 1, max_frames)]
 
-    # --- robot bookkeeping ---
     def _charge_walk(self, res: RunResult, dist: float, in_contact: bool = False):
         """Bill λ × dist of robot travel. Manipulation travel is tracked separately
         for reporting but lands in the same λ·D term of J."""
@@ -497,7 +451,6 @@ class OnlineNAMO:
         shapely.prepare(geom)
         return geom
 
-    # --- manipulation ---
     def _contact_plan(self, oid: int, obs, move_path, node: int, key):
         """Plan the escort for one manipulation from where the robot is standing.
 
@@ -587,7 +540,6 @@ class OnlineNAMO:
             tree = STRtree(polys)
             tree_items = items
 
-        # --- approach ---
         reached, hits, stop = self._walk_robot(
             rp[:off + 1], res, cfg, node=node, label=f"walk round to grip {oid}")
         if hits:
@@ -599,7 +551,6 @@ class OnlineNAMO:
             return (False, None, 0.0, None)
         self._capture_frame(res, node, f"grip obstacle {oid}", move_oid=oid)
 
-        # --- move the obstacle ---
         last_i = 0
         for i in range(1, n):
             wx, wy, wth = move_path[i]
@@ -739,4 +690,3 @@ class OnlineNAMO:
             "plan_t": round(res.plan_time, 1),
             "label": label,
         })
-

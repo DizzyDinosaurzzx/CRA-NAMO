@@ -1,3 +1,5 @@
+"""Estimate obstacle motion difficulty from material and geometry."""
+
 from __future__ import annotations
 import os
 import re
@@ -45,13 +47,11 @@ MATERIAL_MU: Dict[str, float] = {
 }
 # Bulk density [kg/m^3] = total mass / bounding-box volume (l * d * h).
 MATERIAL_RHO: Dict[str, float] = {
-    # --- very light ---
     "styrofoam_box": 15.0,     # EPS foam
     "plastic_chair": 22.0,
     "wooden_table": 26.0,
     "foam_mat": 30.0,
     "chair": 31.0,
-    # --- light ---
     "empty_shelf": 35.0,
     "cardboard_box": 40.0,
     "trash_bin": 42.0,
@@ -59,20 +59,16 @@ MATERIAL_RHO: Dict[str, float] = {
     "stool": 50.0,
     "sofa": 52.0,
     "wooden_crate": 60.0,
-    # --- medium ---
     "cabinet": 100.0,
     "cart": 150.0,             # loaded
     "shelf": 167.0,            # loaded
     "pallet": 174.0,
-    # --- heavy ---
     "steel_shelf": 300.0,      # loaded
     "filing_cabinet": 308.0,
     "loaded_pallet": 434.0,
     "industrial_machine": 700.0,
     "steel_safe": 800.0,
-    # --- very heavy ---
     "concrete_block": 2400.0,  # solid concrete
-    # --- fallback ---
     "unknown": 100.0,
 }
 # mu * rho [kg/m^3] -- the per-material coefficient the estimator works with.
@@ -189,7 +185,6 @@ class DifficultyEstimator:
         self.calls = 0
         self.mode = "deepseek" if self.api_key else "heuristic"
 
-    # --- Public interface ---
     def estimate(self, obs_obs: dict) -> float:  # estimate difficulty from perceived material
         oid = obs_obs["oid"]
         if oid in self.cache:
@@ -227,12 +222,10 @@ class DifficultyEstimator:
         self.cache[oid] = difficulty
         return difficulty
 
-    # --- Heuristic method ---
     def _heuristic(self, o: dict) -> float:
         mu_rho = material_mu_rho(o.get("material", "unknown"))
         return friction_force(mu_rho, _volume(o))
 
-    # --- LLM mu*rho estimation ---
     def _build_prompt(self, o: dict) -> str:
         material = _normalise(o.get("material", "unknown"))
         canonical = _canonical_anchor(material)
@@ -365,4 +358,3 @@ class DifficultyEstimator:
                 if attempt < self.cfg.llm_max_retries:
                     time.sleep(2.0)
         return None
-

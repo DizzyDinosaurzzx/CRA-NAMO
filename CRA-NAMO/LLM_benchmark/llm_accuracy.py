@@ -126,9 +126,7 @@ def _load(name: str):
         return json.load(fh)
 
 
-# --------------------------------------------------------------------------- #
 # Stage 1 - estimator accuracy
-# --------------------------------------------------------------------------- #
 
 def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
     assert_all_off_anchor()
@@ -177,9 +175,7 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
     return payload
 
 
-# --------------------------------------------------------------------------- #
 # Stage 2 - size independence
-# --------------------------------------------------------------------------- #
 
 def stage_size(cfg: Config, workers: int) -> dict:
     """The prompt hands the model l x d x h and then forbids it from mattering.
@@ -222,9 +218,7 @@ def stage_size(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# --------------------------------------------------------------------------- #
 # Stage 2b - request-setting ablation
-# --------------------------------------------------------------------------- #
 
 # `_deepseek` hardcodes its request settings, so a bad number could be the
 # model's judgement or just the way it is being asked. These variants separate
@@ -308,9 +302,7 @@ def stage_ablate(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# --------------------------------------------------------------------------- #
 # Stage 2c - is the collapse target the table's last row, or its largest value?
-# --------------------------------------------------------------------------- #
 
 _ANCHOR_LINE = re.compile(r"^\s{2}(\S+)\s+mu=\S+\s+rho=\S+\s+mu\*rho=(\S+)\s*$")
 
@@ -402,9 +394,7 @@ def stage_order(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# --------------------------------------------------------------------------- #
 # Stage 3 - navigation impact
-# --------------------------------------------------------------------------- #
 
 def _resolve_anchor(material: str) -> str:
     """Map a scenario's material label onto a PROMPT_ANCHORS entry.
@@ -611,9 +601,7 @@ def stage_nav(maps: List[str], accuracy: Optional[dict]) -> dict:
     return payload
 
 
-# --------------------------------------------------------------------------- #
 # Metrics
-# --------------------------------------------------------------------------- #
 
 def _log_errors(rows, key="pred"):
     out = []
@@ -722,9 +710,7 @@ def _decision_flips(rows, cfg: Config, move_dist=2.0) -> List[dict]:
     return out
 
 
-# --------------------------------------------------------------------------- #
 # Charts
-# --------------------------------------------------------------------------- #
 
 def _chart_accuracy(rows, path: str):
     import matplotlib
@@ -834,9 +820,7 @@ def _chart_sensitivity(nav: dict, path: str):
     log(f"wrote {path}")
 
 
-# --------------------------------------------------------------------------- #
 # Report
-# --------------------------------------------------------------------------- #
 
 def _table(header: List[str], body: List[List[str]]) -> str:
     lines = ["| " + " | ".join(header) + " |",
@@ -1195,7 +1179,6 @@ def stage_report(cfg: Config) -> str:
     return path
 
 
-# --------------------------------------------------------------------------- #
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,

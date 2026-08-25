@@ -9,8 +9,8 @@ import scenarios
 import viz
 from executor import OnlineNAMO
 
-# --- main function ---
 def main():
+    """Parse command-line options and run one scenario."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default=scenarios.DEFAULT_SCENARIO,
                     choices=scenarios.names())
@@ -39,45 +39,37 @@ def main():
                          "rather than behind it; 0 removes the bias entirely")
     args = ap.parse_args()
 
-    # load scenario
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
 
-    # command-line override of strategy
     if args.strategy is not None:
         cfg.strategy = args.strategy
 
-    # command-line override of λ in config
     if args.lambda_distance is not None:
         try:
             cfg.lambda_distance = config.validate_lambda(args.lambda_distance)
         except ValueError as e:
             ap.error(str(e))
 
-    # command-line override of the energy/time trade-off
     if args.time_importance is not None:
         try:
             cfg.time_importance = config.validate_time_importance(args.time_importance)
         except ValueError as e:
             ap.error(str(e))
 
-    # command-line override of LLM ordering switch
     if args.no_llm_order:
         cfg.use_llm_ordering = False
 
-    # command-line override of the contact model
     if args.no_contact:
         cfg.contact_required = False
     if args.forward_penalty is not None:
         cfg.manip_forward_penalty = max(0.0, args.forward_penalty)
 
-    # command-line enable per-frame saving
     if args.frames:
         cfg.save_frames = True
 
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    # initialise CA-NAMO simulator
     sim = OnlineNAMO(s["workspace"], s["static"], s["movable"],
                      s["start"], s["goal"], cfg)
     
@@ -89,10 +81,9 @@ def main():
     print("-" * 60)
 
     res = sim.run()
-    print("=" * 60)  # separate runtime [se2] logs from the stats below
+    print("=" * 60)
 
-    # print simulation statistics
-    W = 22  # label field width – everything left-aligned
+    W = 22
     print(f"{'Success':<{W}} : {res.success}   ({res.message})")
     print(f"{'Objective C':<{W}} : {res.C:,}"
           f"   (w={cfg.time_importance:g}: C = (1-w)J + w*{cfg.time_value:,g}*T)")
@@ -115,13 +106,11 @@ def main():
           f"{len(sim.risk.on_contact):,} revised on contact"
           f"  ({sim.risk.calls:,} calls, mode={sim.risk.mode})")
 
-    # render summary plot
     strategy_suffix = f"_{cfg.strategy}" if cfg.strategy != "normal" else ""
     out = os.path.join(cfg.out_dir, f"summary_{s['name']}{strategy_suffix}.png")
     viz.visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
 
-    # render every motion frame into one animation
     if cfg.save_frames:
         gif_path = os.path.join(cfg.out_dir, f"frames_{s['name']}{strategy_suffix}.gif")
         n, step = viz.render_sequence(sim, res, original_poses, gif_path)
@@ -131,5 +120,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

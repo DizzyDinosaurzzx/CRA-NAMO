@@ -110,10 +110,8 @@ def _derived(label: str, group: str, mass_kg: float, mu: float,
     )
 
 
-# --------------------------------------------------------------------------- #
 # Group 1 - paraphrases of the project's own anchors.
 # Ground truth = the anchor's calibrated mu*rho. Spans 1.0 -> 1440 kg/m^3.
-# --------------------------------------------------------------------------- #
 PARAPHRASE: List[Item] = [
     _anchor_item("unloaded push trolley",            "empty_cart",         1.0, 0.7, 1.0),
     _anchor_item("loaded utility trolley",           "cart",               1.0, 0.7, 1.1),
@@ -139,9 +137,7 @@ PARAPHRASE: List[Item] = [
     _anchor_item("solid concrete cube",              "concrete_block",     1.0, 1.0, 1.0),
 ]
 
-# --------------------------------------------------------------------------- #
 # Group 2 - objects outside the anchor table entirely.
-# --------------------------------------------------------------------------- #
 NOVEL: List[Item] = [
     _derived("office water cooler with full 19 litre bottle", "novel",
              34, 0.40, 0.35, 0.35, 1.10, "cooler 15 kg + 19 kg water; plastic feet on hard floor"),
@@ -195,9 +191,7 @@ NOVEL: List[Item] = [
              65, 0.45, 0.60, 0.60, 0.85, "stainless cabinet on adjustable feet"),
 ]
 
-# --------------------------------------------------------------------------- #
 # Group 3 - filled vs empty. Same object, an order of magnitude apart in rho.
-# --------------------------------------------------------------------------- #
 STATE: List[Item] = [
     _derived("cardboard box packed with hardcover books", "state",
              35, 0.35, 0.50, 0.40, 0.40, "books ~440 kg/m^3 packed solid"),
@@ -217,10 +211,8 @@ STATE: List[Item] = [
              90, 0.05, 0.68, 0.46, 0.90, "steel roller cabinet packed with steel tools"),
 ]
 
-# --------------------------------------------------------------------------- #
 # Group 4 - brand and product names. The prompt tells the model to resolve these
 # to the real object; this group checks whether it does.
-# --------------------------------------------------------------------------- #
 BRAND: List[Item] = [
     _derived("IKEA BILLY bookcase, empty", "brand",
              41, 0.45, 0.80, 0.28, 2.02, "particleboard carcass, listed shipping weight"),

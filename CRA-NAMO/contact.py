@@ -1,60 +1,4 @@
-"""Robot–obstacle contact trajectory planning.
-
-The manipulation model is: the robot is a disc that must stay *physically in
-contact* with the obstacle for the whole time the obstacle is moving.  It may
-grip anywhere on the perimeter, so it can push (robot behind the motion) or
-pull (robot ahead of it) with no restriction on direction, and it may slide its
-grip point along the surface while the obstacle moves.
-
-Given the obstacle's SE(2) path, this module picks where the robot holds it at
-every sub-step so that
-
-  * the robot disc never overlaps a wall or another obstacle,
-  * the grip point moves continuously along the surface (no teleporting from
-    one side to the other),
-  * a grip that has to *turn* the body has the leverage to do it (see below),
-  * the total robot travel distance is minimal.
-
-Travel is charged at the same rate as ordinary driving (lambda [N] per metre),
-so the joules the robot spends carting itself around the obstacle land in the
-same cost function as the joules it spends overcoming the obstacle's friction.
-
-Leverage
---------
-A grip transmits a force, and a force turns a body only through its lever arm.
-The friction moment resisting rotation is ``f * rho`` — the obstacle's friction
-force times its mean rotation radius, the same ``rho`` that turns an angle into
-a distance everywhere else in the project — so a grip ``a`` metres from the
-centre has to push with ``f * rho / a`` to keep the body turning. Halfway along
-a long crate that is an unbounded force, which is exactly where a planner that
-counts nothing but its own footsteps parks itself: the middle of the long face
-is the point that moves least when the body pivots. Capping the ratio to the
-friction force the robot is overcoming anyway (``cfg.contact_max_force_ratio``)
-turns that into ``a >= rho / ratio`` and puts the grip back out towards an end,
-where a person would take hold of it. It costs no new units and it binds only on
-elongated bodies: ``rho`` is a *mean* radius, so it is always shorter than the
-half-diagonal, and a corner grip always qualifies.
-
-One way out
------------
-A manipulation is not a round trip. The robot is given a list of places it may
-let go — the endpoints of the edge it is clearing, wherever it is standing now —
-each with what it would still cost to be there rather than on its route, and it
-releases at whichever comes out cheapest. Forcing it back to the exact spot it
-gripped from is what used to make it walk its grip back along the surface it had
-just come down, and what made a manipulation that was perfectly possible get
-rejected as "cannot leave the obstacle" whenever the way back was through the
-obstacle it had just moved.
-
-Discretisation
---------------
-Candidate grip points ("stations") are sampled uniformly by arc length along
-the *offset curve* of the rectangle at distance ``robot_radius`` — four straight
-runs joined by four quarter arcs.  A station is a fixed point in the obstacle's
-local frame, so it rides along with both translation and rotation.  Choosing one
-station per manipulation sub-step is then a shortest-path problem over a
-(sub-step x station) lattice, solved exactly by dynamic programming.
-"""
+"""Plan robot contact trajectories during obstacle manipulation."""
 
 from __future__ import annotations
 
@@ -141,7 +85,6 @@ def idle_plan(robot_pos: XY, n_poses: int) -> ContactPlan:
     return ContactPlan(True, "", [tuple(robot_pos)] * (max(1, n_poses) + 2), 1, 0.0)
 
 
-# --- grip stations ---
 def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
     """Robot centre positions in contact with an ``l`` x ``d`` rectangle.
 
@@ -241,7 +184,6 @@ def _world_positions(stations: np.ndarray, poses: Sequence[Pose]) -> np.ndarray:
     return np.stack([x, y], axis=2)
 
 
-# --- line-of-travel test ---
 def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
     """Can the robot drive straight from *a* to *b*?
 
@@ -289,7 +231,6 @@ def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
     return (q.x, q.y)
 
 
-# --- planner ---
 def plan_contact(obs,
                  poses: Sequence[Pose],
                  robot_start: XY,
@@ -342,7 +283,6 @@ def plan_contact(obs,
     turns = [abs(geometry.wrap_dtheta(a[2], b[2])) > 1e-9
              for a, b in zip(ext, ext[1:])]
 
-    # --- grip feasibility (vectorised) ---
     flat_x = world[:, :, 0].ravel()
     flat_y = world[:, :, 1].ravel()
     ok = shapely.contains_xy(free_geom, flat_x, flat_y)
@@ -373,7 +313,6 @@ def plan_contact(obs,
     exit_refs = [_standable((float(p[0]), float(p[1])), exit_blockers, free_geom)
                  for p in exit_pts]
 
-    # --- entry costs ---
     cost = np.full(k, _INF)
     for s in np.flatnonzero(feas[0]):
         p = (float(world[0, s, 0]), float(world[0, s, 1]))
@@ -383,7 +322,6 @@ def plan_contact(obs,
     if not np.isfinite(cost).any():
         return ContactPlan(False, "cannot reach any grip point on this obstacle")
 
-    # --- dynamic programming ---
     parent = np.full((t_total, k), -1, dtype=np.int64)
     idx = np.arange(k)
     shifts = range(-max_shift, max_shift + 1)
@@ -416,7 +354,6 @@ def plan_contact(obs,
             return ContactPlan(
                 False, "robot cannot stay in contact for the whole manipulation")
 
-    # --- exit costs ---
     # every (grip, release point) pair in ascending total cost, `detour` included
     # so that letting go on the far side of a cleared edge beats letting go on the
     # near side by exactly the length of the edge it saves. The first pair with a
@@ -436,7 +373,6 @@ def plan_contact(obs,
     if chosen < 0:
         return ContactPlan(False, "robot cannot leave the obstacle after moving it")
 
-    # --- backtrack ---
     seq = [chosen]
     for t in range(t_total - 1, 0, -1):
         seq.append(int(parent[t, seq[-1]]))

@@ -1,3 +1,5 @@
+"""Large maze scenario with movable doorway blockers."""
+
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
@@ -12,6 +14,7 @@ DOOR_CLEARANCE = 0.2
 def _door_blocker(label: str, x: float, y: float, l: float, d: float,
                   material: str = DEFAULT_DOOR_MATERIAL,
                   difficulty: float | None = None) -> MovableObstacle:
+    """Create a movable obstacle that fits within a doorway."""
     if l > d:
         l -= DOOR_CLEARANCE
     else:
@@ -32,6 +35,7 @@ def _door_blocker(label: str, x: float, y: float, l: float, d: float,
     )
 
 def create():
+    """Create the complex maze scenario."""
     workspace = box(0, 0, 30, 30)
     t = 0.45
 

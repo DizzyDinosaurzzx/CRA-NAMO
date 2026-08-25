@@ -1,4 +1,4 @@
-"""Branch-and-bound best-first search on the augmented roadmap"""
+"""Run branch-and-bound best-first search on the augmented roadmap."""
 
 from __future__ import annotations
 import heapq
@@ -31,6 +31,8 @@ def move_signature(obs) -> tuple:
 
 
 class Planner:
+    """Plan robot motion and obstacle-removal actions against current belief."""
+
     def __init__(self, roadmap: Roadmap, belief: Belief,
                  estimator: DifficultyEstimator, cfg: Config,
                  failed_moves: Optional[set] = None,
@@ -44,7 +46,6 @@ class Planner:
         self._robot_pos: Tuple[float, float] = (0.0, 0.0)
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
 
-    # --- planning ---
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
         rm = self.roadmap
         cfg = self.cfg
@@ -119,7 +120,6 @@ class Planner:
         return Plan(cost=round(incumbent, 4), node_path=node_path,
                     actions=actions, expansions=expansions)
 
-    # --- edge cost ---
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
         """Cost of traversing one edge, including clearing whatever blocks it.
 
@@ -275,4 +275,3 @@ class Planner:
         for (oid, _drop, _dist, _work, _move_path, _cplan) in removals:
             s += self.est.estimate(self.belief.obstacle(oid).observation())
         return s
-

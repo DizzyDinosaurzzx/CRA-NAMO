@@ -1,4 +1,4 @@
-"""Perception and belief state maintenance and update"""
+"""Maintain the robot's partially observed world model."""
 
 from __future__ import annotations
 import math
@@ -11,36 +11,27 @@ from config import Config
 
 
 class Belief:
-    """What the robot knows, and nothing else.
-
-    Risk assessment lives here rather than in the executor because this is where
-    the information arrives: an obstacle is assessed the moment it first enters
-    `perceived`, and re-assessed the moment the robot touches it and learns what
-    it actually weighs. Hooking those two events anywhere else would mean
-    re-deriving "is this the first time?" at every call site.
-    """
+    """Store only information the robot has perceived or discovered by contact."""
 
     def __init__(self, roadmap: Roadmap, cfg: Config, risk_estimator=None):
         self.roadmap = roadmap
         self.cfg = cfg
         self.risk = risk_estimator
-        self.perceived: Dict[int, MovableObstacle] = {}     # copies of perceived obstacles
-        self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # obstacles blocking edges
-        self.newly_revealed: List[int] = []  # newly perceived obstacles
-        self.contacts: List[Polygon] = []  # obstacles known only through manipulation collision
+        self.perceived: Dict[int, MovableObstacle] = {}
+        self.edge_blockers: Dict[EdgeKey, Set[int]] = {}
+        self.newly_revealed: List[int] = []
+        self.contacts: List[Polygon] = []
         self.touched: Set[int] = set()
-        self.touched_difficulty: Dict[int, float] = {}  # obstacle true difficulties obtained via touch
-        self.move_dir: Dict[int, Tuple[float, float]] = {}  # last direction moved per obstacle
+        self.touched_difficulty: Dict[int, float] = {}
+        self.move_dir: Dict[int, Tuple[float, float]] = {}
 
-    # --- Perception ---
     def perceive(self, world_obstacles: List[MovableObstacle],
                  robot_pos: Tuple[float, float]) -> List[int]:
-        """Reveal all visible obstacles around the robot; sync state for known ones"""
+        """Reveal visible obstacles and synchronize known poses."""
         self.newly_revealed = []
         rp = Point(robot_pos)
         for w in world_obstacles:
             known = self.perceived.get(w.oid)
-            # known and pose matches — no info to sync, skip expensive visibility check entirely
             if known is not None and self._pose_matches(known, w):
                 continue
             if rp.distance(Point(w.center())) > self.cfg.R_perc:
@@ -55,24 +46,16 @@ class Belief:
             self.newly_revealed.append(w.oid)
             self._assess_risk(obs)
             self._update_edges_for(obs)
-            # obstacle is now fully perceived; any prior anonymous "contact" records for it can be cleared
             self._clear_contacts_overlapping(obs.polygon)
         return self.newly_revealed
 
-    # --- risk ---
     def _assess_risk(self, obs: MovableObstacle):
-        """First sight: judge the danger from the label, before going near it."""
+        """Assess risk from the visually observed label."""
         if self.risk is not None:
             self.risk.assess(obs.observation())
 
     def _reassess_risk(self, world_obs: MovableObstacle):
-        """Physical contact: judge again, now knowing what it really weighs.
-
-        Reads the *world* obstacle, because that is the only thing that has the
-        knowledge contact confers — the label it resolves into, and its true
-        difficulty. This is the one channel by which either crosses into belief,
-        and it opens only when the robot is actually touching the obstacle.
-        """
+        """Reassess risk using properties revealed by physical contact."""
         if self.risk is not None:
             self.risk.reassess(world_obs.contact_observation(),
                                world_obs.difficulty)
@@ -83,7 +66,7 @@ class Belief:
                 and abs(a.theta - b.theta) < 1e-9)
 
     def _sync_pose(self, known: MovableObstacle, world_obs: MovableObstacle):
-        """Align perceived copy pose to world ground-truth pose"""
+        """Synchronize a perceived pose after observing a world-state change."""
         old_footprint = known.polygon
         self._forget_edges(known.oid)
         known.x, known.y, known.theta = world_obs.x, world_obs.y, world_obs.theta
@@ -91,7 +74,6 @@ class Belief:
         self._update_edges_for(known)
         self._clear_contacts_overlapping(old_footprint)
 
-    # --- visibility ---
     def _half_edge_samples(self, obs: MovableObstacle):  # line-of-sight samples from 8 obstacle points
         coords = list(obs.polygon.exterior.coords)[:-1]
         n = len(coords)
@@ -133,7 +115,6 @@ class Belief:
                 return True
         return False
 
-    # --- Update ---
     def _update_edges_for(self, obs: MovableObstacle):
         poly = obs.polygon
         minx, miny, maxx, maxy = poly.bounds
@@ -150,7 +131,6 @@ class Belief:
             else:
                 blockers.discard(obs.oid)
 
-    # --- collision contact ---
     def register_contact(self, region: Polygon):
         if region is None or region.is_empty:
             return
@@ -200,7 +180,6 @@ class Belief:
         obs.removed = True
         self._update_edges_for(obs)
 
-    # --- robot self-collision ---
     @staticmethod
     def _first_contact_t(from_pos, to_pos, poly: Polygon, radius: float,
                          coarse: int = 64, refine: int = 20) -> float:
@@ -249,7 +228,6 @@ class Belief:
                 revealed.append(w.oid)
         return revealed, t_hit
 
-    # --- touch sensing ---
     def touch_check(
         self, robot_pos,
         world_obstacles: List[MovableObstacle],
@@ -292,7 +270,6 @@ class Belief:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
 
-    # --- Query ---
     def others_union(self, oid: int):
         """Everything known to be in the way apart from obstacle *oid*.
 
@@ -314,4 +291,3 @@ class Belief:
 
     def obstacle(self, oid: int) -> MovableObstacle:
         return self.perceived[oid]
-

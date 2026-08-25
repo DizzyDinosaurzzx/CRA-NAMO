@@ -1,27 +1,4 @@
-"""Rendering: the summary plot and the per-step animation.
-
-Split out of `main.py`, which is now just the command-line entry point. Nothing
-here is used by the simulation itself — it reads a finished `RunResult` and the
-frame snapshots the executor recorded along the way.
-
-The animation is keyed to the simulated clock rather than to the frame list, so
-a second of dragging an obstacle takes as much of the GIF as a second of driving
-free, and a replan is a visible pause. See `_time_sampled`.
-
-Colour vocabulary — three families that never borrow from each other, so no two
-unrelated things can be confused at a glance:
-
-    warm (obstacles)  fill shades an obstacle by how hard it is to move, light
-                      cream through dark brown on a log scale (`difficulty_palette`)
-    blue (intent)     everything the planner decided: route, obstacle route,
-                      trail already driven
-    green (the robot) the disc itself, the start flag, and the outline of any
-                      obstacle it has actually moved
-
-Grey is reserved for what the robot cannot act on — walls, the roadmap, and the
-dotted outline of an obstacle it has not yet perceived. Red appears once, on the
-goal flag.
-"""
+"""Render summary figures and time-sampled animations."""
 
 from __future__ import annotations
 import io
@@ -45,7 +22,6 @@ from shapely.geometry import LineString, Point
 
 from executor import OnlineNAMO
 
-# --- palette ---
 # Everything that has a colour has it named here, so a change is one edit and
 # two things can never drift into the same shade by accident.
 _BACKGROUND     = "#f6f6f3"      # workspace fill
@@ -276,7 +252,6 @@ def _draw_static(ax, sim: OnlineNAMO, original_poses):
         ax.plot(*poly.exterior.xy, color=_GHOST, lw=1, ls="--", alpha=0.8, zorder=2)
 
 
-# --- Canvas layout ---
 _PLOT_BOX = (8.0, 7.0)     # max plot area (width, height), inches
 _MARGIN = 0.5              # left/right + bottom tick-label margin, inches
 _TOP_PAD = 0.12            # whitespace above title, inches

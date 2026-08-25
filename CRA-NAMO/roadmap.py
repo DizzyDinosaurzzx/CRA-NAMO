@@ -1,4 +1,4 @@
-"""Augmented roadmap construction (uniform grid across the entire map)"""
+"""Construct and query a uniform augmented roadmap."""
 
 from __future__ import annotations
 import math
@@ -13,14 +13,14 @@ from config import Config
 EdgeKey = Tuple[int, int]
 
 class Roadmap:
+    """Uniform roadmap over free space defined by static obstacles."""
+
     def __init__(self, workspace: Polygon, static_obstacles, cfg: Config):
         self.cfg = cfg
         self.workspace = workspace
         polys = [so.polygon for so in static_obstacles]
         self.static_obstacles = static_obstacles  # for use by the SE(2) planner
-        # Three nested free-space sets, from largest to smallest. Keeping them
-        # named by what they are eroded by is the point: they differ only in that,
-        # and picking the wrong one is otherwise invisible.
+        # Nested free-space sets use progressively stricter robot clearance:
         #   static_free      — anywhere inside the workspace that is not a wall
         #   free_eroded      — where the robot's *centre* may sit (eroded by r)
         #   free_eroded_tol  — same, minus a contact_clearance hair of slack
@@ -56,14 +56,12 @@ class Roadmap:
             self._free_eroded_tol = geom
         return self._free_eroded_tol
 
-    # --- Construction ---
     def _build(self):
         """Uniform grid across the entire map"""
         cfg = self.cfg
         assert cfg.grid_step > 0 and cfg.conn_radius > 0
         minx, miny, maxx, maxy = self.workspace.bounds
         step = cfg.grid_step
-        # sample nodes on a grid, keeping only positions where the robot disc fits
         buckets: Dict[Tuple[int, int], List[int]] = {}
         for iy in range(int((maxy - miny) / step) + 1):
             y = miny + iy * step
@@ -76,8 +74,7 @@ class Roadmap:
                 self.adj[nid] = []
                 b = (int(x // cfg.conn_radius), int(y // cfg.conn_radius))
                 buckets.setdefault(b, []).append(nid)
-        # connect nearby nodes whose inflated segment does not intersect walls. bucket size = conn_radius
-        #    so a 3×3 neighbourhood still covers every connectable pair.
+        # A 3x3 bucket neighborhood covers every edge within conn_radius.
         for nid, (x, y) in enumerate(self.nodes):
             bx, by = int(x // cfg.conn_radius), int(y // cfg.conn_radius)
             for dbx in (-1, 0, 1):
@@ -101,7 +98,6 @@ class Roadmap:
         self.adj[u].append(v)
         self.adj[v].append(u)
 
-    # --- Query ---
     def neighbors(self, u: int):
         for v in self.adj[u]:
             key = (u, v) if u < v else (v, u)
@@ -181,4 +177,3 @@ class Roadmap:
     def __repr__(self):
         return (f"Roadmap(nodes={len(self.nodes):,}, edges={len(self.edge_len):,}, "
                 f"step={self.cfg.grid_step:g}m)")
-

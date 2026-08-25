@@ -1,10 +1,4 @@
-"""SE(2) manipulation path planner.
-
-Searches a discretised (x, y, theta) grid with a Dial-bucket Dijkstra for a
-continuous path that carries a rectangular body from its current pose to one
-that no longer blocks a corridor. Knows nothing about robots, costs, or
-contact - it answers only "can this body get there, and by what route".
-"""
+"""Plan obstacle motion on a discretized SE(2) grid."""
 
 from __future__ import annotations
 import math
@@ -25,7 +19,6 @@ from geometry import (
     wrap_dtheta,
 )
 
-# --- SE2 grid + Dial-bucket Dijkstra ---
 
 @dataclass
 class SE2PlanResult:
@@ -109,7 +102,6 @@ class SE2Planner:
                      f"free {self.free.mean() * 100:.0f}% "
                      f"-> reachable {self.allowed.mean() * 100:.0f}%")
 
-    # --- move definitions ---
     def _build_moves(self) -> None:
         """(di, dj, dk, integer weight). Translation and rotation are mutually exclusive."""
         mv: List[Tuple[int, int, int, int]] = []
@@ -134,7 +126,6 @@ class SE2Planner:
                 np.array([m[1] for m in g], dtype=np.int64)[:, None])
             for w, g in groups.items()]
 
-    # --- configuration space build ---
     def _build_cspace(self) -> None:
         rx, ry = self.robot_pos
         R = self.work_radius
@@ -184,7 +175,6 @@ class SE2Planner:
         self._route_window: Optional[Tuple[int, int, int, int]] = None
         self._route_mask: Optional[np.ndarray] = None
 
-    # --- start un-stuck ---
     def _true_collision(self, pose: Tuple[float, float, float],
                         clearance: float = 1e-9) -> bool:
         O = rect_corners(0.0, 0.0, self.obstacle_w, self.obstacle_h, pose[2])
@@ -255,7 +245,6 @@ class SE2Planner:
                          f"({x:.1f}, {y:.1f}) clearance={clearance:.3f}")
         return freed
 
-    # --- index helpers ---
     def _snap(self, x: float, y: float, theta: float) -> Tuple[int, int, int]:
         i = int(np.clip(round((x - self.xs[0]) / self.cell), 0, self.nx - 1))
         j = int(np.clip(round((y - self.ys[0]) / self.cell), 0, self.ny - 1))
@@ -276,7 +265,6 @@ class SE2Planner:
         j = rem // nT
         return i, j, rem - j * nT
 
-    # --- Dial-bucket Dijkstra ---
     def _search(self, start_idx: Tuple[int, int, int], max_bucket: int | None = None):
         """Dial-bucket Dijkstra. If *max_bucket* is given, stop expanding once the
         current bucket exceeds that value — states beyond that distance are unreachable
@@ -305,7 +293,6 @@ class SE2Planner:
                 if idx.size == 0:
                     continue
                 i, j, k = self._unflat(idx)
-                # --- translation ---
                 for w, DI, DJ in self._move_groups:
                     ni, nj = i + DI, j + DJ            # (num directions, frontier size)
                     ok = (ni >= 0) & (ni < nx) & (nj >= 0) & (nj < ny)
@@ -326,7 +313,6 @@ class SE2Planner:
                     if nd > max_b:
                         max_b = nd
 
-                # --- rotation ---
                 nd = b + self.W_rot
                 for dk in (1, -1):
                     kk = k if dk == 1 else (k - 1) % nT
@@ -367,7 +353,6 @@ class SE2Planner:
     def _pose_gap(a, b) -> float:
         return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(wrap_dtheta(a[2], b[2])))
 
-    # --- planning ---
     def _build_corridor_mask(self, corridor_polys: List[np.ndarray]):
         x0, y0, cell = float(self.xs[0]), float(self.ys[0]), self.cell
         layers = []                       # (k, i0, i1, j0, j1, layer)
@@ -426,7 +411,6 @@ class SE2Planner:
         while len(_CORRIDOR_MASK_CACHE) > _CORRIDOR_MASK_CACHE_MAX:
             _CORRIDOR_MASK_CACHE.pop(next(iter(_CORRIDOR_MASK_CACHE)))
 
-    # --- goal preference ---
     def _forward_bias(self, start_pose: Tuple[float, float, float]):
         if self.forward_penalty <= 0.0:
             return None
@@ -598,7 +582,6 @@ class SE2Planner:
         cost = trans + self.rot_weight * rot     # same as plan_anywhere: path length is the basis
         return SE2PlanResult(True, "", cost, trans, rot, self._pose(*goal_idx), poses)
 
-# --- Factory function ---
 def build_se2_planner(wall_polys,             # list of shapely Polygons — impassable region outlines
                        obstacle_w: float,
                        obstacle_h: float,

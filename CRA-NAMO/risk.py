@@ -1,29 +1,4 @@
-"""How dangerous it is to move something, and what that costs.
-
-Difficulty asks how *hard* an obstacle is to push; risk asks whether it should be
-pushed at all. They are independent: a wheelchair with someone sitting in it
-rolls easily and must not be touched, while a concrete block is brutally heavy
-and perfectly safe to shove aside. So risk gets its own estimator, its own
-dataset, and its own term in the cost.
-
-The scale runs over five levels, and each carries a one-off surcharge stated in
-metres of detour (see `RISK_DETOUR_EQUIV_M`) so it tracks the physical cost scale
-instead of being an arbitrary constant. The surcharge is charged **once per
-obstacle**, the first time the robot moves it — moving something twice does not
-make it twice as dangerous, and the decision the cost is meant to influence is
-"touch this at all or go round".
-
-Assessment happens twice, because the robot learns by touching:
-
-  * on first sight, from the visual label alone;
-  * on physical contact, when the true difficulty is known and the label may
-    itself resolve into something more specific (`contact_reveals`) — a closed
-    box turning out to be full, a column turning out to be load-bearing.
-
-The second assessment replaces the first. Only the second one is ever charged,
-because contact always precedes a move; the first exists to steer the planner
-away from things it should not go near before it finds out the hard way.
-"""
+"""Estimate manipulation risk and convert it to a cost surcharge."""
 
 from __future__ import annotations
 
@@ -35,7 +10,6 @@ import requests
 
 from config import Config
 
-# --- the scale ---
 LOW = "low"
 MEDIUM = "medium"
 MEDIUM_HIGH = "medium_high"
@@ -61,7 +35,6 @@ RISK_DETOUR_EQUIV_M: Dict[str, float] = {
     EXTREME: 5000.0,
 }
 
-# --- the dataset ---
 # Whole labels, for objects whose name settles the question outright.
 RISK_LABELS: Dict[str, str] = {
     # low: everyday furniture, empty containers, nothing depending on it
@@ -175,7 +148,6 @@ class RiskEstimator:
         self.calls = 0
         self.mode = "deepseek" if self.api_key else "heuristic"
 
-    # --- the two assessments ---
     def assess(self, observation: dict) -> str:
         """First look, from the visual label. Cached: one verdict per obstacle."""
         oid = observation["oid"]
@@ -205,7 +177,6 @@ class RiskEstimator:
         """Current verdict, or None for an obstacle never assessed."""
         return self.level.get(oid)
 
-    # --- deciding ---
     def _decide(self, o: dict, difficulty: Optional[float]):
         label = self._label(o, difficulty)
         cached = self.label_cache.get(label)
@@ -232,7 +203,6 @@ class RiskEstimator:
             return _normalise(o["contact_reveals"])
         return _normalise(o.get("material", "unknown"))
 
-    # --- LLM ---
     def _build_prompt(self, o: dict, label: str,
                       difficulty: Optional[float]) -> str:
         ladder = "\n".join(

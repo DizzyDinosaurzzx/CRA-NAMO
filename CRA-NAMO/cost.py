@@ -1,51 +1,4 @@
-"""The cost function, in one place.
-
-    C = (1 - w) * J  +  w * (time_value * T)  +  R        [J]
-
-    J = lambda * D + W          [J]
-    T = move time + plan time   [s]
-    R = sum of risk surcharges  [J]
-
-    lambda * D  lambda_distance [N] times every metre the robot drives — both
-                ordinary roadmap travel and the excursion it makes while holding
-                an obstacle.
-    W           sum over manipulations of (friction force [N] x distance moved).
-
-Both terms come out in joules: `difficulty` is a real friction force
-f = mu*rho*V*g, and `lambda_distance` is the robot's equivalent driving
-resistance, so the two have the same dimension and J is dimensionally sound.
-
-A metre spent moving an obstacle costs `lambda + difficulty`, because the robot
-has to overcome its own driving resistance *and* the obstacle's friction over
-that same metre. That falls out of adding the two terms — it is not a separate
-case anywhere in the code.
-
-T is the simulated clock: every second the robot spends driving, turning, or
-standing still while the planner thinks. `w = cfg.time_importance` slides between
-the two — 0 is the pure-energy objective the project started with and is the
-default, 1 costs nothing but time. `time_value` [J/s] is what makes that sum
-legal: it prices a second in joules, so both halves of C are energies.
-
-The search and the executor charge time from different sides of the same model.
-The search knows a route's geometry but not which way the robot will be facing
-when it gets there, so it costs roadmap edges as pure translation; the executor
-knows the heading exactly and pays the turns as well. Planning time is worse
-still — it is real algorithm time, so it cannot be known before it is spent, and
-only the executor's T contains it. Both effects push the same way, executed time
->= planned time, which is the same relationship the estimated and true
-difficulties already have.
-
-R is what it costs to have moved dangerous things: one surcharge per obstacle,
-the first time it is moved, priced by the level `risk` assigns it. It sits
-*outside* the (1-w)/w split rather than inside J, and that placement is the whole
-design. Folded into J it would be scaled by (1-w), so a robot told to care only
-about time (w=1) would price a wheelchair with someone in it at zero. Risk is not
-the kind of thing a speed preference is allowed to discount.
-
-**Nothing outside this module should multiply by `lambda_distance`, by
-`difficulty`, by `time_value`, or by `risk_weight`.** If it does, the accounting has leaked back
-out again, which is how it came to be spread over four files in the first place.
-"""
+"""Compute energy, time, manipulation, and risk costs."""
 
 from __future__ import annotations
 
@@ -56,7 +9,6 @@ import kinematics
 import risk as risk_model
 from config import Config
 
-# --- the two terms ---
 def motion_cost(cfg: Config, distance: float) -> float:
     """Joules spent driving `distance` metres. The lambda*D term."""
     return cfg.lambda_distance * distance
@@ -94,7 +46,6 @@ def combine(cfg: Config, joules: float, seconds: float) -> float:
     return (1.0 - w) * joules + w * time_cost(cfg, seconds)
 
 
-# --- how long things take ---
 def drive_time(cfg: Config, distance: float) -> float:
     """Seconds to drive one roadmap edge, rest to rest and in a straight line.
 
@@ -130,7 +81,6 @@ def manipulation_time(cfg: Config, cplan, n_poses: int,
             + kinematics.path_time(free, path[last:]))
 
 
-# --- path measurement ---
 def se2_path_length(obs, poses, cfg: Config) -> float:
     """Length of an SE(2) route, with rotation folded in as equivalent translation.
 
@@ -149,7 +99,6 @@ def se2_path_length(obs, poses, cfg: Config) -> float:
     return total
 
 
-# --- search strategies ---
 def work_multiplier(cfg: Config) -> float:
     """How much of the obstacle-work term the search believes, per strategy.
 

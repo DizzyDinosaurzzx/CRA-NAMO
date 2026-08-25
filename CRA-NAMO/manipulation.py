@@ -1,15 +1,4 @@
-"""Adapter between the simulated world and the SE(2) planner.
-
-Two jobs, and only two:
-
-  * **swept volumes** — the region a body sweeps as it moves from one pose to the
-    next, which is what collision checking actually tests against;
-  * **plan_move_se2** — wrap the grid planner in world terms (shapely polygons,
-    obstacles, config) and validate the routes it returns.
-
-Geometric primitives live in `geometry`, cost formulas in `cost`, the search
-itself in `se2_planner`. This module owns none of those.
-"""
+"""Connect world geometry to the obstacle SE(2) planner."""
 
 from __future__ import annotations
 import math
@@ -22,7 +11,6 @@ import se2_planner
 from config import Config
 from obstacle import MovableObstacle
 
-# --- swept volumes ---
 
 _SWEPT_MAX_DTHETA = math.pi / 12.0  # baseline for a ~1 m² obstacle (half-diag ≈ 0.5 m)
 _SWEPT_REF_HALF_DIAG = 0.5
@@ -61,7 +49,6 @@ def swept_region(obs: MovableObstacle, nx: float, ny: float,
                          (nx, ny, obs.theta if theta is None else theta))
 
 
-# --- planner cache ---
 
 _MAX_SE2_STATES = 200_000
 _PLANNER_CACHE: Dict[tuple, se2_planner.SE2Planner] = {}
@@ -127,7 +114,6 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
     return planner
 
 
-# --- path validation ---
 
 def path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
     """Does the body clear every blocker along the whole path?
