@@ -55,5 +55,8 @@ def load(name: str | None = None) -> dict[str, Any]:
             raise ValueError(f"Map {selected!r}: {field} must be a single (x, y) point")
         scenario[field] = (float(point[0]), float(point[1]))
 
+    # Optional: what the world does on its own. Absent means a static map.
+    scenario["dynamics"] = list(scenario.get("dynamics") or ())
+
     scenario["name"] = selected
     return scenario

@@ -71,7 +71,7 @@ def main():
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     sim = OnlineNAMO(s["workspace"], s["static"], s["movable"],
-                     s["start"], s["goal"], cfg)
+                     s["start"], s["goal"], cfg, events=s.get("dynamics"))
     
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
@@ -105,6 +105,10 @@ def main():
     print(f"{'Risk assessments':<{W}} : {len(sim.risk.level):,} seen, "
           f"{len(sim.risk.on_contact):,} revised on contact"
           f"  ({sim.risk.calls:,} calls, mode={sim.risk.mode})")
+    if res.world_events:
+        print(f"{'World events':<{W}} : {len(res.world_events):,}")
+        for line in res.world_events:
+            print(f"{'':<{W}}   {line}")
 
     strategy_suffix = f"_{cfg.strategy}" if cfg.strategy != "normal" else ""
     out = os.path.join(cfg.out_dir, f"summary_{s['name']}{strategy_suffix}.png")

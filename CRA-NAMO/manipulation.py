@@ -77,16 +77,32 @@ def _resolve_cell(bounds: Tuple[float, float, float, float], cfg: Config) -> flo
 
 def _get_planner(obs: MovableObstacle, static_obstacles,
                  bounds: Tuple[float, float, float, float],
-                 robot_pos: Tuple[float, float], cfg: Config,
-                 others_polys=None) -> se2_planner.SE2Planner:
-    cell = _resolve_cell(bounds, cfg)
-    dist_to_obs = math.hypot(robot_pos[0] - obs.x, robot_pos[1] - obs.y)
-    work_radius = (float("inf") if cfg.se2_containment == "none"
-                   else dist_to_obs + cfg.R_manip + 1.0)
+                 cfg: Config, others_polys=None,
+                 work_radius: Optional[float] = None,
+                 forward_penalty: Optional[float] = None) -> se2_planner.SE2Planner:
+    """Planner for one body in one arrangement of the world.
 
-    key = (obs.l, obs.d, bounds, robot_pos, round(work_radius, 6), cell,
+    The reachable disc is centred on the body itself, which is what `R_manip`
+    has always been documented to mean — how far an obstacle may be relocated
+    from where it stands. Anchoring it there rather than to the robot is what
+    lets one planner serve every edge of a cycle and keep the Dijkstra result it
+    has already paid for; where the robot is standing enters only as the
+    drop-pose bias, which `plan_anywhere` takes per call.
+
+    An obstacle moving under its own steam overrides both: the whole map is in
+    reach and there is nobody to be nudged away from.
+    """
+    forward_penalty = (cfg.manip_forward_penalty if forward_penalty is None
+                       else forward_penalty)
+    cell = _resolve_cell(bounds, cfg)
+    if work_radius is None:
+        work_radius = (float("inf") if cfg.se2_containment == "none"
+                       else cfg.R_manip + 1.0)
+    centre = (round(obs.x, 6), round(obs.y, 6))
+
+    key = (obs.l, obs.d, bounds, centre, round(work_radius, 6), cell,
            cfg.se2_n_theta, cfg.se2_connectivity, cfg.se2_rot_weight,
-           cfg.se2_containment, cfg.manip_forward_penalty,
+           cfg.se2_containment, forward_penalty,
            _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
@@ -98,13 +114,13 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
     planner = se2_planner.build_se2_planner(
         wall_polys=walls,
         obstacle_w=obs.l, obstacle_h=obs.d,
-        bounds=bounds, robot_pos=robot_pos,
+        bounds=bounds, robot_pos=centre,
         work_radius=work_radius,
         cell=cell, n_theta=cfg.se2_n_theta,
         connectivity=cfg.se2_connectivity,
         rot_weight=cfg.se2_rot_weight,
         containment=cfg.se2_containment,
-        forward_penalty=cfg.manip_forward_penalty,
+        forward_penalty=forward_penalty,
         oid=obs.oid,
         verbose=cfg.verbose,
     )
@@ -155,8 +171,7 @@ def plan_move_se2(
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
     """Plan where to put *obs* so it stops blocking, and how to get it there."""
     try:
-        planner = _get_planner(obs, static_obstacles, bounds, robot_pos,
-                               cfg, others_polys)
+        planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys)
         # reset corridor every time: the blocked edge differs per cycle
         corridor_verts = [geometry.polygon_exterior_coords(p)
                           for p in must_clear_polys] if must_clear_polys else []
@@ -173,7 +188,8 @@ def plan_move_se2(
 
         result = planner.plan_anywhere((obs.x, obs.y, obs.theta),
                                        validate=_validate, goal_accept=goal_accept,
-                                       n_candidates=cfg.se2_goal_candidates)
+                                       n_candidates=cfg.se2_goal_candidates,
+                                       ref_pos=robot_pos)
         if not result.success:
             cfg.log(f"[plan_move_se2] oid={obs.oid} {result.reason}")
             return (False, None, math.inf, None)
@@ -186,3 +202,29 @@ def plan_move_se2(
         cfg.log(f"[plan_move_se2] error: {e}")
         return (False, None, math.inf, None)
 
+
+def plan_route_se2(obs: MovableObstacle,
+                   goal_pose: Tuple[float, float, float],
+                   static_obstacles,
+                   bounds: Tuple[float, float, float, float],
+                   cfg: Config,
+                   others_polys=None) -> Optional[list]:
+    """Plan an obstacle's own route from where it stands to *goal_pose*.
+
+    The counterpart of `plan_move_se2` for a body that moves under its own
+    steam: no corridor to clear, no drop pose to choose, and no robot to stay
+    within reach of — only "get from here to there without hitting anything".
+    Returns the pose list, or None when there is no route.
+    """
+    try:
+        planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys,
+                               work_radius=float("inf"), forward_penalty=0.0)
+        planner.set_corridor([])
+        result = planner.plan_path((obs.x, obs.y, obs.theta), tuple(goal_pose))
+        if not result.success:
+            cfg.log(f"[dynamics] oid={obs.oid} no route: {result.reason}")
+            return None
+        return result.path
+    except Exception as e:
+        cfg.log(f"[dynamics] oid={obs.oid} route error: {type(e).__name__}: {e}")
+        return None

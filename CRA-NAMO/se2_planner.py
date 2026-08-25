@@ -411,11 +411,17 @@ class SE2Planner:
         while len(_CORRIDOR_MASK_CACHE) > _CORRIDOR_MASK_CACHE_MAX:
             _CORRIDOR_MASK_CACHE.pop(next(iter(_CORRIDOR_MASK_CACHE)))
 
-    def _forward_bias(self, start_pose: Tuple[float, float, float]):
+    def _forward_bias(self, start_pose: Tuple[float, float, float], ref_pos=None):
+        """Bias on drop poses, measured from wherever the pushing is done from.
+
+        Taken per call rather than from the instance: the C-space does not depend
+        on it, so one planner can serve every edge and keep its Dijkstra result.
+        """
         if self.forward_penalty <= 0.0:
             return None
-        fx = start_pose[0] - self.robot_pos[0]
-        fy = start_pose[1] - self.robot_pos[1]
+        ref = self.robot_pos if ref_pos is None else ref_pos
+        fx = start_pose[0] - ref[0]
+        fy = start_pose[1] - ref[1]
         n = math.hypot(fx, fy)
         if n < 1e-9:            # robot and obstacle coincide, no meaningful direction
             return None
@@ -426,7 +432,7 @@ class SE2Planner:
 
     def _select_goal(self, dist: np.ndarray,
                      start_pose: Tuple[float, float, float],
-                     n_best: int = 1) -> Tuple[list, bool]:
+                     n_best: int = 1, ref_pos=None) -> Tuple[list, bool]:
         INF = np.int64(1) << 62
         nx, ny, nT = self.nx, self.ny, self.n_theta
         d3 = dist.reshape(nx, ny, nT)
@@ -438,7 +444,7 @@ class SE2Planner:
             saved = sub[self._route_mask]    # cached dist is shared, must be restored exactly
             sub[self._route_mask] = INF
         try:
-            bias = self._forward_bias(start_pose)
+            bias = self._forward_bias(start_pose, ref_pos)
             if bias is None:
                 score = np.where(dist >= INF, np.inf, dist.astype(float))
                 order = self._smallest(score, n_best)
@@ -472,7 +478,8 @@ class SE2Planner:
                       start_pose: Tuple[float, float, float],
                       validate=None,
                       n_candidates: int = 10,
-                      goal_accept=None) -> SE2PlanResult:
+                      goal_accept=None,
+                      ref_pos=None) -> SE2PlanResult:
         start_idx = self._snap(*start_pose)
 
         if not self.in_disk[start_idx]:
@@ -504,7 +511,8 @@ class SE2Planner:
 
         one_shot = validate is None and goal_accept is None
         candidates, reachable = self._select_goal(
-            dist, start_pose, n_best=1 if one_shot else n_candidates)
+            dist, start_pose, n_best=1 if one_shot else n_candidates,
+            ref_pos=ref_pos)
         if not reachable:
             return SE2PlanResult(False, "no reachable pose can clear the path")
 

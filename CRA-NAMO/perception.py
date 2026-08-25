@@ -13,13 +13,16 @@ from config import Config
 class Belief:
     """Store only information the robot has perceived or discovered by contact."""
 
-    def __init__(self, roadmap: Roadmap, cfg: Config, risk_estimator=None):
+    def __init__(self, roadmap: Roadmap, cfg: Config, risk_estimator=None,
+                 estimator=None):
         self.roadmap = roadmap
         self.cfg = cfg
         self.risk = risk_estimator
+        self.estimator = estimator
         self.perceived: Dict[int, MovableObstacle] = {}
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}
         self.newly_revealed: List[int] = []
+        self.updated: List[int] = []     # known obstacles seen to have changed
         self.contacts: List[Polygon] = []
         self.touched: Set[int] = set()
         self.touched_difficulty: Dict[int, float] = {}
@@ -27,19 +30,20 @@ class Belief:
 
     def perceive(self, world_obstacles: List[MovableObstacle],
                  robot_pos: Tuple[float, float]) -> List[int]:
-        """Reveal visible obstacles and synchronize known poses."""
+        """Reveal visible obstacles and synchronize known ones."""
         self.newly_revealed = []
+        self.updated = []
         rp = Point(robot_pos)
         for w in world_obstacles:
             known = self.perceived.get(w.oid)
-            if known is not None and self._pose_matches(known, w):
+            if known is not None and self._matches(known, w):
                 continue
             if rp.distance(Point(w.center())) > self.cfg.R_perc:
                 continue
             if not self._visible(robot_pos, w, world_obstacles):
                 continue
             if known is not None:
-                self._sync_pose(known, w)
+                self._sync(known, w)
                 continue
             obs = w.perceived_copy()
             self.perceived[w.oid] = obs
@@ -47,7 +51,13 @@ class Belief:
             self._assess_risk(obs)
             self._update_edges_for(obs)
             self._clear_contacts_overlapping(obs.polygon)
+        self._forget_vacated(world_obstacles, robot_pos)
         return self.newly_revealed
+
+    @property
+    def changed(self) -> bool:
+        """Has anything the planner cached its work against moved or changed?"""
+        return bool(self.newly_revealed or self.updated)
 
     def _assess_risk(self, obs: MovableObstacle):
         """Assess risk from the visually observed label."""
@@ -61,18 +71,67 @@ class Belief:
                                world_obs.difficulty)
 
     @staticmethod
-    def _pose_matches(a: MovableObstacle, b: MovableObstacle) -> bool:
+    def _matches(a: MovableObstacle, b: MovableObstacle) -> bool:
+        """Is the remembered obstacle still what a look at the real one shows?"""
         return (abs(a.x - b.x) < 1e-9 and abs(a.y - b.y) < 1e-9
-                and abs(a.theta - b.theta) < 1e-9)
+                and abs(a.theta - b.theta) < 1e-9
+                and a.l == b.l and a.d == b.d and a.h == b.h
+                and a.material == b.material)
 
-    def _sync_pose(self, known: MovableObstacle, world_obs: MovableObstacle):
-        """Synchronize a perceived pose after observing a world-state change."""
+    def _sync(self, known: MovableObstacle, world_obs: MovableObstacle):
+        """Update a remembered obstacle from what the robot can now see."""
         old_footprint = known.polygon
+        reshaped = (known.l != world_obs.l or known.d != world_obs.d
+                    or known.h != world_obs.h
+                    or known.material != world_obs.material)
         self._forget_edges(known.oid)
         known.x, known.y, known.theta = world_obs.x, world_obs.y, world_obs.theta
+        known.l, known.d, known.h = world_obs.l, world_obs.d, world_obs.h
+        known.material = world_obs.material
         known.removed = world_obs.removed
         self._update_edges_for(known)
         self._clear_contacts_overlapping(old_footprint)
+        self.updated.append(known.oid)
+        if reshaped:
+            self._reconsider(known)
+
+    def _reconsider(self, obs: MovableObstacle):
+        """It is not the thing it was, so judgements about the old one lapse.
+
+        Size and label are what the difficulty estimator and the risk model read,
+        so a change the robot can see invalidates both, and what it learned by
+        touching goes with them — that difficulty belonged to the old object. A
+        change it *cannot* see, a difficulty rewritten behind an unchanged label,
+        stays believed until it next takes hold of the thing. That is the price
+        of not being told in advance.
+        """
+        self.touched.discard(obs.oid)
+        self.touched_difficulty.pop(obs.oid, None)
+        if self.estimator is not None:
+            self.estimator.forget(obs.oid)
+        if self.risk is not None:
+            self.risk.forget(obs.oid)
+            self.risk.assess(obs.observation())
+
+    def _forget_vacated(self, world_obstacles: List[MovableObstacle], robot_pos):
+        """Drop memories the robot can see are wrong.
+
+        A remembered footprint in plain view with nothing standing in it is a
+        memory contradicted by what the robot is looking at. Without this, the
+        ghost of anything that wandered off out of sight would go on blocking the
+        roadmap for the rest of the run.
+        """
+        real = {w.oid: w for w in world_obstacles}
+        rp = Point(robot_pos)
+        gone = [oid for oid, known in self.perceived.items()
+                if oid in real and not self._matches(known, real[oid])
+                and rp.distance(Point(known.center())) <= self.cfg.R_perc
+                and self._visible(robot_pos, known, world_obstacles)]
+        for oid in gone:
+            self._forget_edges(oid)
+            self.perceived.pop(oid)
+            self.updated.append(oid)
+        return gone
 
     def _half_edge_samples(self, obs: MovableObstacle):  # line-of-sight samples from 8 obstacle points
         coords = list(obs.polygon.exterior.coords)[:-1]

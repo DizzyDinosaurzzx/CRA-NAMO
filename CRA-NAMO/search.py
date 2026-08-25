@@ -43,19 +43,17 @@ class Planner:
         self.risk = risk_estimator
         self.cfg = cfg
         self.failed_moves = set() if failed_moves is None else failed_moves
-        self._robot_pos: Tuple[float, float] = (0.0, 0.0)
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
 
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
         rm = self.roadmap
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
-        self._robot_pos = rm.nodes[start_node]
 
         # Clear persistent cache if new obstacles were revealed since the last
         # plan call — that changes the others_polys geometry for every removal
         # and would invalidate previously cached move plans.
-        if self.belief.newly_revealed:
+        if self.belief.changed:
             self._persistent_removal_cache.clear()
 
         def h(node):
@@ -180,7 +178,6 @@ class Planner:
         feasible = False
         cplan = None
 
-        robot_pos = self._robot_pos
         bounds = self.roadmap.workspace.bounds
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
@@ -193,9 +190,17 @@ class Planner:
         # the edge, so neither choice hides any travel from the cost. Which one it
         # picks is the search's guess; the executor plans the same excursion again
         # from the endpoint the robot is really standing on.
+        # The midpoint stands in for the robot everywhere in this function, not
+        # only in the escort: the manipulation is reachable from it, and drop
+        # poses are biased away from it. Feeding the robot's actual position in
+        # instead would make the answer depend on which end of the edge it
+        # happened to be standing on — which is exactly what the cache below
+        # asserts it does not, and what had the robot stepping back and forth
+        # between two nodes, each one preferring the plan of the other.
         u, v = key
         mid = tuple((a + b) / 2.0 for a, b in
                     zip(self.roadmap.nodes[u], self.roadmap.nodes[v]))
+        robot_pos = mid
         exits = [(self.roadmap.nodes[u], 0.0), (self.roadmap.nodes[v], 0.0)]
         contact_memo: Dict[int, tuple] = {}
 

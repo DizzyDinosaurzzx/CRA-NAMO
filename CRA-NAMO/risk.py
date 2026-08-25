@@ -173,6 +173,17 @@ class RiskEstimator:
         self.on_contact.add(oid)
         return level
 
+    def forget(self, oid: int):
+        """Drop the verdict on an obstacle that is no longer what it was.
+
+        Including the contact verdict: it was passed on an object with a
+        different label or a different size, so touching it again is warranted.
+        The label cache stays — labels have not changed their meaning.
+        """
+        self.level.pop(oid, None)
+        self.source.pop(oid, None)
+        self.on_contact.discard(oid)
+
     def level_of(self, oid: int) -> Optional[str]:
         """Current verdict, or None for an obstacle never assessed."""
         return self.level.get(oid)

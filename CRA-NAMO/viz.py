@@ -14,8 +14,9 @@ matplotlib.rcParams["font.family"] = "serif"
 matplotlib.rcParams["font.serif"] = ["Times New Roman", "Times", "STIXGeneral",
                                      "DejaVu Serif"]
 matplotlib.rcParams["mathtext.fontset"] = "stix"
+import matplotlib.patheffects as patheffects
 from matplotlib.collections import LineCollection
-from matplotlib.colors import ListedColormap, LogNorm
+from matplotlib.colors import ListedColormap, LogNorm, to_rgb
 from matplotlib.patches import Rectangle
 from PIL import Image
 from shapely.geometry import LineString, Point
@@ -41,6 +42,7 @@ _GOAL           = "#d73027"
 _GHOST          = "#b4b4b4"      # where an obstacle started
 _OBSTACLE_EDGE  = "#8c510a"      # outline of a perceived obstacle
 _MOVED_EDGE     = "#1a9850"      # ... once the robot has moved it
+_WORLD_EDGE     = "#7a0177"      # ... one the world moved on its own
 _UNPERCEIVED    = "#9a9a9a"      # outline of one it has not seen yet
 _DIFFICULTY_CMAP = "YlOrBr"
 
@@ -50,6 +52,14 @@ _DIFFICULTY_CMAP = "YlOrBr"
 # already do. Reading the map, a human can see at a glance what the robot has to
 # work out by touching things.
 _DIFFICULTY_SHADE = (0.18, 0.92)   # crop the colormap: pure white reads as absent
+
+# Obstacle fills are translucent, so what a label actually sits on is the fill
+# blended with the workspace behind it — not the fill. Named here because the
+# drawing and the black-or-white decision have to use the same number.
+_OBSTACLE_ALPHA = 0.9
+_TEXT_DARK      = "#111111"
+_TEXT_LIGHT     = "#ffffff"
+_TRAIL_Z        = 5                # the robot's trail; labels go above it
 
 
 def _difficulty_cmap():
@@ -82,19 +92,60 @@ def difficulty_palette(world):
     return {oid: cmap(norm(v)) for oid, v in values.items()}, low, high
 
 
-def _label_colour(fill) -> str:
-    """Black or white, whichever stays readable on `fill`.
+def _luminance(colour) -> float:
+    """Relative luminance, Rec. 709."""
+    r, g, b = colour[:3]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _over(fg, bg, alpha: float) -> tuple:
+    """`fg` painted onto `bg` at `alpha` — what the eye actually gets."""
+    return tuple(alpha * f + (1.0 - alpha) * b for f, b in zip(fg[:3], to_rgb(bg)))
+
+
+def _contrast(a, b) -> float:
+    """Contrast ratio between two colours, larger being more readable."""
+    la, lb = _luminance(to_rgb(a)) + 0.05, _luminance(to_rgb(b)) + 0.05
+    return max(la, lb) / min(la, lb)
+
+
+def _label_colour(fill, alpha: float = _OBSTACLE_ALPHA) -> str:
+    """Whichever of the two text shades stands out more, once `fill` is on the page.
 
     The gradient runs from near-white to dark brown, so a single fixed text
-    colour is illegible at one end or the other. Relative luminance (Rec. 709)
-    decides, with the threshold where the two contrast ratios cross.
+    colour is illegible at one end or the other. Two things this gets right that
+    a luminance threshold did not. It measures the *blended* colour, because the
+    fill is translucent and a shade dark enough to carry white text on its own
+    is not once the near-white workspace shows through it. And it compares the
+    two contrast ratios outright rather than against a hand-set cut-off — the
+    old one sat at 0.55, far above where the two actually cross, so every
+    mid-tone obstacle got white text on a pale fill at a ratio under 2:1.
     """
-    r, g, b = fill[:3]
-    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-    return "#111111" if luminance > 0.55 else "#ffffff"
+    seen = _over(fill, _BACKGROUND, alpha)
+    return max((_TEXT_DARK, _TEXT_LIGHT), key=lambda c: _contrast(c, seen))
 
 
-def _draw_obstacle_key(ax, show_unperceived: bool):
+def _label_effects(colour: str):
+    """A thin halo in the opposite shade, so a label survives what crosses it.
+
+    The robot's trail is drawn over the obstacles it has squeezed past, and a
+    translucent wash across a label costs it most of its contrast. A one-pixel
+    outline is cheaper than reserving space no other element may enter.
+    """
+    edge = _TEXT_LIGHT if colour == _TEXT_DARK else _TEXT_DARK
+    return [patheffects.withStroke(linewidth=1.6, foreground=edge, alpha=0.75)]
+
+
+def _obstacle_edge(oid, removed: bool, world_moved) -> tuple:
+    """Outline colour and width for one obstacle, by who last moved it."""
+    if removed:
+        return _MOVED_EDGE, 2.0
+    if oid in world_moved:
+        return _WORLD_EDGE, 2.0
+    return _OBSTACLE_EDGE, 0.8
+
+
+def _draw_obstacle_key(ax, show_unperceived: bool, show_world_moved: bool = False):
     """Legend proxies for what an obstacle's *outline* means.
 
     Fill shades difficulty, so the state of an obstacle had to move to the
@@ -104,6 +155,10 @@ def _draw_obstacle_key(ax, show_unperceived: bool):
     ax.add_patch(Rectangle((0, 0), 0, 0, facecolor="none",
                            edgecolor=_MOVED_EDGE, lw=2.0,
                            label="moved by the robot"))
+    if show_world_moved:
+        ax.add_patch(Rectangle((0, 0), 0, 0, facecolor="none",
+                               edgecolor=_WORLD_EDGE, lw=2.0,
+                               label="moved on its own"))
     if show_unperceived:
         ax.add_patch(Rectangle((0, 0), 0, 0, facecolor="none",
                                edgecolor=_UNPERCEIVED, lw=1.0, ls=":",
@@ -367,26 +422,30 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     _draw_roadmap_bg(ax, sim)
     # fill shades true difficulty; the outline says whether the robot moved it
     colours, low, high = difficulty_palette(sim.world)
+    world_moved = set(sim.dynamics.actors)
     for w in sim.world:
-        _plot_poly(ax, w.polygon, facecolor=colours[w.oid], alpha=0.9,
-                   edgecolor=_MOVED_EDGE if w.removed else _OBSTACLE_EDGE,
-                   lw=2.0 if w.removed else 0.8, zorder=3)
+        edge, lw = _obstacle_edge(w.oid, w.removed, world_moved)
+        _plot_poly(ax, w.polygon, facecolor=colours[w.oid], alpha=_OBSTACLE_ALPHA,
+                   edgecolor=edge, lw=lw, zorder=3)
+        colour = _label_colour(colours[w.oid])
         ax.text(w.x, w.y, _obstacle_label(w.oid, sim.estimator.cache,
                                            sim.belief.touched_difficulty,
                                            sim.risk.level),
-                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4,
-                color=_label_colour(colours[w.oid]))
+                ha="center", va="center", fontsize=7, linespacing=0.9,
+                zorder=_TRAIL_Z + 1, color=colour,
+                path_effects=_label_effects(colour))
     _draw_difficulty_key(fig, ax, colours, low, high)
-    _draw_obstacle_key(ax, show_unperceived=False)
+    _draw_obstacle_key(ax, show_unperceived=False,
+                       show_world_moved=bool(world_moved))
 
     # draw robot motion trail corridor:
     if len(res.robot_track) >= 2:
         corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
-        _plot_poly(ax, corridor, facecolor=_TRAIL, alpha=0.45, zorder=5)
+        _plot_poly(ax, corridor, facecolor=_TRAIL, alpha=0.45, zorder=_TRAIL_Z)
     elif res.robot_track:
         # if only a single point (robot did not move), draw a circle
         p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
-        _plot_poly(ax, p, facecolor=_TRAIL, alpha=0.45, zorder=5)
+        _plot_poly(ax, p, facecolor=_TRAIL, alpha=0.45, zorder=_TRAIL_Z)
     _finish_ax(ax, sim, title)
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -401,6 +460,7 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     # draw obstacles classified by perception state
     colours, low, high = difficulty_palette(sim.world)
     perceived = frame["perceived"]
+    world_moved = frame.get("world_moved", ())
     for oid, poly, removed in frame["obstacles"]:
         if oid not in perceived:
             # unperceived: grey dotted outline only (robot doesn't know where this obstacle is)
@@ -410,22 +470,25 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
         # the obstacle being moved sits above the robot, so a piece carried past
         # the robot is not hidden by it; on collisions the robot stays on top
         z = 8.5 if oid == frame.get("move_oid") else 3
-        _plot_poly(ax, poly, facecolor=colours.get(oid, _OBSTACLE_EDGE), alpha=0.9,
-                   edgecolor=_MOVED_EDGE if removed else _OBSTACLE_EDGE,
-                   lw=2.0 if removed else 0.8, zorder=z)
+        edge, lw = _obstacle_edge(oid, removed, world_moved)
+        fill = colours.get(oid, _OBSTACLE_EDGE)
+        _plot_poly(ax, poly, facecolor=fill, alpha=_OBSTACLE_ALPHA,
+                   edgecolor=edge, lw=lw, zorder=z)
         cx, cy = poly.centroid.x, poly.centroid.y
         estimates = frame.get("estimated_difficulty", {})
         touched = frame.get("touched_difficulty", {})
+        colour = _label_colour(colours.get(oid, (1.0, 1.0, 1.0)))
         ax.text(cx, cy, _obstacle_label(oid, estimates, touched,
                                         frame.get("risk")),
-                ha="center", va="center", fontsize=7, linespacing=0.9, zorder=z + 1,
-                color=_label_colour(colours.get(oid, (1.0, 1.0, 1.0))))
+                ha="center", va="center", fontsize=7, linespacing=0.9,
+                zorder=max(z + 1, _TRAIL_Z + 1), color=colour,
+                path_effects=_label_effects(colour))
 
     # draw robot motion trail up to this frame (semi-transparent blue corridor)
     track = frame["track"]
     if len(track) >= 2:
         buf = LineString(track).buffer(sim.cfg.robot_radius, cap_style=1)
-        _plot_poly(ax, buf, facecolor=_TRAIL, alpha=0.4, zorder=5)
+        _plot_poly(ax, buf, facecolor=_TRAIL, alpha=0.4, zorder=_TRAIL_Z)
 
     # draw all paths given by the planner at this frame (blue lines)
     _draw_plan_paths(ax, frame)
@@ -436,7 +499,8 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     _plot_poly(ax, robot_circle, facecolor=_ROBOT, alpha=0.9, zorder=7)
     ax.plot(rx, ry, marker="o", color=_ROBOT_CORE, ms=4, zorder=8, label="robot")
     _draw_difficulty_key(fig, ax, colours, low, high)
-    _draw_obstacle_key(ax, show_unperceived=True)
+    _draw_obstacle_key(ax, show_unperceived=True,
+                       show_world_moved=bool(world_moved))
 
     # every frame reserves the same title height, or the GIF frames differ in size
     title = _lay_out_title([

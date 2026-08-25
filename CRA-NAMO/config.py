@@ -77,6 +77,24 @@ class Config:
     # Candidate drop poses are checked in ascending cost order.
     se2_goal_candidates: int = 24
 
+    # World motion. Obstacles may travel under their own steam; speed is in the
+    # rotation-folded units of cost.se2_path_length, so one number covers both
+    # sliding and turning. Scenarios without events never touch any of this.
+    dynamic_speed: float = 0.3          # default obstacle travel speed [m/s]
+    dynamic_step: float = 0.25          # simulated seconds per motion sub-step
+    dynamic_block_patience: float = 2.0  # seconds waiting before seeking another route
+    dynamic_give_up: float = 30.0       # seconds stuck before it parks where it is
+    # Planning takes real seconds and by default they are spent on the shared
+    # clock like any others. With a world that moves, that makes a run depend on
+    # how fast the machine planning it happens to be — a loaded machine gives the
+    # obstacles longer to travel. Set False to take planning off the clock: it is
+    # still measured and reported, the world then advances only with the robot,
+    # and a dynamic run repeats exactly.
+    plan_time_in_clock: bool = True
+
+    dynamic_wait_step: float = 2.0      # seconds the robot waits per unplannable cycle
+    dynamic_max_wait: float = 90.0      # total waiting before the way counts as shut
+
     grid_step: float = 0.3          # roadmap node spacing [m]
     conn_radius: float = 0.6        # roadmap connection radius [m]
 
@@ -87,7 +105,7 @@ class Config:
     step_execute_edges: int = 1     # edges executed before re-perception
     max_replans: int = 10000
 
-    deepseek_api_key: str = "sk-c1ea9b080fc444ceb1f5fa7901e3b92f"
+    deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_thinking: bool = True

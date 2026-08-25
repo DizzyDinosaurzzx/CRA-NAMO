@@ -12,6 +12,7 @@ from shapely.ops import unary_union
 from shapely.strtree import STRtree
 from config import Config
 import contact
+import dynamics
 from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
 from perception import Belief
@@ -43,6 +44,7 @@ class RunResult:
     risk_levels: dict = field(default_factory=dict)   # oid -> level charged for
     T: float = 0.0                          # simulated time elapsed = move_time + plan_time [s]
     move_time: float = 0.0                  # of which spent driving and turning [s]
+    wait_time: float = 0.0                  # of which spent standing still for the world [s]
     cycles: int = 0                         # number of replan cycles
     plan_time: float = 0.0                  # total planning time (seconds)
     first_plan_time: float = 0.0            # first plan time (seconds) — cold-start cost measure
@@ -53,6 +55,7 @@ class RunResult:
     robot_track: List[Tuple[float, float]] = field(     # robot node coordinate sequence
         default_factory=list)
     frames: List[dict] = field(default_factory=list)    # per-frame snapshots (for render_sequence)
+    world_events: List[str] = field(default_factory=list)  # what the world did on its own
     message: str = ""                       # result description
 
 class OnlineNAMO:
@@ -62,7 +65,8 @@ class OnlineNAMO:
                  movable_obstacles: List[MovableObstacle],
                  start: Tuple[float, float],
                  goal: Tuple[float, float],
-                 cfg: Config):
+                 cfg: Config,
+                 events=None):
         self.cfg = cfg
         self.workspace = workspace
         self.static_obstacles = static_obstacles
@@ -78,7 +82,10 @@ class OnlineNAMO:
 
         self.estimator = DifficultyEstimator(cfg)
         self.risk = RiskEstimator(cfg)
-        self.belief = Belief(self.roadmap, cfg, self.risk)
+        self.belief = Belief(self.roadmap, cfg, self.risk, self.estimator)
+        # Ground truth moves on its own; the belief is never shown this object.
+        self.dynamics = dynamics.WorldDynamics(
+            self.world, static_obstacles, workspace, events, cfg)
         self._risk_charged: set = set()             # oids whose surcharge is already paid
         self.stranded = False       # robot ended a manipulation with no roadmap node in reach
         self._plan_paths: List[dict] = []           # all currently planned paths (for per-frame visualisation)
@@ -91,6 +98,9 @@ class OnlineNAMO:
         self.robot_heading: float = 0.0
         self._free_profile = cfg.free_profile()
         self._loaded_profile = cfg.loaded_profile()
+        self._frame_node = self.start_node   # node the last frame was drawn against
+        self._world_frame_t = 0.0            # clock at the last "world moves" frame
+        self._waited = 0.0                   # time stood still in this stuck spell
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
         cfg = self.cfg
@@ -122,14 +132,18 @@ class OnlineNAMO:
             plan = planner.plan(node, self.goal_node)
             dt = time.time() - t0
             res.plan_time += dt
-            self._advance_clock(res, dt, moving=False)
+            if cfg.plan_time_in_clock:
+                self._world_frame(res, self._advance_clock(res, dt, moving=False))
             if cycle == 0:
                 res.first_plan_time = dt
             self._plan_paths = self._plan_to_paths(plan)
             if plan is None:
+                if self._wait_for_world(res, node):
+                    continue
                 res.message = "No feasible plan under current belief."
                 res.cycles = cycle + 1
                 return self._finalize(res, node)
+            self._waited = 0.0
             res.total_expansions += plan.expansions
 
             if node == self.goal_node:
@@ -167,6 +181,7 @@ class OnlineNAMO:
                         res.work_cost += executed_work
                         res.J += executed_work
                         self._charge_risk(res, act["oid"])
+                        self.dynamics.note_moved(act["oid"])
                         if act["oid"] not in res.removed:
                             res.removed.append(act["oid"])
                     elif not move_success and hits is not None:
@@ -235,6 +250,7 @@ class OnlineNAMO:
         res.work_cost = round(res.work_cost, 4)
         res.T = round(self.clock, 4)
         res.move_time = round(res.move_time, 4)
+        res.wait_time = round(res.wait_time, 4)
         res.plan_time = round(res.plan_time, 4)
         res.llm_calls = self.estimator.calls
         if res.success and not res.message:
@@ -335,13 +351,53 @@ class OnlineNAMO:
         res.risk_cost += charge
         res.risk_levels[oid] = level
 
-    def _advance_clock(self, res: RunResult, seconds: float, moving: bool = True):
-        """Let `seconds` of simulated time pass. Motion and thinking share one clock."""
+    def _advance_clock(self, res: RunResult, seconds: float,
+                       moving: bool = True) -> bool:
+        """Let `seconds` of simulated time pass, for the robot and for the world.
+
+        One clock drives both, so an obstacle with somewhere to be covers ground
+        while the robot drives, turns, and stands still thinking. Returns whether
+        ground truth changed, which the caller turns into an animation frame.
+        """
         if seconds <= 0.0:
-            return
+            return False
         self.clock += seconds
         if moving:
             res.move_time += seconds
+        if not self.dynamics.active:
+            return False
+        before = self.dynamics.version
+        for note in self.dynamics.advance(seconds, self.clock, self.robot_xy):
+            res.world_events.append(f"t={self.clock:,.1f}s  {note}")
+            self.cfg.log(f"[world] t={self.clock:,.1f}s {note}")
+        return self.dynamics.version != before
+
+    def _wait_for_world(self, res: RunResult, node: int) -> bool:
+        """Stand still and let the world move, when there is nowhere to go.
+
+        On a map that changes, a way that is shut now may be open in a minute:
+        the thing across it may be driving through rather than parked. So a
+        moment with no plan in it is a reason to wait and look again rather than
+        to stop — up to a point, after which the way really is shut. Waiting
+        costs time and no distance, which is what standing still costs.
+        """
+        if not self.dynamics.active or self._waited >= self.cfg.dynamic_max_wait:
+            return False
+        step = max(self.cfg.dynamic_wait_step, 1e-3)
+        self._waited += step
+        res.wait_time += step
+        self._world_frame(res, self._advance_clock(res, step, moving=False))
+        self.belief.perceive(self.world, self.robot_xy)
+        self._capture_frame(
+            res, node, f"nowhere to go — waiting ({self._waited:,.0f}s)")
+        return True
+
+    def _world_frame(self, res: RunResult, moved: bool):
+        """Draw the world in motion, at most one frame per animation step."""
+        if not moved or self.clock - self._world_frame_t < self.cfg.gif_time_step:
+            return
+        self._world_frame_t = self.clock
+        self._capture_frame(res, self._frame_node, "the world moves")
 
     def _drive(self, res: RunResult, a, b, in_contact: bool = False,
                loaded: bool = False, dist: Optional[float] = None):
@@ -362,8 +418,9 @@ class OnlineNAMO:
         profile = self._loaded_profile if loaded else self._free_profile
         seconds, self.robot_heading = kinematics.segment_time(
             profile, a, b, self.robot_heading)
-        self._advance_clock(res, seconds)
+        moved = self._advance_clock(res, seconds)
         self._set_robot(res, b)
+        self._world_frame(res, moved)
 
     def _set_robot(self, res: RunResult, p: Tuple[float, float]):
         self.robot_xy = (float(p[0]), float(p[1]))
@@ -485,7 +542,25 @@ class OnlineNAMO:
         return cplan, exit_nodes
 
     def _execute_move(self, oid: int, obs, act: dict,
-                           res: RunResult, node: int, cfg: Config):
+                      res: RunResult, node: int, cfg: Config):
+        """Move one obstacle, with the robot holding it and the world held off.
+
+        From the moment the robot commits to moving something, that something is
+        the robot's: whatever it was doing under its own steam is suspended for
+        the length of the manipulation, and it starts again from wherever it is
+        put down. Suspending on the decision rather than on the grip is what
+        makes the escort plan mean anything — a body still under way would have
+        drifted out from under its own grip points by the time the robot had
+        walked over to them.
+        """
+        self.dynamics.suspend(oid)
+        try:
+            return self._escort(oid, obs, act, res, node, cfg)
+        finally:
+            self.dynamics.release(oid)
+
+    def _escort(self, oid: int, obs, act: dict,
+                res: RunResult, node: int, cfg: Config):
         """Move one obstacle along its SE2 path with the robot holding on to it.
 
         Returns (success, hits, obstacle distance moved, new node or None).
@@ -520,25 +595,22 @@ class OnlineNAMO:
                     res, node,
                     f"cannot escort {oid} from node {node}: {cplan.reason} -> replan")
                 return (False, None, 0.0, None)
+        if self.dynamics.active and not self._still_there(oid, move_path[0]):
+            # It has gone somewhere else since the plan was drawn up, so the plan
+            # is about a pose it is not in. Look again and think again — it is
+            # standing still now, so the next plan will still be true when the
+            # robot reaches it.
+            self.belief.perceive(self.world, self.robot_xy)
+            self._capture_frame(
+                res, node, f"{oid} is no longer where it was -> replan")
+            return (False, None, 0.0, None)
         rp = list(cplan.robot_path)
         off = cplan.move_offset
 
-        # Build STRtree once for all steps in this manipulation — avoids O(N) polygon
-        # scans on every sub-step of the manipulation trajectory.
-        tree = None
-        tree_items = None
-        polys = []
-        items = []
-        for w in self.world:
-            if w.oid != oid:
-                polys.append(w.polygon)
-                items.append((w.oid, w.polygon))
-        for so in self.static_obstacles:
-            polys.append(so.polygon)
-            items.append((None, so.polygon))
-        if polys:
-            tree = STRtree(polys)
-            tree_items = items
+        # One STRtree for the whole manipulation instead of an O(N) polygon scan
+        # per sub-step — rebuilt only if the world moves underneath it.
+        tree, tree_items = self._collision_index(oid)
+        world_version = self.dynamics.version
 
         reached, hits, stop = self._walk_robot(
             rp[:off + 1], res, cfg, node=node, label=f"walk round to grip {oid}")
@@ -553,6 +625,9 @@ class OnlineNAMO:
 
         last_i = 0
         for i in range(1, n):
+            if world_version != self.dynamics.version:
+                tree, tree_items = self._collision_index(oid)
+                world_version = self.dynamics.version
             wx, wy, wth = move_path[i]
             obs_hits = self._world_collision(oid, wx, wy, wth, tree=tree,
                                              tree_items=tree_items)
@@ -639,6 +714,33 @@ class OnlineNAMO:
         self._capture_frame(res, landed, f"let go of {oid} at node {landed}")
         return landed
 
+    def _collision_index(self, oid: int):
+        """Everything the obstacle being moved could run into, indexed for lookup."""
+        polys, items = [], []
+        for w in self.world:
+            if w.oid != oid:
+                polys.append(w.polygon)
+                items.append((w.oid, w.polygon))
+        for so in self.static_obstacles:
+            polys.append(so.polygon)
+            items.append((None, so.polygon))
+        return (STRtree(polys), items) if polys else (None, None)
+
+    def _still_there(self, oid: int, pose) -> bool:
+        """Is the obstacle close enough to where the plan expects it?
+
+        Judged at the resolution the SE(2) route was planned at, because that is
+        the accuracy the route itself has: a body that has drifted less than one
+        cell while the robot was thinking is put back on the planned route by the
+        first sub-step, and one that has drifted further is somewhere else.
+        """
+        w = self._world_obstacle(oid)
+        if w is None:
+            return False
+        return (math.dist((w.x, w.y), (pose[0], pose[1])) <= self.cfg.se2_cell
+                and abs(geometry.wrap_dtheta(w.theta, pose[2]))
+                <= math.pi / self.cfg.se2_n_theta)
+
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
         for w in self.world:
             if w.oid == oid:
@@ -667,6 +769,7 @@ class OnlineNAMO:
 
     def _capture_frame(self, res: RunResult, node: int, label: str,
                        move_oid: Optional[int] = None):
+        self._frame_node = node
         if not self.cfg.save_frames:
             return
         perceived = set(self.belief.perceived.keys())
@@ -677,6 +780,7 @@ class OnlineNAMO:
             "robot": self.robot_xy,     # true position — off-node while holding an obstacle
             "track": list(res.robot_track),
             "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],
+            "world_moved": sorted(self.dynamics.actors),   # sent somewhere by the world
             "perceived": perceived,
             "estimated_difficulty": {
                 oid: value for oid, value in self.estimator.cache.items()

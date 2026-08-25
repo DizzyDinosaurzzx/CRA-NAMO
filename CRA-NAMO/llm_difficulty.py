@@ -222,6 +222,16 @@ class DifficultyEstimator:
         self.cache[oid] = difficulty
         return difficulty
 
+    def forget(self, oid: int):
+        """Drop the estimate for an obstacle that is no longer what it was.
+
+        Only the per-object entries: what a *material* costs has not changed, so
+        the material caches (and the API calls behind them) stay.
+        """
+        self.cache.pop(oid, None)
+        self.mu_rho_cache.pop(oid, None)
+        self.source_cache.pop(oid, None)
+
     def _heuristic(self, o: dict) -> float:
         mu_rho = material_mu_rho(o.get("material", "unknown"))
         return friction_force(mu_rho, _volume(o))
