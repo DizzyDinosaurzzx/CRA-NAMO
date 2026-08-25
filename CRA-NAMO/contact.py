@@ -1,5 +1,32 @@
-"""贴身搬运的机器人轨迹规划:障碍物移动期间机器人须保持物理接触,抓持点可沿表面滑动,按子步用动态规划选取。"""
+"""Robot–obstacle contact trajectory planning.
 
+The manipulation model is: the robot is a disc that must stay *physically in
+contact* with the obstacle for the whole time the obstacle is moving.  It may
+grip anywhere on the perimeter, so it can push (robot behind the motion) or
+pull (robot ahead of it) with no restriction on direction, and it may slide its
+grip point along the surface while the obstacle moves.
+
+Given the obstacle's SE(2) path, this module picks where the robot holds it at
+every sub-step so that
+
+  * the robot disc never overlaps a wall or another obstacle,
+  * the grip point moves continuously along the surface (no teleporting from
+    one side to the other),
+  * the total robot travel distance is minimal.
+
+Travel is charged at the same rate as ordinary driving (lambda [N] per metre),
+so the joules the robot spends carting itself around the obstacle land in the
+same cost function as the joules it spends overcoming the obstacle's friction.
+
+Discretisation
+--------------
+Candidate grip points ("stations") are sampled uniformly by arc length along
+the *offset curve* of the rectangle at distance ``robot_radius`` — four straight
+runs joined by four quarter arcs.  A station is a fixed point in the obstacle's
+local frame, so it rides along with both translation and rotation.  Choosing one
+station per manipulation sub-step is then a shortest-path problem over a
+(sub-step x station) lattice, solved exactly by dynamic programming.
+"""
 
 from __future__ import annotations
 
@@ -23,37 +50,50 @@ _MAX_STATIONS = 64
 
 @dataclass
 class ContactPlan:
-    """一次搬运中机器人每一步的位置。
+    """Where the robot is at every step of a manipulation.
 
-    robot_path 为一条连续折线:[起点] + [每个子步的抓持点] + [终点];
-    障碍物在 poses[i] 时机器人在 robot_path[move_offset + i],
-    前段是接近与绕行到抓持侧,后段是对称的撤离绕行。
+    ``robot_path`` is one continuous polyline:
+        [start] + [grip point per extended pose] + [end]
+    ``move_offset`` maps move-path indices onto it: the robot is at
+    ``robot_path[move_offset + i]`` while the obstacle is at ``poses[i]``.
+    The entries before ``move_offset`` are the approach plus any walk around the
+    stationary obstacle to reach the chosen grip side; the entries after the
+    push are the symmetric walk back out.
     """
     feasible: bool
     reason: str = ""
     robot_path: List[XY] = field(default_factory=list)
     move_offset: int = 0
-    travel: float = 0.0            # 整次搬运中机器人总行程 [m]
+    travel: float = 0.0            # total robot travel over the whole manipulation [m]
 
     def at(self, i: int) -> XY:
         return self.robot_path[self.move_offset + i]
 
     def leg_length(self, a: int, b: int) -> float:
-        """robot_path[a:b+1] 的折线长度(索引基于 robot_path,a <= b)。"""
+        """Length of robot_path[a:b+1] (indices into robot_path, a <= b)."""
         return sum(math.dist(self.robot_path[t], self.robot_path[t + 1])
                    for t in range(a, b))
 
 
-# --- 抓持站 ---
-def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
-    """与 l x d 矩形接触的机器人圆心位置。
+def idle_plan(robot_pos: XY, n_poses: int) -> ContactPlan:
+    """Degenerate plan used when contact is not required: the obstacle moves on
+    its own and the robot stays put. Shaped like a real plan — start, one entry
+    per pose, end — so the executor needs no special case, but every entry is the
+    same point, so it accrues no travel."""
+    return ContactPlan(True, "", [tuple(robot_pos)] * (max(1, n_poses) + 2), 1, 0.0)
 
-    返回障碍物局部系下的 (K, 2) 点列:按弧长等距、逆时针排列,
-    每点距矩形边界恰好为 r。
+
+# --- grip stations ---
+def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
+    """Robot centre positions in contact with an ``l`` x ``d`` rectangle.
+
+    Returns a (K, 2) array of points in the obstacle's local frame, ordered
+    counter-clockwise and equally spaced by arc length, each exactly ``r`` away
+    from the rectangle's boundary.
     """
     hl, hd = l / 2.0, d / 2.0
     quarter = 0.5 * math.pi * r
-    # 逆时针排列:右边、圆角、上边、圆角……
+    # counter-clockwise: right edge, corner, top edge, corner, ...
     segments = [
         ("line", (hl + r, -hd), (0.0, 1.0), d),
         ("arc", (hl, hd), 0.0, quarter),
@@ -70,10 +110,10 @@ def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray
 
     pts = np.empty((k, 2), dtype=float)
     step = perimeter / k
-    seg_i, seg_s = 0, 0.0          # 当前段索引及段内弧长位置
+    seg_i, seg_s = 0, 0.0          # current segment and how far into it we are
     for n in range(k):
         target = n * step
-        # 前进到包含 target 的段
+        # advance to the segment containing `target`
         acc = 0.0
         for si, seg in enumerate(segments):
             length = seg[3]
@@ -93,11 +133,14 @@ def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray
 
 
 def _unwrapped_angles(poses: Sequence[Pose]) -> np.ndarray:
-    """沿路径连续展开的朝向角。
+    """Continuous heading along the path.
 
-    SE(2) 规划器按模 pi 存朝向(矩形在 theta 与 theta+pi 的 footprint 相同),
-    但抓持点不满足这一等价:若直接跟踪存储角,索引自 pi 绕回 0 时机器人会被
-    甩到对面。逐段累加 wrap_dtheta 短转角即可保持在实际抓持的那一面。
+    The SE(2) planner stores orientation modulo pi, because a rectangle at theta
+    and at theta+pi has the same footprint. A grip point does not: the body
+    really did turn, and tracking the stored angle would slide the robot to the
+    opposite face the moment the index wraps from pi back to 0. Accumulating the
+    short-way delta — the same `wrap_dtheta` the swept volume and the rotation
+    cost use — keeps the grip on the face it is actually holding.
     """
     th = [float(poses[0][2])]
     for a, b in zip(poses, poses[1:]):
@@ -106,7 +149,7 @@ def _unwrapped_angles(poses: Sequence[Pose]) -> np.ndarray:
 
 
 def _world_positions(stations: np.ndarray, poses: Sequence[Pose]) -> np.ndarray:
-    """每个位姿下所有抓持站的世界坐标,形状 (T, K, 2)。"""
+    """(T, K, 2) world positions of every station at every pose."""
     th = _unwrapped_angles(poses)
     c, s = np.cos(th), np.sin(th)
     sx = stations[:, 0][None, :]
@@ -116,13 +159,15 @@ def _world_positions(stations: np.ndarray, poses: Sequence[Pose]) -> np.ndarray:
     return np.stack([x, y], axis=2)
 
 
-# --- 直线通行测试 ---
+# --- line-of-travel test ---
 def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
-    """机器人能否从 a 直线驶向 b。
+    """Can the robot drive straight from *a* to *b*?
 
-    墙体沿整段检查(free_geom 已按机器人半径收缩);可移动障碍物只检查
-    两端各去掉一个机器人半径的区段——端点是已知可达的位置,
-    接近末端的那个半径正是贴上障碍物的对接动作。
+    Walls are checked over the whole segment (``free_geom`` is the static free
+    space already eroded by the robot radius).  Movable obstacles are checked
+    over the segment trimmed by one robot radius at each end: both endpoints are
+    positions the robot is known to be able to occupy, and the last radius of an
+    approach is the docking move that ends flush against the obstacle.
     """
     seg = LineString([a, b])
     if not shapely.contains(free_geom, seg):
@@ -136,7 +181,7 @@ def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
     return not shapely.intersects(blocked_geom, inner)
 
 
-# --- 规划器 ---
+# --- planner ---
 def plan_contact(obs,
                  poses: Sequence[Pose],
                  robot_start: XY,
@@ -144,10 +189,13 @@ def plan_contact(obs,
                  free_geom,
                  others_inflated,
                  cfg) -> ContactPlan:
-    """为一次搬运规划机器人轨迹。
+    """Plan the robot's trajectory for one manipulation.
 
-    free_geom 为机器人圆心可达的静态自由区(静态自由空间收缩一个机器人半径);
-    others_inflated 为其他可移动障碍物禁止的圆心区(并集膨胀一个机器人半径),可为 None。
+    ``free_geom``       prepared polygon of robot-centre positions that clear the
+                        static walls (static free space eroded by the robot radius).
+    ``others_inflated`` prepared polygon of robot-centre positions forbidden by the
+                        *other* movable obstacles (their union inflated by the robot
+                        radius), or None.
     """
     if not poses:
         return ContactPlan(False, "empty move path")
@@ -157,19 +205,21 @@ def plan_contact(obs,
     stations = contact_stations(obs.l, obs.d, r, cfg.contact_station_spacing)
     k = len(stations)
 
-    # 单个子步内抓持点可沿表面滑过的弧长
+    # how far the grip may slide along the surface within one manipulation sub-step
     step_arc = (2.0 * (obs.l + obs.d) + 2.0 * math.pi * r) / k
-    # 向下取整而非四舍五入:取大会让每子步滑动超过 contact_max_slide;
-    # 至少允许移一站,否则粗糙采样会把抓持点彻底冻死
+    # floor, not round: rounding up would let the grip slide further per sub-step
+    # than contact_max_slide allows. One station is always permitted, otherwise a
+    # coarsely sampled perimeter would freeze the grip in place entirely.
     max_shift = max(1, int(cfg.contact_max_slide / max(step_arc, 1e-6)))
-    # 搬运前后预留绕行站数:直线被挡时仍能绕到背面
+    # room to walk around the stationary obstacle before and after the move, so
+    # the far side stays reachable even when the direct line to it is blocked
     pad = int(math.ceil(k / (2.0 * max_shift)))
 
     ext: List[Pose] = ([poses[0]] * pad) + list(poses) + ([poses[-1]] * pad)
     world = _world_positions(stations, ext)
     t_total = len(ext)
 
-    # --- 抓持可行性(向量化) ---
+    # --- grip feasibility (vectorised) ---
     flat_x = world[:, :, 0].ravel()
     flat_y = world[:, :, 1].ravel()
     ok = shapely.contains_xy(free_geom, flat_x, flat_y)
@@ -179,7 +229,8 @@ def plan_contact(obs,
     if not feas.any():
         return ContactPlan(False, "no reachable grip point on this obstacle")
 
-    # 障碍物自身阻挡接近与撤离绕行,但不阻挡抓持点(后者本就贴着它)
+    # the obstacle itself blocks the approach and the exit walk, but not
+    # the grip points (those are flush against it by construction)
     def _with_body(pose: Pose):
         body = obs.polygon_at(pose[0], pose[1], pose[2]).buffer(max(r - tol, 0.0))
         merged = body if others_inflated is None else others_inflated.union(body)
@@ -189,12 +240,15 @@ def plan_contact(obs,
     approach_blockers = _with_body(poses[0])
     exit_blockers = approach_blockers if len(poses) == 1 else _with_body(poses[-1])
 
-    # 参考点是路网点,而路网忽略可移动障碍物,可能正落在被搬障碍物底下:
-    # 从一个本就不可能站的位置无从校验驶入,该段的直线测试跳过,距离照常计费。
+    # The reference point is a roadmap position, and roadmap positions ignore
+    # movable obstacles — so it can lie *under* the very obstacle being moved.
+    # There is no drive-in to validate from a spot the robot could not be standing
+    # on in the first place; the distance is still charged, only the line test for
+    # that leg is meaningless and gets skipped.
     start_under = bool(shapely.intersects_xy(approach_blockers, *robot_start))
     end_under = bool(shapely.intersects_xy(exit_blockers, *robot_end))
 
-    # --- 进入代价 ---
+    # --- entry costs ---
     cost = np.full(k, _INF)
     for s in np.flatnonzero(feas[0]):
         p = (float(world[0, s, 0]), float(world[0, s, 1]))
@@ -204,7 +258,7 @@ def plan_contact(obs,
     if not np.isfinite(cost).any():
         return ContactPlan(False, "cannot reach any grip point on this obstacle")
 
-    # --- 动态规划 ---
+    # --- dynamic programming ---
     parent = np.full((t_total, k), -1, dtype=np.int64)
     idx = np.arange(k)
     shifts = range(-max_shift, max_shift + 1)
@@ -213,7 +267,7 @@ def plan_contact(obs,
         best = np.full(k, _INF)
         best_src = np.full(k, -1, dtype=np.int64)
         for shift in shifts:
-            # 滑过的每个站都必须在下一姿态可行
+            # every station the grip slides across must be free at the next pose
             slide_ok = np.ones(k, dtype=bool)
             span = range(0, shift + 1) if shift >= 0 else range(shift, 1)
             for e in span:
@@ -221,7 +275,7 @@ def plan_contact(obs,
             step = np.linalg.norm(np.roll(world[t + 1], -shift, axis=0) - world[t],
                                   axis=1)
             cand = np.where(slide_ok, cost + step, _INF)
-            cand = np.roll(cand, shift)          # 把源站 s 的代价散布到目标站 s+shift
+            cand = np.roll(cand, shift)          # scatter source s onto target s+shift
             upd = cand < best
             best[upd] = cand[upd]
             best_src[upd] = (idx[upd] - shift) % k
@@ -230,8 +284,8 @@ def plan_contact(obs,
             return ContactPlan(
                 False, "robot cannot stay in contact for the whole manipulation")
 
-    # --- 撤离代价 ---
-    # 候选按总代价升序,第一个能顺利驶出的即胜出
+    # --- exit costs ---
+    # candidates in ascending total cost; the first with a clear drive-out wins
     exit_dist = np.linalg.norm(world[-1] - np.asarray(robot_end), axis=1)
     total = cost + exit_dist
     chosen = -1
@@ -245,7 +299,7 @@ def plan_contact(obs,
     if chosen < 0:
         return ContactPlan(False, "robot cannot leave the obstacle after moving it")
 
-    # --- 回溯 ---
+    # --- backtrack ---
     seq = [chosen]
     for t in range(t_total - 1, 0, -1):
         seq.append(int(parent[t, seq[-1]]))

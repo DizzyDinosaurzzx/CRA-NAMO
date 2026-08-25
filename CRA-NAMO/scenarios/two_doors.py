@@ -1,12 +1,9 @@
-"""双门场景：隔墙留两道门，考验选门与轻障碍搬移的权衡。"""
-
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
 def create():
-    """构建双门场景。"""
     workspace = box(0, 0, 30, 20)
     walls = [
         StaticObstacle(box(14.5, 0.0, 15.5, 3.0), "wall_lo"),

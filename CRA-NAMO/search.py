@@ -1,4 +1,4 @@
-"""在增强路网上进行分支限界的最佳优先搜索"""
+"""Branch-and-bound best-first search on the augmented roadmap"""
 
 from __future__ import annotations
 import heapq
@@ -16,17 +16,16 @@ from llm_difficulty import DifficultyEstimator
 import contact
 import cost
 import manipulation
-import timing
 
 @dataclass
 class Plan:
     cost: float
     node_path: List[int]
-    actions: List[dict]                  # 按顺序排列的 move / remove 动作序列
+    actions: List[dict]                  # ordered sequence of 'move' / 'remove' actions
     expansions: int
 
 
-_MOVE_DIR_EPS = 1e-3    # 位移小于该值视作纯旋转，不构成移动方向
+_MOVE_DIR_EPS = 1e-3    # below this displacement a drop pose carries no move direction
 _INFLATED_CACHE_MAX = 64
 
 
@@ -47,23 +46,22 @@ class Planner:
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
         self._inflated_cache: Dict[bytes, object] = {}
 
-    # --- 规划 ---
-    def plan(self, start_node: int, goal_node: int,
-             heading: Optional[float] = None) -> Optional[Plan]:
-        """从 start_node 出发的最优路径；heading 仅在 time_importance>0 时影响驶入首边的转向代价"""
+    # --- planning ---
+    def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
         rm = self.roadmap
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
         self._robot_pos = rm.nodes[start_node]
 
-        # 有新障碍暴露时各障碍物的周围几何已改变，此前的搬移方案缓存全部失效
+        # Clear persistent cache if new obstacles were revealed since the last
+        # plan call — that changes the others_polys geometry for every removal
+        # and would invalidate previously cached move plans.
         if self.belief.newly_revealed:
             self._persistent_removal_cache.clear()
 
         def h(node):
-            # 任意 time_importance 下均保证可采纳：直线是剩余距离下界，以 v_max 行驶也给出剩余时间下界
             x, y = rm.nodes[node]
-            return cost.search_motion_cost(cfg, math.hypot(x - gx, y - gy))
+            return cost.motion_cost(cfg, math.hypot(x - gx, y - gy))
 
         counter = itertools.count()
         open_heap = [(h(start_node), 0.0, next(counter), start_node)]
@@ -76,7 +74,7 @@ class Planner:
         while open_heap:
             f, bias, _, node = heapq.heappop(open_heap)
             g = g_best.get(node, math.inf)
-            if f > incumbent + 1e-9:            # 分支限界剪枝
+            if f > incumbent + 1e-9:            # branch-and-bound pruning
                 continue
             if node == goal_node:
                 incumbent = g
@@ -86,24 +84,10 @@ class Planner:
             if expansions > cfg.max_expansions:
                 break
 
-            # 起点用真实朝向：step_execute_edges=1，首边是唯一真正行驶的边，
-            # 按真实朝向为其转向定价可避免连续规划来回抖动。深层节点由父节点推算，
-            # g_best 只按节点记录（与边中点的折衷同理）；代价非负，h 保持可采纳。
-            here = rm.nodes[node]
-            if node == start_node:
-                h_in = heading
-            else:
-                prev = parent[node][0]
-                h_in = (timing.heading_of(rm.nodes[prev], here)
-                        if prev is not None else None)
-
             for v, key, length in rm.neighbors(node):
                 step_cost, removals = self._edge_cost(key)
                 if step_cost == math.inf:
                     continue
-                if h_in is not None:
-                    step_cost += cost.search_turn_cost(cfg, timing.turn_between(
-                        h_in, timing.heading_of(here, rm.nodes[v])))
                 ng = g + step_cost
                 if ng >= g_best.get(v, math.inf) - 1e-12:
                     continue
@@ -137,10 +121,14 @@ class Planner:
         return Plan(cost=round(incumbent, 4), node_path=node_path,
                     actions=actions, expansions=expansions)
 
-    # --- 边代价 ---
+    # --- edge cost ---
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
-        """单条边的通行代价，含清理阻挡物；能耗与时间如何权衡由 cost.py 决定，此处只决定挪什么"""
-        base = cost.search_motion_cost(self.cfg, self.roadmap.edge_len[key])
+        """Cost of traversing one edge, including clearing whatever blocks it.
+
+        How the strategies weigh obstacle work lives in `cost.strategy_weights`;
+        this function only decides *what* has to be moved.
+        """
+        base = cost.motion_cost(self.cfg, self.roadmap.edge_len[key])
         blockers = self.belief.blockers_of(key)
         if not blockers:
             return base, []
@@ -151,13 +139,12 @@ class Planner:
             feasible, work, drop, move_dist, move_path, cplan = self._removal(oid, key)
             if not feasible:
                 return math.inf, []
-            risk_penalty = self.belief.get_risk_penalty(oid)
-            extra += cost.removal_cost(self.cfg, work, cplan.travel, risk_penalty)
+            extra += cost.removal_cost(self.cfg, work, cplan.travel)
             removals.append((oid, drop, move_dist, work, move_path, cplan))
         return base + extra, removals
 
     def _removal(self, oid: int, key: EdgeKey):
-        """计算挪开障碍物所需的功与放置位姿，并规划其 SE(2) 路线"""
+        """Compute work and drop pose needed to move an obstacle aside, also plan its SE(2) route"""
         obs = self.belief.obstacle(oid)
         cache_key = (move_signature(obs), key)
         if cache_key in self._persistent_removal_cache:
@@ -188,16 +175,19 @@ class Planner:
         bounds = self.roadmap.workspace.bounds
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
-        # 机器人从待通行边出发做一次绕行操作再回到该边；用边中点代替实际所在端点
-        # （二者至多相距 conn_radius），使结果可按边缓存而无需区分方向。
+        # The robot performs the manipulation as an excursion from the edge it is
+        # about to traverse and returns to it afterwards. The edge midpoint stands
+        # in for whichever of its two endpoints the robot is actually on — they are
+        # at most conn_radius apart — which keeps this result cacheable per edge
+        # instead of per (edge, direction).
         u, v = key
         mid = tuple((a + b) / 2.0 for a, b in
                     zip(self.roadmap.nodes[u], self.roadmap.nodes[v]))
         contact_memo: Dict[int, tuple] = {}
 
         def _contact_for(poses):
-            # plan_anywhere 会把同一个 list 对象传给校验器并原样传回结果，
-            # 保留其引用使 id 保持唯一，备忘录才不会因对象被回收而失效
+            # plan_anywhere hands the same list object to the validator and back
+            # out in the result; hold on to it so the id stays unique
             hit = contact_memo.get(id(poses))
             if hit is not None:
                 return hit[1]
@@ -207,32 +197,35 @@ class Planner:
             contact_memo[id(poses)] = (poses, plan)
             return plan
 
-        rejected: List[str] = []
-
-        def path_accept(poses):
-            plan = _contact_for(poses)
-            if not plan.feasible:
-                rejected.append(plan.reason)
-            return plan.feasible
-
-        se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
-            obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
-            robot_pos, self.cfg, others_polys=others,
-            goal_accept=self._goal_filter(obs), path_accept=path_accept)
-        if se2_feasible and se2_path:
-            cplan = _contact_for(se2_path)
-            if cplan.feasible:
-                feasible = True
-                move_path = se2_path
-                drop = se2_goal
-                move_dist = se2_cost
-            else:
-                self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
-        elif rejected:
-            # 障碍物本身有处可去、只是机器人无法伴随护送——记录是哪一半约束不满足
-            counts = Counter(rejected).most_common(2)
-            self.cfg.log(f"[contact] oid={oid} rejected {len(rejected)} path(s): "
-                         + "; ".join(f"{why} x{n}" for why, n in counts))
+        if self.cfg.se2_use_planner:
+            path_accept = None
+            rejected: List[str] = []
+            if self.cfg.contact_required:
+                def path_accept(poses):
+                    plan = _contact_for(poses)
+                    if not plan.feasible:
+                        rejected.append(plan.reason)
+                    return plan.feasible
+            se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
+                obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
+                robot_pos, self.cfg, others_polys=others,
+                goal_accept=self._goal_filter(obs), path_accept=path_accept)
+            if se2_feasible and se2_path:
+                cplan = (_contact_for(se2_path) if self.cfg.contact_required
+                         else contact.idle_plan(mid, len(se2_path)))
+                if cplan.feasible:
+                    feasible = True
+                    move_path = se2_path
+                    drop = se2_goal
+                    move_dist = se2_cost
+                else:
+                    self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
+            elif rejected:
+                # the obstacle could go somewhere, the robot just could not
+                # escort it there — say which half of the constraint bit
+                counts = Counter(rejected).most_common(2)
+                self.cfg.log(f"[contact] oid={oid} rejected {len(rejected)} path(s): "
+                             + "; ".join(f"{why} x{n}" for why, n in counts))
 
         if not feasible:
             work = math.inf
@@ -244,7 +237,12 @@ class Planner:
         return res
 
     def _others_inflated(self, others):
-        """其他可动障碍物对应的机器人中心禁区；按 WKB 内容寻址缓存——同一障碍集合跨边反复出现，而膨胀正是最耗时的一步"""
+        """Robot-centre positions ruled out by the *other* movable obstacles.
+
+        Content-addressed by WKB: the union is rebuilt from scratch for every
+        removal candidate, but the same set of obstacles recurs constantly across
+        edges and cycles, and inflating it is the expensive half.
+        """
         if others is None or others.is_empty:
             return None
         key = others.wkb
@@ -260,7 +258,8 @@ class Planner:
         return geom
 
     def _goal_filter(self, obs):
-        """拒绝使该障碍物堵住更多边的放置位姿，或逆转其上次移动方向的位姿"""
+        """Reject drop poses that leave the obstacle blocking more edges than it does
+        now, or that reverse the direction this obstacle was last moved in."""
         base_blocked = self.roadmap.count_blocked_edges(obs.polygon)
         last_dir = self.belief.move_dir.get(obs.oid)
 
@@ -270,7 +269,7 @@ class Planner:
             if last_dir is None:
                 return True
             dx, dy = goal[0] - obs.x, goal[1] - obs.y
-            if math.hypot(dx, dy) <= _MOVE_DIR_EPS:     # 纯旋转没有方向
+            if math.hypot(dx, dy) <= _MOVE_DIR_EPS:     # pure rotation has no direction
                 return True
             return dx * last_dir[0] + dy * last_dir[1] >= 0.0
 

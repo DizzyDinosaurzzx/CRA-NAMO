@@ -1,5 +1,15 @@
-"""仿真世界与 SE(2) 规划器之间的适配层:扫掠体计算与 plan_move_se2 封装。"""
+"""Adapter between the simulated world and the SE(2) planner.
 
+Two jobs, and only two:
+
+  * **swept volumes** — the region a body sweeps as it moves from one pose to the
+    next, which is what collision checking actually tests against;
+  * **plan_move_se2** — wrap the grid planner in world terms (shapely polygons,
+    obstacles, config) and validate the routes it returns.
+
+Geometric primitives live in `geometry`, cost formulas in `cost`, the search
+itself in `se2_planner`. This module owns none of those.
+"""
 
 from __future__ import annotations
 import math
@@ -12,16 +22,21 @@ import se2_planner
 from config import Config
 from obstacle import MovableObstacle
 
-# --- 扫掠体 ---
+# --- swept volumes ---
 
-_SWEPT_MAX_DTHETA = math.pi / 12.0  # 基准角步长,对应约 1 m² 障碍物(半对角线约 0.5 m)
+_SWEPT_MAX_DTHETA = math.pi / 12.0  # baseline for a ~1 m² obstacle (half-diag ≈ 0.5 m)
 _SWEPT_REF_HALF_DIAG = 0.5
 
 def swept_between(obs: MovableObstacle, a, b) -> Polygon:
-    """计算 *obs* 从位姿 *a* 运动到 *b* 的扫掠区域。
+    """Region swept as *obs* moves from pose *a* to pose *b*.
 
-    凸包以弦代弧会漏掉弓高 R(1 - cos(dtheta/2)),它随物体尺寸增大,
-    故角步长按半对角线长度反比缩放(小物体保持 15 度,长物体细分)。
+    Interpolates the motion and unions the convex hull of each consecutive pair.
+    A hull approximates the arc of a rotation by its chord, so the bulge between
+    chord and arc is missed — a false negative, exactly the kind that makes a
+    path look safe at planning time and graze something at execution time. The
+    bulge is `R(1 - cos(dtheta/2))` and scales with body size, so the angular
+    step is scaled inversely: small parts keep a coarse 15 degrees, long ones get
+    subdivided until their missed bulge is comparable.
     """
     ax, ay, ath = a
     bx, by, bth = b
@@ -41,12 +56,12 @@ def swept_between(obs: MovableObstacle, a, b) -> Polygon:
 
 def swept_region(obs: MovableObstacle, nx: float, ny: float,
                  theta: Optional[float] = None) -> Polygon:
-    """计算 *obs* 从当前位姿移动到指定位姿的扫掠区域。"""
+    """Region swept moving *obs* from where it is now to the given pose."""
     return swept_between(obs, (obs.x, obs.y, obs.theta),
                          (nx, ny, obs.theta if theta is None else theta))
 
 
-# --- 规划器缓存 ---
+# --- planner cache ---
 
 _MAX_SE2_STATES = 200_000
 _PLANNER_CACHE: Dict[tuple, se2_planner.SE2Planner] = {}
@@ -88,10 +103,10 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
            _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
-        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # 标记为最近使用
+        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # mark as most recently used
         return planner
 
-    # 静态墙体与其他可移动障碍物,合并为不可通行区域
+    # static walls + other movable obstacles, together as impassable region
     walls = [so.polygon for so in static_obstacles] + _polygon_parts(others_polys)
     planner = se2_planner.build_se2_planner(
         wall_polys=walls,
@@ -108,17 +123,18 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
     )
     _PLANNER_CACHE[key] = planner
     while len(_PLANNER_CACHE) > _PLANNER_CACHE_MAX:
-        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # 淘汰最久未使用的
+        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # evict least recently used
     return planner
 
 
-# --- 路径校验 ---
+# --- path validation ---
 
 def path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
-    """整条路径上物体是否与所有阻挡物保持净空。
+    """Does the body clear every blocker along the whole path?
 
-    使用与执行器相同的 geometry.CONTACT_AREA_EPS 容差:规划若比执行宽松,
-    产生的路线会被执行器拒绝。
+    Uses the shared `geometry.CONTACT_AREA_EPS`, the same tolerance the executor
+    applies — a planner that is more permissive than the executor produces routes
+    the executor then refuses.
     """
     if not path or len(path) < 2 or not blockers:
         return True
@@ -135,27 +151,29 @@ def path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
     return True
 
 def blocker_index(static_obstacles, others_polys):
-    """多边形及其包围盒,用于廉价的 AABB 预筛。"""
+    """Polygons plus their bounding boxes, for cheap AABB pre-filtering."""
     polys = [so.polygon for so in static_obstacles] + _polygon_parts(others_polys)
     return [(p, p.bounds) for p in polys]
 
 
 def plan_move_se2(
     obs: MovableObstacle,
-    must_clear_polys,                   # 必须清空的走廊多边形
-    static_obstacles,                   # StaticObstacle 列表
+    must_clear_polys,                   # corridor polygons that must be cleared
+    static_obstacles,                   # list of StaticObstacle
     bounds: Tuple[float, float, float, float],
     robot_pos: Tuple[float, float],
     cfg: Config,
-    others_polys=None,                  # 需避让的其他可移动障碍物
-    goal_accept=None,                   # (goal_pose) -> bool, 过滤候选放置位姿
-    path_accept=None,                   # (poses) -> bool, 对整条路径的额外硬约束
+    others_polys=None,                  # other movable obstacles to avoid
+    goal_accept=None,                   # (goal_pose) -> bool, filters candidate drop poses
+    path_accept=None,                   # (poses) -> bool, extra hard constraint on the whole path
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
-    """规划把 *obs* 挪到哪里才能不再挡路,以及怎么挪过去。"""
+    """Plan where to put *obs* so it stops blocking, and how to get it there."""
+    if not cfg.se2_use_planner:
+        return (False, None, math.inf, None)
     try:
         planner = _get_planner(obs, static_obstacles, bounds, robot_pos,
                                cfg, others_polys)
-        # 每次重设走廊:每个周期被堵的边不同
+        # reset corridor every time: the blocked edge differs per cycle
         corridor_verts = [geometry.polygon_exterior_coords(p)
                           for p in must_clear_polys] if must_clear_polys else []
         planner.set_corridor([c for c in corridor_verts if len(c) >= 3])
@@ -165,7 +183,8 @@ def plan_move_se2(
         def _validate(poses):
             if not path_is_clear_against(obs, poses, blockers):
                 return False
-            # 障碍物能过去还不够,还须机器人全程贴身护送才算解
+            # the obstacle can go there, but only counts as a solution if the
+            # robot can escort it the whole way while staying in contact
             return path_accept is None or path_accept(poses)
 
         result = planner.plan_anywhere((obs.x, obs.y, obs.theta),

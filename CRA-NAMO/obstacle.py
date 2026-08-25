@@ -1,18 +1,21 @@
-"""障碍物数据结构定义。"""
+"""Obstacle data structures"""
 
 from __future__ import annotations
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 from shapely.geometry import Polygon
 
 import geometry
 
-if TYPE_CHECKING:
-    from drift import DriftPolicy
-
 def _rect_polygon(x: float, y: float, l: float, d: float, theta: float) -> Polygon:
-    """由 geometry.rect_corners 生成矩形角点，再包装成 shapely 多边形；一处实现两种表示。"""
+    """Shapely view of the same rectangle `geometry.rect_corners` returns.
+
+    One implementation of "rectangle at a pose", two representations of it —
+    numpy corners for the grid planner, a shapely polygon for everything that
+    does set operations. They used to be two separate implementations that had to
+    be kept in agreement by hand.
+    """
     return Polygon(geometry.rect_corners(x, y, l, d, theta))
 
 @dataclass
@@ -26,21 +29,14 @@ class MovableObstacle:
     y: float
     l: float
     d: float
-    h: float = 1.0                 # 高度，用于体积与遮挡推理
+    h: float = 1.0                 # height, used for volume and occlusion reasoning
     theta: float = 0.0
-    material: str = "unknown"      # 材质语义标签，供 LLM 推理
-    difficulty: float = 1.0        # 真实滑动阻力 f = mu*rho*V*g [N]；做功 W = difficulty * 移动距离 [J]
-    # 场景相关的次生风险描述，供 risk.py 的风险评估读取（例如"地震后建筑，承重
-    # 柱，移位可能引发二次坍塌"）；只在 config.risk_assessment_enabled=True 时
-    # 才会被用到，默认空字符串对现有场景零影响。
-    context: str = ""
+    material: str = "unknown"      # semantic label for LLM reasoning
+    difficulty: float = 1.0        # true sliding resistance f = mu*rho*V*g [N]; W = difficulty * distance moved [J]
     oid: int = -1
 
-    # 运行时状态
-    removed: bool = False          # 是否已被实际挪开
-
-    # 自主运动：与机器人推拉(manip_/move_)无关，地图自己会变的口子，见 drift.py
-    drift: Optional["DriftPolicy"] = None
+    # runtime flags
+    removed: bool = False          # has been physically moved out of the way
 
     def __post_init__(self):
         if self.difficulty < 0:
@@ -62,20 +58,19 @@ class MovableObstacle:
         return (self.x, self.y)
 
     def perceived_copy(self) -> "MovableObstacle":
-        """返回用于信念追踪的副本，difficulty 置为 NaN。"""
+        """Return a copy for Belief tracking, with difficulty set to NaN"""
         return MovableObstacle(
             x=self.x, y=self.y, l=self.l, d=self.d, h=self.h, theta=self.theta,
-            material=self.material, difficulty=math.nan, context=self.context,
-            oid=self.oid,
+            material=self.material, difficulty=math.nan, oid=self.oid,
         )
 
     def polygon_at(self, x: float, y: float, theta: Optional[float] = None) -> Polygon:
         return _rect_polygon(x, y, self.l, self.d,
                              self.theta if theta is None else theta)
 
-    # --- 观测 ---
+    # --- observation ---
     def observation(self) -> dict:
-        """感知时对外暴露的障碍物信息。"""
+        """Information revealed upon perception"""
         return {
             "oid": self.oid,
             "x": round(self.x, 2), "y": round(self.y, 2),
@@ -83,7 +78,6 @@ class MovableObstacle:
             "area": round(self.area, 2),
             "volume": round(self.volume, 2),
             "material": self.material,
-            "context": self.context,
         }
 
     def __repr__(self):

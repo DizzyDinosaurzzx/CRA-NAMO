@@ -1,5 +1,3 @@
-"""基于材料锚点表与 LLM 的障碍物推移难度估计。"""
-
 from __future__ import annotations
 import os
 import re
@@ -8,22 +6,29 @@ from typing import Dict
 import requests
 from config import Config
 
-# 难度 = 推动障碍物需克服的滑动摩擦力 f = mu*m*g = (mu*rho)*V*g [N]，
-# V = l*d*h 为包围盒体积；故 rho 取体密度（总质量/包围盒体积），轮式物体 mu 取滚动阻力系数
-G = 9.81                       # 重力加速度 [m/s^2]
+# Difficulty is the sliding friction force that resists pushing the obstacle:
+#
+#     difficulty = f = mu * m * g = (mu * rho) * V * g        [N]
+#
+# with V = l * d * h the bounding-box volume. Because V is the bounding box and
+# not the solid volume, rho is a *bulk* density (total mass / bounding volume),
+# so a mostly-empty shelf is much lighter per cubic metre than solid concrete.
+# Wheeled objects use an effective rolling-resistance coefficient for mu, which
+# is why a cart is far easier to move than its mass alone suggests.
+G = 9.81                       # gravitational acceleration [m/s^2]
 
-# 对地面的滑动摩擦系数（轮式为滚动阻力系数）。
+# Sliding friction coefficient against the floor (rolling resistance if wheeled).
 MATERIAL_MU: Dict[str, float] = {
     "styrofoam_box": 0.35,
     "foam_mat": 0.50,
     "cardboard_box": 0.35,
-    "empty_cart": 0.02,        # 轮式
+    "empty_cart": 0.02,        # wheels
     "plastic_chair": 0.40,
     "trash_bin": 0.40,
     "stool": 0.40,
     "chair": 0.45,
     "empty_shelf": 0.45,
-    "cart": 0.03,              # 轮式，载重
+    "cart": 0.03,              # wheels, loaded
     "wooden_table": 0.40,
     "wooden_crate": 0.45,
     "shelf": 0.45,
@@ -38,15 +43,15 @@ MATERIAL_MU: Dict[str, float] = {
     "industrial_machine": 0.50,
     "unknown": 0.40,
 }
-# 体密度 [kg/m^3] = 总质量 / 包围盒体积 (l*d*h)。
+# Bulk density [kg/m^3] = total mass / bounding-box volume (l * d * h).
 MATERIAL_RHO: Dict[str, float] = {
-    # --- 极轻 ---
-    "styrofoam_box": 15.0,     # EPS 泡沫
+    # --- very light ---
+    "styrofoam_box": 15.0,     # EPS foam
     "plastic_chair": 22.0,
     "wooden_table": 26.0,
     "foam_mat": 30.0,
     "chair": 31.0,
-    # --- 轻 ---
+    # --- light ---
     "empty_shelf": 35.0,
     "cardboard_box": 40.0,
     "trash_bin": 42.0,
@@ -54,28 +59,28 @@ MATERIAL_RHO: Dict[str, float] = {
     "stool": 50.0,
     "sofa": 52.0,
     "wooden_crate": 60.0,
-    # --- 中等 ---
+    # --- medium ---
     "cabinet": 100.0,
-    "cart": 150.0,             # 载重
-    "shelf": 167.0,            # 载重
+    "cart": 150.0,             # loaded
+    "shelf": 167.0,            # loaded
     "pallet": 174.0,
-    # --- 重 ---
-    "steel_shelf": 300.0,      # 载重
+    # --- heavy ---
+    "steel_shelf": 300.0,      # loaded
     "filing_cabinet": 308.0,
     "loaded_pallet": 434.0,
     "industrial_machine": 700.0,
     "steel_safe": 800.0,
-    # --- 很重 ---
-    "concrete_block": 2400.0,  # 实心混凝土
-    # --- 兜底 ---
+    # --- very heavy ---
+    "concrete_block": 2400.0,  # solid concrete
+    # --- fallback ---
     "unknown": 100.0,
 }
-# mu*rho [kg/m^3]——估计器实际使用的材料系数。
+# mu * rho [kg/m^3] -- the per-material coefficient the estimator works with.
 MATERIAL_MU_RHO: Dict[str, float] = {
     name: round(MATERIAL_MU[name] * MATERIAL_RHO[name], 4)
     for name in MATERIAL_RHO
 }
-# 各材料典型高度，用作场景中的真实 h。
+# Typical height per material, used as the ground-truth h in the scenarios.
 MATERIAL_HEIGHT: Dict[str, float] = {
     "styrofoam_box": 1.0,
     "foam_mat": 0.1,
@@ -101,7 +106,7 @@ MATERIAL_HEIGHT: Dict[str, float] = {
     "industrial_machine": 1.6,
     "unknown": 1.0,
 }
-# 同义词表
+# Synonym table
 MATERIAL_ALIASES: Dict[str, str] = {
     "box": "cardboard_box",
     "carton": "cardboard_box",
@@ -123,7 +128,7 @@ PROMPT_ANCHORS = tuple(
 
 _NON_WORD = re.compile(r"[^a-z0-9]+")
 
-def _normalise(name) -> str:  # 规范化材料名
+def _normalise(name) -> str:  # normalise material name
     return _NON_WORD.sub("_", str(name).strip().lower()).strip("_")
 
 
@@ -167,7 +172,7 @@ def material_height(name) -> float:
     return _lookup(MATERIAL_HEIGHT, name)
 
 def friction_force(mu_rho: float, volume: float) -> float:
-    """f = mu*rho*V*g [N]——每米推移需克服的阻力。"""
+    """f = mu * rho * V * g  [N] -- the push resistance charged per metre."""
     return mu_rho * volume * G
 
 class DifficultyEstimator:
@@ -184,8 +189,8 @@ class DifficultyEstimator:
         self.calls = 0
         self.mode = "deepseek" if self.api_key else "heuristic"
 
-    # --- 公开接口 ---
-    def estimate(self, obs_obs: dict) -> float:  # 由感知材料估计难度
+    # --- Public interface ---
+    def estimate(self, obs_obs: dict) -> float:  # estimate difficulty from perceived material
         oid = obs_obs["oid"]
         if oid in self.cache:
             self.object_cache_hits += 1
@@ -222,12 +227,12 @@ class DifficultyEstimator:
         self.cache[oid] = difficulty
         return difficulty
 
-    # --- 启发式方法 ---
+    # --- Heuristic method ---
     def _heuristic(self, o: dict) -> float:
         mu_rho = material_mu_rho(o.get("material", "unknown"))
         return friction_force(mu_rho, _volume(o))
 
-    # --- LLM 估计 mu*rho ---
+    # --- LLM mu*rho estimation ---
     def _build_prompt(self, o: dict) -> str:
         material = _normalise(o.get("material", "unknown"))
         canonical = _canonical_anchor(material)
@@ -306,8 +311,10 @@ class DifficultyEstimator:
             "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
                          else "disabled"},
         }
-        # 未设置时整个省略：上限低于推理长度时会得到空内容且 finish_reason='length'，
-        # 被当作"无数字"而静默退回启发式
+        # Omitted entirely when unset: a cap below the reasoning length does not
+        # truncate the answer, it returns an empty content with
+        # finish_reason='length', which reads here as "no number" and silently
+        # degrades to the heuristic.
         if self.cfg.llm_max_tokens:
             body["max_tokens"] = int(self.cfg.llm_max_tokens)
         for attempt in range(self.cfg.llm_max_retries + 1):
@@ -332,7 +339,9 @@ class DifficultyEstimator:
                     continue
                 choice = data["choices"][0]
                 text = choice.get("message", {}).get("content") or ""
-                # 取最后一个数字：推理式回复可能先复述 mu 与 rho 再给乘积，最后的数才是答案
+                # Last number, not the first: a reasoning reply may restate mu
+                # and rho before committing to their product, and it is the
+                # final figure that answers the question.
                 nums = re.findall(
                     r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?",
                     text,
