@@ -16,6 +16,8 @@ from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
+import risk
+from risk import RiskEstimator
 from search import Planner, move_signature
 import cost
 import geometry
@@ -32,6 +34,8 @@ class RunResult:
     walk_cost: float = 0.0                  # motion cost = λ × total travel distance
     manip_walk_cost: float = 0.0            # part of walk_cost spent escorting obstacles
     work_cost: float = 0.0                  # manipulation cost = Σ(true difficulty × distance moved)
+    risk_cost: float = 0.0                  # R: one surcharge per obstacle moved, by risk level
+    risk_levels: dict = field(default_factory=dict)   # oid -> level charged for
     T: float = 0.0                          # simulated time elapsed = move_time + plan_time [s]
     move_time: float = 0.0                  # of which spent driving and turning [s]
     cycles: int = 0                         # number of replan cycles
@@ -74,7 +78,11 @@ class OnlineNAMO:
         self.goal_point = self.roadmap.nodes[self.goal_node]
 
         self.estimator = DifficultyEstimator(cfg)
-        self.belief = Belief(self.roadmap, cfg)     # robot partial-observability belief
+        self.risk = RiskEstimator(cfg)
+        # the belief owns the risk estimator: assessment is triggered by seeing
+        # and by touching, both of which happen in there
+        self.belief = Belief(self.roadmap, cfg, self.risk)
+        self._risk_charged: set = set()             # oids whose surcharge is already paid
         self._plan_paths: List[dict] = []           # all currently planned paths (for per-frame visualisation)
         self.failed_moves: set = set()
         # true robot position. It equals the current roadmap node between actions,
@@ -125,7 +133,7 @@ class OnlineNAMO:
         self._capture_frame(res, node, "start")
 
         planner = Planner(self.roadmap, self.belief, self.estimator, cfg,
-                          self.failed_moves)
+                          self.failed_moves, self.risk)
 
         for cycle in range(cfg.max_replans):
             t0 = time.time()
@@ -154,12 +162,25 @@ class OnlineNAMO:
                     obs = self.belief.obstacle(act["oid"])
                     # pre-move touch sensing: learn the true difficulty of this obstacle.
                     # Moving is itself contact, so the moved obstacle is always revealed.
+                    risk_before = self.risk.level_of(act["oid"])
                     touched = self.belief.touch_check(self.robot_xy, self.world, cfg)
                     if self.belief.reveal_by_interaction(act["oid"], self.world):
                         touched.append(act["oid"])
                     if touched:
                         self._capture_frame(
                             res, node, f"touch revealed difficulty of {touched}")
+                    # Touching re-assesses the risk. If it came back worse than it
+                    # looked from a distance, this plan was chosen against a
+                    # belief that no longer holds — drop it and think again rather
+                    # than shove something the robot now knows it should not.
+                    risk_after = self.risk.level_of(act["oid"])
+                    if (risk_before is not None
+                            and risk.higher(risk_before, risk_after) != risk_before):
+                        self._capture_frame(
+                            res, node,
+                            f"contact re-rated {act['oid']} {risk_before} -> "
+                            f"{risk_after} -> replan")
+                        break
                     # escort the obstacle along its SE2 path, staying in contact
                     move_success, hits, executed_dist, new_node = \
                         self._execute_move(act["oid"], obs, act, res, node, cfg)
@@ -173,6 +194,7 @@ class OnlineNAMO:
                         executed_work = cost.manipulation_work(true_diff, executed_dist)
                         res.work_cost += executed_work
                         res.J += executed_work
+                        self._charge_risk(res, act["oid"])
                         if act["oid"] not in res.removed:
                             res.removed.append(act["oid"])
                     elif not move_success and hits is not None:
@@ -237,7 +259,8 @@ class OnlineNAMO:
         """Close the books. Both ways out of the loop come through here, so a run
         that gave up reports the same fields as one that reached the goal."""
         res.success = (node == self.goal_node)
-        res.C = round(cost.combine(self.cfg, res.J, self.clock), 4)
+        res.C = round(cost.combine(self.cfg, res.J, self.clock) + res.risk_cost, 4)
+        res.risk_cost = round(res.risk_cost, 4)
         res.J = round(res.J, 4)
         res.walk_cost = round(res.walk_cost, 4)
         res.manip_walk_cost = round(res.manip_walk_cost, 4)
@@ -260,8 +283,6 @@ class OnlineNAMO:
 
     def _world_collision(self, oid: int, nx: float, ny: float, theta: float,
                          tree=None, tree_items=None):
-        if not self.cfg.check_obstacle_collision:
-            return []
         mover = self._world_obstacle(oid)
         end_poly = mover.polygon_at(nx, ny, theta)
         swept = manipulation.swept_region(mover, nx, ny, theta)
@@ -298,21 +319,19 @@ class OnlineNAMO:
         return hits
 
     def _handle_move_collision(self, res: RunResult, node: int, oid: int, hits):
-        cfg = self.cfg
+        """Record what an obstacle ran into, without naming it.
+
+        A collision reveals that *something* is there, not what it is: the region
+        of overlap goes into the belief as an anonymous contact, and the obstacle
+        behind it stays unidentified until the robot actually sees it.
+        """
         for oid_hit, region in hits:
             if oid_hit is None:
                 continue      # hit wall: walls are known static geometry, no new info to register
-            if cfg.full_reveal_on_contact:
-                self.belief.force_reveal(self._world_obstacle(oid_hit))
-            else:
-                self.belief.register_contact(region)
+            self.belief.register_contact(region)
         hit_oids = sorted(o for o, _ in hits if o is not None)
-        if not hit_oids:
-            label = f"move {oid} hit a wall -> replan"
-        elif cfg.full_reveal_on_contact:
-            label = f"move {oid} blocked by {hit_oids} -> replan"
-        else:
-            label = f"move {oid} hit unknown obstruction -> replan"
+        label = (f"move {oid} hit a wall -> replan" if not hit_oids
+                 else f"move {oid} hit unknown obstruction -> replan")
         self._capture_frame(res, node, label)
 
     @staticmethod
@@ -330,6 +349,24 @@ class OnlineNAMO:
         res.J += charge
         if in_contact:
             res.manip_walk_cost += charge
+
+    def _charge_risk(self, res: RunResult, oid: int):
+        """Bill the risk surcharge for disturbing this obstacle, once and once only.
+
+        By the time this runs the robot has necessarily touched the obstacle, so
+        the level charged is the post-contact one — the first-sight verdict only
+        ever steered the planner.
+        """
+        if oid in self._risk_charged:
+            return
+        self._risk_charged.add(oid)
+        level = self.risk.level_of(oid)
+        charge = cost.risk_cost(self.cfg, level)
+        if charge <= 0.0:
+            res.risk_levels[oid] = level
+            return
+        res.risk_cost += charge
+        res.risk_levels[oid] = level
 
     def _advance_clock(self, res: RunResult, seconds: float, moving: bool = True):
         """Let `seconds` of simulated time pass. Motion and thinking share one clock."""
@@ -449,19 +486,18 @@ class OnlineNAMO:
         # scans on every sub-step of the manipulation trajectory.
         tree = None
         tree_items = None
-        if cfg.check_obstacle_collision:
-            polys = []
-            items = []
-            for w in self.world:
-                if w.oid != oid:
-                    polys.append(w.polygon)
-                    items.append((w.oid, w.polygon))
-            for so in self.static_obstacles:
-                polys.append(so.polygon)
-                items.append((None, so.polygon))
-            if polys:
-                tree = STRtree(polys)
-                tree_items = items
+        polys = []
+        items = []
+        for w in self.world:
+            if w.oid != oid:
+                polys.append(w.polygon)
+                items.append((w.oid, w.polygon))
+        for so in self.static_obstacles:
+            polys.append(so.polygon)
+            items.append((None, so.polygon))
+        if polys:
+            tree = STRtree(polys)
+            tree_items = items
 
         # --- approach ---
         reached, hits, stop = self._walk_robot(rp[:off + 1], res, cfg)
@@ -477,20 +513,19 @@ class OnlineNAMO:
         last_i = 0
         for i in range(1, n):
             wx, wy, wth = move_path[i]
-            if cfg.check_obstacle_collision:
-                obs_hits = self._world_collision(oid, wx, wy, wth, tree=tree,
-                                                 tree_items=tree_items)
-                if obs_hits:
-                    # obstacle stopped at move_path[last_i]; belief syncs to that pose
-                    if last_i != 0:
-                        self.belief.relocate(obs, *move_path[last_i])
-                        self.belief.record_move_direction(oid, start_xy,
-                                                          move_path[last_i])
-                    new_node = self._release_and_return(res, rp, off, last_i,
-                                                        False, node, cfg)
-                    return (False, obs_hits,
-                            cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
-                            new_node)
+            obs_hits = self._world_collision(oid, wx, wy, wth, tree=tree,
+                                             tree_items=tree_items)
+            if obs_hits:
+                # obstacle stopped at move_path[last_i]; belief syncs to that pose
+                if last_i != 0:
+                    self.belief.relocate(obs, *move_path[last_i])
+                    self.belief.record_move_direction(oid, start_xy,
+                                                      move_path[last_i])
+                new_node = self._release_and_return(res, rp, off, last_i,
+                                                    False, node, cfg)
+                return (False, obs_hits,
+                        cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
+                        new_node)
             # the robot is holding the obstacle, so it can run into things too
             a, b = rp[off + i - 1], rp[off + i]
             hits, t = self.belief.check_robot_collision(a, b, self.world, cfg)
@@ -589,8 +624,11 @@ class OnlineNAMO:
                 if oid in perceived
             },
             "touched_difficulty": dict(self.belief.touched_difficulty),
+            "risk": {oid: self.risk.level_of(oid) for oid in perceived},
             "J": round(res.J, 4),
             "t": round(self.clock, 3),      # simulated seconds; the animation runs on this
+            "move_t": round(res.move_time, 1),   # shown split rather than summed
+            "plan_t": round(res.plan_time, 1),
             "label": label,
         })
 

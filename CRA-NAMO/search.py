@@ -36,10 +36,12 @@ def move_signature(obs) -> tuple:
 class Planner:
     def __init__(self, roadmap: Roadmap, belief: Belief,
                  estimator: DifficultyEstimator, cfg: Config,
-                 failed_moves: Optional[set] = None):
+                 failed_moves: Optional[set] = None,
+                 risk_estimator=None):
         self.roadmap = roadmap
         self.belief = belief
         self.est = estimator
+        self.risk = risk_estimator
         self.cfg = cfg
         self.failed_moves = set() if failed_moves is None else failed_moves
         self._robot_pos: Tuple[float, float] = (0.0, 0.0)
@@ -143,9 +145,21 @@ class Planner:
                 return math.inf, []
             seconds = cost.manipulation_time(self.cfg, cplan, len(move_path or []),
                                              move_dist)
-            extra += cost.removal_cost(self.cfg, work, cplan.travel, seconds)
+            extra += cost.removal_cost(self.cfg, work, cplan.travel, seconds,
+                                       self._risk_to_charge(oid))
             removals.append((oid, drop, move_dist, work, move_path, cplan))
         return base + extra, removals
+
+    def _risk_to_charge(self, oid: int):
+        """This obstacle's risk level, or None if it would be a second charge.
+
+        The surcharge buys the decision to disturb something at all, so it is paid
+        once. An obstacle already shifted has paid; shifting it again is only the
+        work of shifting it.
+        """
+        if self.risk is None or self.belief.obstacle(oid).removed:
+            return None
+        return self.risk.level_of(oid)
 
     def _removal(self, oid: int, key: EdgeKey):
         """Compute work and drop pose needed to move an obstacle aside, also plan its SE(2) route"""
@@ -158,15 +172,13 @@ class Planner:
             self._persistent_removal_cache[cache_key] = res
             return res
         clear_polys = [self.roadmap.edge_corridor[key]]
-        others = None
-        if self.cfg.check_obstacle_collision:
-            polys = [ob.polygon for oid2, ob in self.belief.perceived.items()
-                     if oid2 != oid]
-            for c in self.belief.contacts:
-                part = c.difference(obs.polygon)
-                if not part.is_empty and part.area > 1e-9:
-                    polys.append(part)
-            others = unary_union(polys) if polys else None
+        polys = [ob.polygon for oid2, ob in self.belief.perceived.items()
+                 if oid2 != oid]
+        for c in self.belief.contacts:
+            part = c.difference(obs.polygon)
+            if not part.is_empty and part.area > 1e-9:
+                polys.append(part)
+        others = unary_union(polys) if polys else None
 
         estimated_diff = self.belief.get_difficulty(oid, self.est)
         move_path = None
@@ -201,35 +213,34 @@ class Planner:
             contact_memo[id(poses)] = (poses, plan)
             return plan
 
-        if self.cfg.se2_use_planner:
-            path_accept = None
-            rejected: List[str] = []
-            if self.cfg.contact_required:
-                def path_accept(poses):
-                    plan = _contact_for(poses)
-                    if not plan.feasible:
-                        rejected.append(plan.reason)
-                    return plan.feasible
-            se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
-                obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
-                robot_pos, self.cfg, others_polys=others,
-                goal_accept=self._goal_filter(obs), path_accept=path_accept)
-            if se2_feasible and se2_path:
-                cplan = (_contact_for(se2_path) if self.cfg.contact_required
-                         else contact.idle_plan(mid, len(se2_path)))
-                if cplan.feasible:
-                    feasible = True
-                    move_path = se2_path
-                    drop = se2_goal
-                    move_dist = se2_cost
-                else:
-                    self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
-            elif rejected:
-                # the obstacle could go somewhere, the robot just could not
-                # escort it there — say which half of the constraint bit
-                counts = Counter(rejected).most_common(2)
-                self.cfg.log(f"[contact] oid={oid} rejected {len(rejected):,} path(s): "
-                             + "; ".join(f"{why} x{n:,}" for why, n in counts))
+        path_accept = None
+        rejected: List[str] = []
+        if self.cfg.contact_required:
+            def path_accept(poses):
+                plan = _contact_for(poses)
+                if not plan.feasible:
+                    rejected.append(plan.reason)
+                return plan.feasible
+        se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
+            obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
+            robot_pos, self.cfg, others_polys=others,
+            goal_accept=self._goal_filter(obs), path_accept=path_accept)
+        if se2_feasible and se2_path:
+            cplan = (_contact_for(se2_path) if self.cfg.contact_required
+                     else contact.idle_plan(mid, len(se2_path)))
+            if cplan.feasible:
+                feasible = True
+                move_path = se2_path
+                drop = se2_goal
+                move_dist = se2_cost
+            else:
+                self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
+        elif rejected:
+            # the obstacle could go somewhere, the robot just could not
+            # escort it there — say which half of the constraint bit
+            counts = Counter(rejected).most_common(2)
+            self.cfg.log(f"[contact] oid={oid} rejected {len(rejected):,} path(s): "
+                         + "; ".join(f"{why} x{n:,}" for why, n in counts))
 
         if not feasible:
             work = math.inf

@@ -101,6 +101,9 @@ def main():
     print(f"{'  of which in contact':<{W}} : {res.manip_walk_cost:,}"
           f"   (robot travel while holding an obstacle)")
     print(f"{'obstacle work W':<{W}} : {res.work_cost:,}")
+    charged = ", ".join(f"{oid}:{level}" for oid, level in sorted(res.risk_levels.items()))
+    print(f"{'risk surcharge R':<{W}} : {res.risk_cost:,}"
+          + (f"   (moved {charged})" if charged else ""))
     print(f"{'Obstacles moved':<{W}} : {res.removed}")
     print(f"{'Replan cycles':<{W}} : {res.cycles:,}")
     print(f"{'Total time T (s)':<{W}} : {res.T:,}   (simulated clock: moving + thinking)")
@@ -108,6 +111,9 @@ def main():
     print(f"{'Total plan time (s)':<{W}} : {res.plan_time:,}")
     print(f"{'A* expansions':<{W}} : {res.total_expansions:,}")
     print(f"{'LLM calls':<{W}} : {res.llm_calls:,}  (mode={res.llm_mode})")
+    print(f"{'Risk assessments':<{W}} : {len(sim.risk.level):,} seen, "
+          f"{len(sim.risk.on_contact):,} revised on contact"
+          f"  ({sim.risk.calls:,} calls, mode={sim.risk.mode})")
 
     # render summary plot
     strategy_suffix = f"_{cfg.strategy}" if cfg.strategy != "normal" else ""

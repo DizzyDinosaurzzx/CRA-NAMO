@@ -1,6 +1,6 @@
 0 倾斜墙体（墙体可以像障碍物一样有方向角）✅
 
-1 风险评估模型
+1 风险评估模型 ✅
 通过告诉LLM障碍物的文字描述来判断搬运某一个障碍物的风险评估
 （例如移动一个装满水的杯子是中风险，移动一个椅子桌子是低风险，移动一个地震中的柱子是中高风险，移动一个坐着人的轮椅是高风险，移动地震中支撑结构的柱子是超高风险……）
 可以通过建一些数据集和关键词的方式来告诉LLM怎么评价
@@ -23,9 +23,10 @@ ii. event触发，被机器人移动某一个障碍物后触发 or 机器人到�
 
 4 可视化优化
 折叠重复的输出目录 ✅
-输出照片关于cost的标记和risk的标记优化(估计的显示est=*** 接触到真实值之后，显示real=***（覆盖掉前面的显示），换行显示LLM评定的risk等级)
+输出照片关于cost的标记和risk的标记优化(估计的显示est=*** 接触到真实值之后，显示real=***（覆盖掉前面的显示），换行显示LLM评定的risk等级) ✅
 优化所有数值输出都加上数字分位符号 ✅
-优化图片上面的文字，换行，不显示是LLM还是离线式搜索，展示J和plan time move time不显示合计的时间，不显示C，显示time_importance字体换成Times New Roman
+优化图片上面的文字，换行，不显示是LLM还是离线式搜索，展示J和plan time move time不显示合计的时间，不显示C，显示time_importance字体换成Times New Roman ✅
+
 颜色换成更好的，更清楚的
 不同移动难度的障碍物对应不同梯度的颜色，但是只用于可视化，不告诉机器人
 
@@ -38,3 +39,19 @@ LLM risk评估优化
 6 代码结构优化（最低优先级）
 注释格式统一，减少注释的量，删除无用注释
 代码结构优化，减少重复调用，细节代码速度优化
+
+se2_use_planner: bool = True
+check_obstacle_collision: bool = True  # collision detection between obstacles
+full_reveal_on_contact: bool = False
+优化成默认模式，不允许修改 ✅
+
+
+7 Scenario更新
+
+i. corridor 展示SE2 push planner的成果
+ii. 双门地图展示基础策略算法，绕行还是搬东西，搬哪个东西
+iii. 家庭地图
+iv. 医院地图
+v. 灾区地图
+vi. 物流地图
+vii. LLM测试地图

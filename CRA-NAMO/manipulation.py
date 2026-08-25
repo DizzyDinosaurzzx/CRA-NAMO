@@ -168,8 +168,6 @@ def plan_move_se2(
     path_accept=None,                   # (poses) -> bool, extra hard constraint on the whole path
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
     """Plan where to put *obs* so it stops blocking, and how to get it there."""
-    if not cfg.se2_use_planner:
-        return (False, None, math.inf, None)
     try:
         planner = _get_planner(obs, static_obstacles, bounds, robot_pos,
                                cfg, others_polys)

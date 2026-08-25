@@ -11,9 +11,19 @@ from config import Config
 
 
 class Belief:
-    def __init__(self, roadmap: Roadmap, cfg: Config):
+    """What the robot knows, and nothing else.
+
+    Risk assessment lives here rather than in the executor because this is where
+    the information arrives: an obstacle is assessed the moment it first enters
+    `perceived`, and re-assessed the moment the robot touches it and learns what
+    it actually weighs. Hooking those two events anywhere else would mean
+    re-deriving "is this the first time?" at every call site.
+    """
+
+    def __init__(self, roadmap: Roadmap, cfg: Config, risk_estimator=None):
         self.roadmap = roadmap
         self.cfg = cfg
+        self.risk = risk_estimator
         self.perceived: Dict[int, MovableObstacle] = {}     # copies of perceived obstacles
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}    # obstacles blocking edges
         self.newly_revealed: List[int] = []  # newly perceived obstacles
@@ -43,10 +53,29 @@ class Belief:
             obs = w.perceived_copy()
             self.perceived[w.oid] = obs
             self.newly_revealed.append(w.oid)
+            self._assess_risk(obs)
             self._update_edges_for(obs)
             # obstacle is now fully perceived; any prior anonymous "contact" records for it can be cleared
             self._clear_contacts_overlapping(obs.polygon)
         return self.newly_revealed
+
+    # --- risk ---
+    def _assess_risk(self, obs: MovableObstacle):
+        """First sight: judge the danger from the label, before going near it."""
+        if self.risk is not None:
+            self.risk.assess(obs.observation())
+
+    def _reassess_risk(self, world_obs: MovableObstacle):
+        """Physical contact: judge again, now knowing what it really weighs.
+
+        Reads the *world* obstacle, because that is the only thing that has the
+        knowledge contact confers — the label it resolves into, and its true
+        difficulty. This is the one channel by which either crosses into belief,
+        and it opens only when the robot is actually touching the obstacle.
+        """
+        if self.risk is not None:
+            self.risk.reassess(world_obs.contact_observation(),
+                               world_obs.difficulty)
 
     @staticmethod
     def _pose_matches(a: MovableObstacle, b: MovableObstacle) -> bool:
@@ -149,6 +178,7 @@ class Belief:
         obs = world_obs.perceived_copy()
         self.perceived[obs.oid] = obs
         self.newly_revealed.append(obs.oid)
+        self._assess_risk(obs)
         self._update_edges_for(obs)
         self._clear_contacts_overlapping(obs.polygon)
         return [obs.oid]
@@ -236,6 +266,7 @@ class Belief:
             if rp.buffer(touch_radius).intersects(w.polygon):
                 self.touched.add(w.oid)
                 self.touched_difficulty[w.oid] = w.difficulty
+                self._reassess_risk(w)
                 revealed.append(w.oid)
         return revealed
 
@@ -252,6 +283,7 @@ class Belief:
             if w.oid == oid:
                 self.touched.add(oid)
                 self.touched_difficulty[oid] = w.difficulty
+                self._reassess_risk(w)
                 return True
         return False
 

@@ -50,7 +50,7 @@ class Config:
     robot_w_max_loaded: float = 0.6
     robot_alpha_max_loaded: float = 0.8
 
-    # --- Time vs. energy: C = (1 - w) * J + w * (time_value * T) ---
+    # --- Time vs. energy: C = (1 - w) * J + w * (time_value * T) + R ---
     # w = 0 recovers the pure-energy objective exactly, and is the default: every
     # result predating the time axis still reproduces.
     #
@@ -73,6 +73,9 @@ class Config:
     # moving light obstacles is still worthwhile.
     lambda_distance: float = 350.0   # equivalent driving resistance [N]
 
+    # --- Risk ---
+    risk_weight: float = 1.0
+
     # --- Perception ---
     R_perc: float = 10.0       # perception radius
     sight_width: float = 0.1     # line-of-sight width
@@ -89,8 +92,6 @@ class Config:
     # obstacle in any direction, and set this to 0 to remove even the bias.
     manip_forward_penalty: float = 2.0
     manip_max_frames_per_action: int = 30
-    check_obstacle_collision: bool = True  # collision detection between obstacles
-    full_reveal_on_contact: bool = False
 
     # --- Robot–obstacle contact ---
     # The robot has to stay flush against the obstacle for the whole time the
@@ -105,7 +106,6 @@ class Config:
     contact_clearance: float = 0.01        # tolerance separating "touching" from "overlapping" [m]
 
     # --- SE(2) path planner (the obstacle's own route) ---
-    se2_use_planner: bool = True
     se2_cell: float = 0.15
     se2_n_theta: int = 12
     se2_connectivity: int = 8

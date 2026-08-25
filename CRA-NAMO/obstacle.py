@@ -89,6 +89,12 @@ class MovableObstacle:
     theta: float = 0.0
     material: str = "unknown"      # semantic label for LLM reasoning
     difficulty: float = 1.0        # true sliding resistance f = mu*rho*V*g [N]; W = difficulty * distance moved [J]
+    # What the label turns out to be once the robot has physically touched this
+    # obstacle — a closed box that proves to be full, a column that proves to be
+    # load-bearing. Ground truth: it is deliberately absent from `observation`,
+    # and reaches the robot only through `contact_observation`. Empty means
+    # touching teaches nothing the label did not already say.
+    contact_reveals: str = ""
     oid: int = -1
 
     # runtime flags
@@ -135,6 +141,18 @@ class MovableObstacle:
             "volume": round(self.volume, 2),
             "material": self.material,
         }
+
+    def contact_observation(self) -> dict:
+        """What physical contact reveals, on top of what was visible from afar.
+
+        Kept apart from `observation` so the split stays honest: everything here
+        is knowledge the robot has earned by touching the obstacle, and nothing
+        may reach the planner before that happens.
+        """
+        obs = self.observation()
+        if self.contact_reveals:
+            obs["contact_reveals"] = self.contact_reveals
+        return obs
 
     def __repr__(self):
         return (f"Obs#{self.oid}({self.material}, c=({self.x:.1f},{self.y:.1f}), "

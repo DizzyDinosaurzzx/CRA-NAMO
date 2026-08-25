@@ -19,10 +19,17 @@ Colour vocabulary:
 
 from __future__ import annotations
 import io
-import textwrap
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+# Times New Roman throughout — figures go into a paper, and the fallbacks are
+# ordered so a machine without it still renders a serif rather than silently
+# dropping to the sans-serif default.
+matplotlib.rcParams["font.family"] = "serif"
+matplotlib.rcParams["font.serif"] = ["Times New Roman", "Times", "STIXGeneral",
+                                     "DejaVu Serif"]
+matplotlib.rcParams["mathtext.fontset"] = "stix"
 from matplotlib.collections import LineCollection
 from PIL import Image
 from shapely.geometry import LineString, Point
@@ -39,17 +46,29 @@ def _plot_poly(ax, poly, **kw):  # draw basic polygon
             ax.fill(xs, ys, **kw)
 
 
-def _obstacle_label(oid: int, estimates, touched=None) -> str:
-    """Obstacle ID, plus estimated / true difficulty when available."""
-    est = estimates.get(oid) if estimates else None
+def _obstacle_label(oid: int, estimates, touched=None, risk=None) -> str:
+    """Obstacle ID, what moving it is thought to cost, and how dangerous it is.
+
+    The difficulty line switches rather than accumulates: an estimate while the
+    obstacle has only been seen, the measured value once it has been touched.
+    Showing both would be showing a number nothing consults any more —
+    `Belief.get_difficulty` stops asking the estimator the moment a true value
+    exists, and so should the picture.
+
+    The risk line is shown at every level including `low`, because a blank is
+    ambiguous between "assessed as safe" and "not assessed yet". Obstacles that
+    genuinely have no verdict — never perceived — get no line at all.
+    """
     true = touched.get(oid) if touched else None
+    est = estimates.get(oid) if estimates else None
+    level = risk.get(oid) if risk else None
     parts = [str(oid)]
-    if est is not None:
-        parts.append(f"est={est:,g}")
     if true is not None:
-        parts.append(f"true={true:,g}")
-        if est is not None and abs(est - true) > 1e-6:
-            parts[-1] = f"T={true:,g}"  # highlight mismatch with estimate
+        parts.append(f"real={true:,g}")
+    elif est is not None:
+        parts.append(f"est={est:,g}")
+    if level is not None:
+        parts.append(f"risk={level}")
     return "\n".join(parts)
 
 
@@ -125,27 +144,62 @@ _PLOT_BOX = (8.0, 7.0)     # max plot area (width, height), inches
 _MARGIN = 0.5              # left/right + bottom tick-label margin, inches
 _TOP_PAD = 0.12            # whitespace above title, inches
 _TITLE_LINE = 0.24         # height per title line, inches
-_TITLE_LINES = 3           # always reserve height for three title lines
+_TITLE_LINES = 4           # height reserved above every animation frame
 _LEGEND_H = 0.5            # bottom legend strip height, inches
 _TITLE_FS = 9              # title font size
 _LEGEND_NCOL = 5
 
 
-def _wrap_title(text: str, width_inch: float) -> str:
+def _lay_out_title(groups, width_inch: float, max_lines: int = _TITLE_LINES) -> str:
+    """Lay the title out one category per line: `groups` is [(label, segments)].
+
+    Two rules, both about being read rather than being compact. Each category
+    starts its own line, because someone scanning the figure is after one number
+    and knowing which line it lives on is worth more than saving a line. And a
+    line is only ever broken *between* segments, never inside one — `textwrap`
+    breaks on spaces, which used to put a line end in the middle of
+    "lambda*D=11,740.872" and orphan a bare number onto the next line.
+
+    A category too wide for the plot continues on the following line instead of
+    being squeezed or clipped.
+    """
     ncols = max(20, int(width_inch / (0.55 * _TITLE_FS / 72.0)))
-    lines = textwrap.wrap(text, width=ncols) or [""]
-    if len(lines) > _TITLE_LINES:
-        lines = lines[:_TITLE_LINES]
+    lines = []
+    for label, segments in groups:
+        segments = [s for s in segments if s]
+        if not segments:
+            continue
+        head = f"{label}:  " if label else ""
+        current = ""
+        for seg in segments:
+            candidate = f"{current}  |  {seg}" if current else seg
+            if len(head) + len(candidate) <= ncols or not current:
+                current = candidate
+            else:
+                lines.append(head + current)
+                head = ""          # the title is centred, so no indent to align to
+                current = seg
+        lines.append(head + current)
+    if not lines:
+        return ""
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
         lines[-1] = lines[-1][:max(1, ncols - 1)] + "…"
     return "\n".join(lines)
 
-def _new_canvas(sim: OnlineNAMO):
+def _new_canvas(sim: OnlineNAMO, title_lines: int = _TITLE_LINES):
+    """Blank figure with room reserved above the axes for `title_lines` of title.
+
+    Animation frames must all reserve the same height whatever their title says,
+    or the GIF ends up with frames of differing sizes; a one-off summary can size
+    itself to the title it actually has.
+    """
     minx, miny, maxx, maxy = sim.workspace.bounds
     w, h = (maxx - minx) + 2.0, (maxy - miny) + 2.0   # consistent with xlim/ylim padding below
     s = min(_PLOT_BOX[0] / w, _PLOT_BOX[1] / h)
     pw, ph = w * s, h * s
 
-    title_h = _TITLE_LINE * _TITLE_LINES
+    title_h = _TITLE_LINE * title_lines
     fw = pw + 2 * _MARGIN
     fh = _LEGEND_H + _MARGIN + ph + title_h + _TOP_PAD
 
@@ -159,8 +213,7 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
     ax.set_aspect("equal")
     ax.set_xlim(minx - 1, maxx + 1)
     ax.set_ylim(miny - 1, maxy + 1)
-    ax.set_title(_wrap_title(title, ax.figure.get_figwidth() - 2 * _MARGIN),
-                 fontsize=_TITLE_FS)
+    ax.set_title(title, fontsize=_TITLE_FS)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
         ax.figure.legend(handles, labels, loc="lower center",
@@ -168,9 +221,34 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
                          ncol=min(len(handles), _LEGEND_NCOL), fontsize=8,
                          framealpha=0.9, borderaxespad=0.0)
 
+def _summary_title(sim: OnlineNAMO, res) -> list:
+    """The facts above the summary plot, grouped into the categories they belong to.
+
+    Deliberately absent: the combined objective C, the total elapsed time, which
+    difficulty estimator ran, and the risk surcharge R. C and T are sums of
+    things already on the line below; the estimator says nothing about the run
+    itself; and R is carried by the obstacles — every one of them shows its own
+    `risk=` verdict, which is the form in which it actually explains the route.
+    """
+    moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
+             else (str(res.removed) if res.removed else "none"))
+    return [
+        ("", [f"[{sim.cfg.strategy}] {res.message}"]),
+        ("cost", [f"J={res.J:,}",
+                  f"lambda*D={res.walk_cost:,}",
+                  f"W={res.work_cost:,}"]),
+        ("time", [f"plan {res.plan_time:,g}s",
+                  f"move {res.move_time:,g}s",
+                  f"time_importance={sim.cfg.time_importance:g}"]),
+        ("moved", [moved]),
+    ]
+
+
 def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     """Generate the final summary plot of the simulation"""
-    fig, ax = _new_canvas(sim)
+    title = _lay_out_title(_summary_title(sim, res),
+                           _PLOT_BOX[0], max_lines=8)
+    fig, ax = _new_canvas(sim, title_lines=title.count("\n") + 1)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim)
     # iterate over all movable obstacles, colour by whether they were moved
@@ -179,7 +257,8 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
         _plot_poly(ax, w.polygon, color=col, alpha=0.6, zorder=3)
         # label obstacle centroid with ID, estimate, and true difficulty if known
         ax.text(w.x, w.y, _obstacle_label(w.oid, sim.estimator.cache,
-                                           sim.belief.touched_difficulty),
+                                           sim.belief.touched_difficulty,
+                                           sim.risk.level),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=4)
 
     # draw robot motion trail corridor:
@@ -190,17 +269,6 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
         # if only a single point (robot did not move), draw a circle
         p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
         _plot_poly(ax, p, color="royalblue", alpha=0.3, zorder=5)
-    # assemble title info. In maps like maze_doors, moved may have dozens of ids;
-    # listing them all would span many lines, so only report the count when long.
-    manip_mode = "SE2" if sim.cfg.se2_use_planner else "teleport"
-    strategy = sim.cfg.strategy
-    moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
-             else (str(res.removed) if res.removed else "none"))
-    title = (f"[{strategy}] {res.message}  |  J={res.J:,} "
-             f"(lambda*D={res.walk_cost:,}, W={res.work_cost:,})  |  "
-             f"T={res.T:,g}s (moving {res.move_time:,g}s, planning {res.plan_time:,g}s)"
-             f"  |  C={res.C:,} (w={sim.cfg.time_importance:g})  |  "
-             f"moved={moved}  |  manip={manip_mode}  |  LLM={res.llm_mode}")
     _finish_ax(ax, sim, title)
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -228,7 +296,8 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
         cx, cy = poly.centroid.x, poly.centroid.y
         estimates = frame.get("estimated_difficulty", {})
         touched = frame.get("touched_difficulty", {})
-        ax.text(cx, cy, _obstacle_label(oid, estimates, touched),
+        ax.text(cx, cy, _obstacle_label(oid, estimates, touched,
+                                        frame.get("risk")),
                 ha="center", va="center", fontsize=7, linespacing=0.9, zorder=z + 1)
 
     # draw robot motion trail up to this frame (semi-transparent blue corridor)
@@ -246,9 +315,14 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     _plot_poly(ax, robot_circle, color="limegreen", alpha=0.85, zorder=7)
     ax.plot(rx, ry, marker="o", color="darkgreen", ms=4, zorder=8, label="robot")
 
-    # title: step N / total | action label | cumulative cost
-    title = (f"[{sim.cfg.strategy}] step {idx}/{total - 1}  |  {frame['label']}"
-             f"  |  J={frame['J']:,}  |  T={frame.get('t', 0.0):,.1f}s")
+    # every frame reserves the same title height, or the GIF frames differ in size
+    title = _lay_out_title([
+        ("", [f"[{sim.cfg.strategy}] step {idx}/{total - 1}", frame["label"]]),
+        ("cost", [f"J={frame['J']:,}"]),
+        ("time", [f"plan {frame.get('plan_t', 0.0):,g}s",
+                  f"move {frame.get('move_t', 0.0):,g}s",
+                  f"time_importance={sim.cfg.time_importance:g}"]),
+    ], _PLOT_BOX[0])
     _finish_ax(ax, sim, title)
     return fig
 

@@ -1,9 +1,10 @@
 """The cost function, in one place.
 
-    C = (1 - w) * J  +  w * (time_value * T)        [J]
+    C = (1 - w) * J  +  w * (time_value * T)  +  R        [J]
 
     J = lambda * D + W          [J]
     T = move time + plan time   [s]
+    R = sum of risk surcharges  [J]
 
     lambda * D  lambda_distance [N] times every metre the robot drives — both
                 ordinary roadmap travel and the excursion it makes while holding
@@ -34,8 +35,15 @@ only the executor's T contains it. Both effects push the same way, executed time
 >= planned time, which is the same relationship the estimated and true
 difficulties already have.
 
+R is what it costs to have moved dangerous things: one surcharge per obstacle,
+the first time it is moved, priced by the level `risk` assigns it. It sits
+*outside* the (1-w)/w split rather than inside J, and that placement is the whole
+design. Folded into J it would be scaled by (1-w), so a robot told to care only
+about time (w=1) would price a wheelchair with someone in it at zero. Risk is not
+the kind of thing a speed preference is allowed to discount.
+
 **Nothing outside this module should multiply by `lambda_distance`, by
-`difficulty`, or by `time_value`.** If it does, the accounting has leaked back
+`difficulty`, by `time_value`, or by `risk_weight`.** If it does, the accounting has leaked back
 out again, which is how it came to be spread over four files in the first place.
 """
 
@@ -45,6 +53,7 @@ import math
 
 import geometry
 import kinematics
+import risk as risk_model
 from config import Config
 
 # --- the two terms ---
@@ -61,6 +70,18 @@ def manipulation_work(difficulty: float, distance: float) -> float:
 def time_cost(cfg: Config, seconds: float) -> float:
     """Joules-equivalent of `seconds` spent. The T term, priced."""
     return cfg.time_value * seconds
+
+
+def risk_cost(cfg: Config, level) -> float:
+    """One obstacle's risk surcharge. The R term.
+
+    Stated in the dataset as the detour worth taking to avoid it, so multiplying
+    by lambda turns it into joules on the same scale as everything else — the
+    ladder keeps its meaning if the robot's driving resistance is retuned.
+    `None` means never assessed, or already paid for, and costs nothing.
+    """
+    return (cfg.risk_weight * cfg.lambda_distance
+            * risk_model.detour_equivalent_m(level))
 
 
 def combine(cfg: Config, joules: float, seconds: float) -> float:
@@ -146,15 +167,17 @@ def edge_cost(cfg: Config, length: float) -> float:
 
 
 def removal_cost(cfg: Config, work: float, contact_travel: float,
-                 seconds: float) -> float:
+                 seconds: float, risk_level=None) -> float:
     """What the search charges for clearing one obstacle off an edge.
 
     `work` is the estimated obstacle friction work, `contact_travel` how far the
     robot itself drives to fetch, escort and leave it, and `seconds` how long all
-    of that takes.
+    of that takes. `risk_level` is charged whole, outside the energy/time split —
+    pass None for an obstacle that has already been moved once and so has already
+    paid its surcharge.
     """
     joules = work * work_multiplier(cfg) + motion_cost(cfg, contact_travel)
-    return combine(cfg, joules, seconds)
+    return combine(cfg, joules, seconds) + risk_cost(cfg, risk_level)
 
 
 def heuristic(cfg: Config, distance: float) -> float:
