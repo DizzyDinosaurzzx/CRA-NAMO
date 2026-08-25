@@ -12,26 +12,26 @@ Sliding is what a planner reaches for first, because it is cheap; here it simply
 is not available.
 
 What is left is to turn it, and the hall has just enough room: the crate sweeps
-6.74 m coming round and the hall is 7.00 m deep. Because the goal lies straight
-beyond the crate rather than off to one side, turning alone will not do either —
-every metre the robot gains is a metre the crate has to be taken as well. So the
-two go together, and the run works out as nine manipulations that alternate
-between them: turn 15 degrees to bring an end clear of a stub, push half a metre
-into the room that makes, turn again, push again. By the end the crate has
-travelled 2.6 m up the hall and come round 45 degrees, and the robot has re-set
-its grip nine times to do it.
+6.74 m coming round at its widest and the hall is 7.00 m deep. The robot walks
+down to the crate's south end, takes hold of it there, and swings it through 30
+degrees — two of the planner's 15-degree steps — which carries that end 1.7 m
+west and nearly 3 m up the hall. What had been a wall across the room is then a
+diagonal with the whole south-east quarter open behind it, and the robot lets go
+and drives straight through to the goal.
 
     hall depth          7.00 m
     crate standing      6.70 m   0.15 m clear at each end, so nothing gets past
     crate turning       6.74 m   fits the hall, but not between the stubs
-    crate at 45 deg     5.23 m   leaves a gap, and the robot walks through
+    crate at 60 deg     6.15 m   tall, but leaning: its south end has swung clear
 
-Fifteen degrees is the planner's angular step, and 45 is where it stops — the
-first heading that opens a gap wide enough to drive through. Nothing about that
-is chosen by hand; it falls out of pricing rotation against translation and
-buying the cheaper one at every step. `se2_planner` finds the sequence, and
-`contact` keeps the robot flush against the crate throughout, walking its grip
-round the perimeter as the crate turns under it.
+It takes hold at the end and not in the middle because of `contact`'s leverage
+rule — a grip only turns a body through its lever arm, and the middle of a 6.7 m
+face has none, however little the robot would have to walk to hold it there.
+Thirty degrees is where it stops, and nothing about that is chosen by hand: it
+falls out of pricing rotation against translation and buying the cheaper one at
+every step. `se2_planner` finds the route, and `contact` keeps the robot flush
+against the crate throughout, walking its grip round the perimeter as the crate
+turns under it.
 """
 
 from __future__ import annotations

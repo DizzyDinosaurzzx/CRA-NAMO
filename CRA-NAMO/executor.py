@@ -498,19 +498,38 @@ class OnlineNAMO:
         return geom
 
     # --- manipulation ---
-    def _contact_plan(self, oid: int, obs, move_path) -> contact.ContactPlan:
+    def _contact_plan(self, oid: int, obs, move_path, node: int, key):
         """Plan the escort for one manipulation from where the robot is standing.
 
-        Same inputs the search used, with one difference that matters: the real
-        robot position rather than the edge midpoint that stood in for it. That
+        Same inputs the search used, with two differences that matter. The real
+        robot position rather than the edge midpoint that stood in for it, which
         is what makes the walk to the grip point a route the robot could drive
-        instead of a straight line through the obstacle it is about to push.
+        instead of a straight line through the obstacle it is about to push. And
+        a *choice* of where to let go: the far end of the edge it has just
+        cleared, or the end it set out from. The far end is worth the length of
+        that edge, so it wins whenever the obstacle has moved far enough to leave
+        a line to it — which is the whole point of having moved the obstacle. The
+        robot then carries on from there instead of walking its grip back down
+        the surface it just came along to restart from where it began.
+
+        Returns the plan and, one per candidate release point, the roadmap node
+        the robot ends up on — None for the position it is standing on now, which
+        is `node` already.
         """
-        return contact.plan_contact(
-            obs, move_path, self.robot_xy, self.robot_xy,
+        rm = self.roadmap
+        exits = [(self.robot_xy, 0.0)]
+        exit_nodes: List[Optional[int]] = [None]
+        if key is not None:
+            far = key[1] if key[0] == node else (key[0] if key[1] == node else None)
+            if far is not None:
+                exits = [(rm.nodes[far], 0.0), (self.robot_xy, rm.edge_len[key])]
+                exit_nodes = [far, None]
+        cplan = contact.plan_contact(
+            obs, move_path, self.robot_xy, exits,
             self.roadmap.free_eroded_tol,
             contact.inflate_others(self.belief.others_union(oid), self.cfg),
             self.cfg)
+        return cplan, exit_nodes
 
     def _execute_move(self, oid: int, obs, act: dict,
                            res: RunResult, node: int, cfg: Config):
@@ -528,6 +547,7 @@ class OnlineNAMO:
         home = self.robot_xy
 
         cplan = act.get("contact")
+        exit_nodes: List[Optional[int]] = [None]
         if not cfg.contact_required or cplan is None or not cplan.feasible:
             # contact model disabled: the obstacle moves while the robot waits on
             # its node. Rebuilt around the robot's real position rather than
@@ -539,7 +559,8 @@ class OnlineNAMO:
             # one of them, up to conn_radius away, so the approach and exit legs
             # that plan validated are not the ones about to be driven. Plan them
             # again from where the robot actually stands.
-            cplan = self._contact_plan(oid, obs, move_path)
+            cplan, exit_nodes = self._contact_plan(oid, obs, move_path, node,
+                                                   act.get("key"))
             if not cplan.feasible:
                 self.failed_moves.add((move_signature(obs), act["key"]))
                 self._capture_frame(
@@ -591,7 +612,8 @@ class OnlineNAMO:
                     self.belief.record_move_direction(oid, start_xy,
                                                       move_path[last_i])
                 new_node = self._release_and_return(res, oid, rp, off, last_i,
-                                                    False, node, cfg)
+                                                    False, node, cfg,
+                                                    cplan, exit_nodes)
                 return (False, obs_hits,
                         cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
                         new_node)
@@ -625,33 +647,46 @@ class OnlineNAMO:
         self.belief.record_move_direction(oid, start_xy, move_path[-1])
         self.belief.perceive(self.world, self.robot_xy)
         new_node = self._release_and_return(res, oid, rp, off, n - 1, True,
-                                            node, cfg)
+                                            node, cfg, cplan, exit_nodes)
         return (True, [], cost.se2_path_length(obs, move_path, cfg), new_node)
 
     def _release_and_return(self, res: RunResult, oid: int, rp: list, off: int,
                             last_i: int, completed: bool, node: int,
-                            cfg: Config) -> Optional[int]:
+                            cfg: Config, cplan, exit_nodes) -> Optional[int]:
         """Let go of the obstacle and get back onto the roadmap.
 
         After a completed move the planned exit walk applies: round the obstacle
-        if need be, then back to the node the excursion started from, leaving the
-        rest of the plan valid. After an aborted one the robot is stranded at a
-        grip point the plan never expected it to let go at — the way home may now
-        be through the obstacle it was holding — so it drives to the nearest
-        roadmap node it can actually reach and the caller replans from there.
+        if need be, then out to the release point the escort plan chose. That is
+        a roadmap node, and returning it is what lets the next cycle carry on
+        from where the robot actually is — normally the far side of the edge it
+        has just cleared — instead of restarting from the node it set out from.
+        After an aborted move the robot is stranded at a grip point the plan
+        never expected it to let go at — the way out may now be through the
+        obstacle it was holding — so it drives to the nearest roadmap node it can
+        actually reach and the caller replans from there.
         """
         if not completed:
             return self._reanchor(res, node)
         _reached, hits, _stop = self._walk_robot(
             rp[off + last_i:], res, cfg, node=node,
-            label=f"let go of {oid} and walk back")
+            label=f"let go of {oid} and walk on")
         if hits:
             self.belief.perceive(self.world, self.robot_xy)
             new_node = self._reanchor(res, node)
             self._capture_frame(res, node if new_node is None else new_node,
                                 f"robot hit {sorted(hits)} backing out -> replan")
             return new_node
-        return None
+        i = cplan.exit_index
+        landed = exit_nodes[i] if 0 <= i < len(exit_nodes) else None
+        if landed is None or landed == node:
+            return None
+        # It let go somewhere it has never stood, so it looks around from there
+        # before anything plans on its behalf — the same courtesy an ordinary
+        # roadmap edge gets at the far end.
+        self.belief.touch_check(self.robot_xy, self.world, cfg)
+        self.belief.perceive(self.world, self.robot_xy)
+        self._capture_frame(res, landed, f"let go of {oid} at node {landed}")
+        return landed
 
     def _relocate_world(self, oid: int, x: float, y: float, theta: float):
         for w in self.world:

@@ -104,6 +104,18 @@ class Config:
     contact_station_spacing: float = 0.3   # spacing of candidate grip points around the obstacle [m]
     contact_max_slide: float = 0.6         # how far the grip may slide per manipulation sub-step [m]
     contact_clearance: float = 0.01        # tolerance separating "touching" from "overlapping" [m]
+    # Leverage. A grip transmits a force, and a force turns a body only through
+    # its lever arm: the friction moment is f*rho — the obstacle's friction force
+    # times its mean rotation radius, the same rho that turns an angle into a
+    # distance everywhere else — so a grip a metres from the centre has to push
+    # with f*rho/a to keep it turning. That is unbounded at the middle of a long
+    # face, which is precisely where a planner counting nothing but its own
+    # footsteps parks itself, because it is the point that moves least when the
+    # body pivots. Capping the push at this multiple of the friction force the
+    # robot is overcoming anyway gives a >= rho/ratio, in no new units. It binds
+    # only on elongated bodies: rho is a mean radius, always shorter than the
+    # half-diagonal, so a corner grip always qualifies. Set 0 to switch it off.
+    contact_max_force_ratio: float = 1.0
 
     # --- SE(2) path planner (the obstacle's own route) ---
     se2_cell: float = 0.15
@@ -111,6 +123,14 @@ class Config:
     se2_connectivity: int = 8
     se2_containment: str = "centroid"
     se2_rot_weight: float | None = None
+    # How many candidate drop poses to try before declaring an obstacle immovable.
+    # They come in ascending cost and the first one the robot can actually escort
+    # wins, so this is not a per-plan price: a candidate is only ever examined
+    # because the cheaper ones were rejected. Too small a number is what makes the
+    # robot refuse a move it could perfectly well make — the cheapest handful of
+    # drop poses are usually near-identical poses in adjacent grid cells, which
+    # fail or succeed together.
+    se2_goal_candidates: int = 24
 
     # --- Roadmap ---
     grid_step: float = 0.3    # roadmap node grid spacing

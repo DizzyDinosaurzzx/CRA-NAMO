@@ -530,6 +530,14 @@ class SE2Planner:
             goal_idx = (best // nyT, (best % nyT) // self.n_theta,
                         best % self.n_theta)
             goal_pose = self._pose(*goal_idx)
+            wanted = goal_accept is None or goal_accept(goal_pose)
+            # `validate` is the expensive one — for CA-NAMO it plans the robot's
+            # whole escort — and `goal_accept` is a couple of predicates, so ask
+            # the cheap question first. A drop pose the caller does not want is
+            # only ever validated to fill the one fallback slot; once that is
+            # taken the rest cost nothing but a trace.
+            if not wanted and fallback is not None:
+                continue
             poses = self._trace(parent, best, start_pose)
             if validate is not None and not validate(poses):
                 continue                  # this path fails swept-volume validation, try next candidate
@@ -540,10 +548,9 @@ class SE2Planner:
             result = SE2PlanResult(True, "", cost, trans, rot, goal_pose, poses)
             # candidates come in cost order, so the first accepted one is the
             # cheapest acceptable drop pose; keep the cheapest overall as fallback
-            if goal_accept is None or goal_accept(goal_pose):
+            if wanted:
                 return result
-            if fallback is None:
-                fallback = result
+            fallback = result
         if fallback is not None:
             return fallback
 

@@ -185,13 +185,18 @@ class Planner:
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
         # The robot performs the manipulation as an excursion from the edge it is
-        # about to traverse and returns to it afterwards. The edge midpoint stands
-        # in for whichever of its two endpoints the robot is actually on — they are
-        # at most conn_radius apart — which keeps this result cacheable per edge
-        # instead of per (edge, direction).
+        # about to traverse. The edge midpoint stands in for whichever of its two
+        # endpoints the robot is actually on — they are at most conn_radius apart —
+        # which keeps this result cacheable per edge instead of per (edge,
+        # direction). It lets go at whichever endpoint is cheaper to reach from
+        # where the obstacle ends up: both are places the robot has to be to use
+        # the edge, so neither choice hides any travel from the cost. Which one it
+        # picks is the search's guess; the executor plans the same excursion again
+        # from the endpoint the robot is really standing on.
         u, v = key
         mid = tuple((a + b) / 2.0 for a, b in
                     zip(self.roadmap.nodes[u], self.roadmap.nodes[v]))
+        exits = [(self.roadmap.nodes[u], 0.0), (self.roadmap.nodes[v], 0.0)]
         contact_memo: Dict[int, tuple] = {}
 
         def _contact_for(poses):
@@ -200,7 +205,7 @@ class Planner:
             hit = contact_memo.get(id(poses))
             if hit is not None:
                 return hit[1]
-            plan = contact.plan_contact(obs, poses, mid, mid,
+            plan = contact.plan_contact(obs, poses, mid, exits,
                                         self.roadmap.free_eroded_tol,
                                         contact.inflate_others(others, self.cfg),
                                         self.cfg)

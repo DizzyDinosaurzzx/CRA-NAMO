@@ -12,11 +12,39 @@ every sub-step so that
   * the robot disc never overlaps a wall or another obstacle,
   * the grip point moves continuously along the surface (no teleporting from
     one side to the other),
+  * a grip that has to *turn* the body has the leverage to do it (see below),
   * the total robot travel distance is minimal.
 
 Travel is charged at the same rate as ordinary driving (lambda [N] per metre),
 so the joules the robot spends carting itself around the obstacle land in the
 same cost function as the joules it spends overcoming the obstacle's friction.
+
+Leverage
+--------
+A grip transmits a force, and a force turns a body only through its lever arm.
+The friction moment resisting rotation is ``f * rho`` — the obstacle's friction
+force times its mean rotation radius, the same ``rho`` that turns an angle into
+a distance everywhere else in the project — so a grip ``a`` metres from the
+centre has to push with ``f * rho / a`` to keep the body turning. Halfway along
+a long crate that is an unbounded force, which is exactly where a planner that
+counts nothing but its own footsteps parks itself: the middle of the long face
+is the point that moves least when the body pivots. Capping the ratio to the
+friction force the robot is overcoming anyway (``cfg.contact_max_force_ratio``)
+turns that into ``a >= rho / ratio`` and puts the grip back out towards an end,
+where a person would take hold of it. It costs no new units and it binds only on
+elongated bodies: ``rho`` is a *mean* radius, so it is always shorter than the
+half-diagonal, and a corner grip always qualifies.
+
+One way out
+-----------
+A manipulation is not a round trip. The robot is given a list of places it may
+let go — the endpoints of the edge it is clearing, wherever it is standing now —
+each with what it would still cost to be there rather than on its route, and it
+releases at whichever comes out cheapest. Forcing it back to the exact spot it
+gripped from is what used to make it walk its grip back along the surface it had
+just come down, and what made a manipulation that was perfectly possible get
+rejected as "cannot leave the obstacle" whenever the way back was through the
+obstacle it had just moved.
 
 Discretisation
 --------------
@@ -83,13 +111,18 @@ class ContactPlan:
     ``robot_path[move_offset + i]`` while the obstacle is at ``poses[i]``.
     The entries before ``move_offset`` are the approach plus any walk around the
     stationary obstacle to reach the chosen grip side; the entries after the
-    push are the symmetric walk back out.
+    push are the walk out to wherever it lets go.
+
+    ``exit_index`` says which of the caller's candidate release points that was,
+    so the caller can tell where the robot now stands — -1 when it never left
+    the roadmap position it set out from.
     """
     feasible: bool
     reason: str = ""
     robot_path: List[XY] = field(default_factory=list)
     move_offset: int = 0
     travel: float = 0.0            # total robot travel over the whole manipulation [m]
+    exit_index: int = -1           # which of the candidate release points was used
 
     def at(self, i: int) -> XY:
         return self.robot_path[self.move_offset + i]
@@ -155,6 +188,30 @@ def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray
             a = a0 + (seg_s / max(quarter, 1e-12)) * (0.5 * math.pi)
             pts[n] = (cx + r * math.cos(a), cy + r * math.sin(a))
     return pts
+
+
+def lever_arms(stations: np.ndarray, l: float, d: float) -> np.ndarray:
+    """Distance from the body centre to the contact point behind each station.
+
+    The force acts where the robot touches the rectangle, not at its own centre,
+    so the station is walked back onto the surface first — for a rectangle that
+    is just a clamp of the local coordinates to the faces.
+    """
+    cx = np.clip(stations[:, 0], -l / 2.0, l / 2.0)
+    cy = np.clip(stations[:, 1], -d / 2.0, d / 2.0)
+    return np.hypot(cx, cy)
+
+
+def min_lever_arm(l: float, d: float, cfg) -> float:
+    """Shortest lever arm that can still turn an ``l`` x ``d`` body.
+
+    ``f * rho / a <= ratio * f``, so ``a >= rho / ratio``. A ratio of 0 (or less)
+    switches the rule off and every grip may turn anything.
+    """
+    ratio = float(getattr(cfg, "contact_max_force_ratio", 0.0))
+    if ratio <= 0.0:
+        return 0.0
+    return geometry.mean_rotation_radius(l, d) / ratio
 
 
 def _unwrapped_angles(poses: Sequence[Pose]) -> np.ndarray:
@@ -236,12 +293,18 @@ def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
 def plan_contact(obs,
                  poses: Sequence[Pose],
                  robot_start: XY,
-                 robot_end: XY,
+                 exits: Sequence[Tuple[XY, float]],
                  free_geom,
                  others_inflated,
                  cfg) -> ContactPlan:
     """Plan the robot's trajectory for one manipulation.
 
+    ``exits``           candidate release points as ``(point, detour)`` pairs, at
+                        least one. ``detour`` is what it would still cost the
+                        robot to be *there* rather than on its route — 0 for the
+                        far end of the edge it is clearing, the edge's length for
+                        the end it set out from. It steers the choice only; the
+                        travel reported is the travel actually driven.
     ``free_geom``       prepared polygon of robot-centre positions that clear the
                         static walls (static free space eroded by the robot radius).
     ``others_inflated`` prepared polygon of robot-centre positions forbidden by the
@@ -250,11 +313,16 @@ def plan_contact(obs,
     """
     if not poses:
         return ContactPlan(False, "empty move path")
+    if not exits:
+        return ContactPlan(False, "nowhere to let go of this obstacle")
 
     r = float(cfg.robot_radius)
     tol = float(cfg.contact_clearance)
     stations = contact_stations(obs.l, obs.d, r, cfg.contact_station_spacing)
     k = len(stations)
+    # a grip may only be on the body while it turns if it can supply the moment
+    has_lever = (lever_arms(stations, obs.l, obs.d)
+                 >= min_lever_arm(obs.l, obs.d, cfg) - 1e-9)
 
     # how far the grip may slide along the surface within one manipulation sub-step
     step_arc = (2.0 * (obs.l + obs.d) + 2.0 * math.pi * r) / k
@@ -269,6 +337,10 @@ def plan_contact(obs,
     ext: List[Pose] = ([poses[0]] * pad) + list(poses) + ([poses[-1]] * pad)
     world = _world_positions(stations, ext)
     t_total = len(ext)
+    # the padding poses are the obstacle standing still, so only the real
+    # sub-steps in the middle can ever be turns
+    turns = [abs(geometry.wrap_dtheta(a[2], b[2])) > 1e-9
+             for a, b in zip(ext, ext[1:])]
 
     # --- grip feasibility (vectorised) ---
     flat_x = world[:, :, 0].ravel()
@@ -291,12 +363,15 @@ def plan_contact(obs,
     approach_blockers = _with_body(poses[0])
     exit_blockers = approach_blockers if len(poses) == 1 else _with_body(poses[-1])
 
-    # Where the drive-in and drive-out get tested from. Both reference points are
-    # roadmap positions, so either may lie under the obstacle itself; the test
+    # Where the drive-in and drive-out get tested from. Every reference point is a
+    # roadmap position, so any of them may lie under the obstacle itself; the test
     # then runs from the nearest spot the robot could stand on instead. Distances
     # are still charged from the original points — only the line test moves.
     start_ref = _standable(robot_start, approach_blockers, free_geom)
-    end_ref = _standable(robot_end, exit_blockers, free_geom)
+    exit_pts = np.asarray([e[0] for e in exits], dtype=float)
+    exit_detour = np.asarray([e[1] for e in exits], dtype=float)
+    exit_refs = [_standable((float(p[0]), float(p[1])), exit_blockers, free_geom)
+                 for p in exit_pts]
 
     # --- entry costs ---
     cost = np.full(k, _INF)
@@ -314,6 +389,11 @@ def plan_contact(obs,
     shifts = range(-max_shift, max_shift + 1)
     for t in range(t_total - 1):
         feas_next = feas[t + 1]
+        # On a sub-step that turns the body, both ends of the slide have to be
+        # grips that could have turned it. The stations passed over in between
+        # are transient and are only asked to be clear.
+        turning = turns[t]
+        src_cost = np.where(has_lever, cost, _INF) if turning else cost
         best = np.full(k, _INF)
         best_src = np.full(k, -1, dtype=np.int64)
         for shift in shifts:
@@ -322,9 +402,11 @@ def plan_contact(obs,
             span = range(0, shift + 1) if shift >= 0 else range(shift, 1)
             for e in span:
                 slide_ok &= np.roll(feas_next, -e)
+            if turning:
+                slide_ok &= np.roll(has_lever, -shift)
             step = np.linalg.norm(np.roll(world[t + 1], -shift, axis=0) - world[t],
                                   axis=1)
-            cand = np.where(slide_ok, cost + step, _INF)
+            cand = np.where(slide_ok, src_cost + step, _INF)
             cand = np.roll(cand, shift)          # scatter source s onto target s+shift
             upd = cand < best
             best[upd] = cand[upd]
@@ -335,16 +417,21 @@ def plan_contact(obs,
                 False, "robot cannot stay in contact for the whole manipulation")
 
     # --- exit costs ---
-    # candidates in ascending total cost; the first with a clear drive-out wins
-    exit_dist = np.linalg.norm(world[-1] - np.asarray(robot_end), axis=1)
-    total = cost + exit_dist
-    chosen = -1
-    for s in np.argsort(total):
-        if not np.isfinite(total[s]):
+    # every (grip, release point) pair in ascending total cost, `detour` included
+    # so that letting go on the far side of a cleared edge beats letting go on the
+    # near side by exactly the length of the edge it saves. The first pair with a
+    # clear drive-out wins.
+    exit_dist = np.linalg.norm(world[-1][:, None, :] - exit_pts[None, :, :], axis=2)
+    total = cost[:, None] + exit_dist + exit_detour[None, :]
+    chosen, chosen_exit = -1, -1
+    for flat in np.argsort(total, axis=None):
+        st, ex = divmod(int(flat), len(exits))
+        if not np.isfinite(total[st, ex]):
             break
-        p = (float(world[-1, s, 0]), float(world[-1, s, 1]))
-        if end_ref is None or _clear_line(p, end_ref, free_geom, exit_blockers, r):
-            chosen = int(s)
+        p = (float(world[-1, st, 0]), float(world[-1, st, 1]))
+        ref = exit_refs[ex]
+        if ref is None or _clear_line(p, ref, free_geom, exit_blockers, r):
+            chosen, chosen_exit = st, ex
             break
     if chosen < 0:
         return ContactPlan(False, "robot cannot leave the obstacle after moving it")
@@ -356,7 +443,8 @@ def plan_contact(obs,
     seq.reverse()
     grip = [(float(world[t, s, 0]), float(world[t, s, 1]))
             for t, s in enumerate(seq)]
-    path = [tuple(robot_start)] + grip + [tuple(robot_end)]
+    end = (float(exit_pts[chosen_exit][0]), float(exit_pts[chosen_exit][1]))
+    path = [tuple(robot_start)] + grip + [end]
     travel = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
-    return ContactPlan(True, "", path, 1 + pad, travel)
+    return ContactPlan(True, "", path, 1 + pad, travel, chosen_exit)
 

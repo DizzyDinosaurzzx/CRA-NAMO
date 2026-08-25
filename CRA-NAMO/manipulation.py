@@ -186,7 +186,8 @@ def plan_move_se2(
             return path_accept is None or path_accept(poses)
 
         result = planner.plan_anywhere((obs.x, obs.y, obs.theta),
-                                       validate=_validate, goal_accept=goal_accept)
+                                       validate=_validate, goal_accept=goal_accept,
+                                       n_candidates=cfg.se2_goal_candidates)
         if not result.success:
             cfg.log(f"[plan_move_se2] oid={obs.oid} {result.reason}")
             return (False, None, math.inf, None)
