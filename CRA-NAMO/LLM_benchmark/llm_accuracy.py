@@ -1,41 +1,40 @@
-"""Benchmark the LLM mu*rho estimator, and price its error in navigation cost.
+"""Benchmark the LLM estimators against a reference dataset.
 
-Three stages, run independently or with `all`:
+Two things are estimated per obstacle and both are measured here: `mu*rho`,
+how hard it is to push, and `risk`, what breaks if you push it. They are
+separate questions with separate failure modes — an acrow prop is trivial to
+push and holding up a ceiling — so they get separate stages and separate charts.
+
+Stages, run independently or with `all`:
 
   accuracy   Ask the live model for mu*rho on every item in `llm_dataset`,
              several times each, and compare against the reference values.
              Also records the no-LLM heuristic (`material_mu_rho`) on the same
              items, so every accuracy number has a floor to beat.
 
+  risk       The same items put to `RiskEstimator`, scored against each item's
+             reference risk level. Two arms: on sight (label and size only, what
+             the robot has before it touches anything) and after contact (the
+             measured push force supplied as well, which is what `reassess`
+             gets). The floor here is `risk.keyword_level`, the table lookup that
+             runs when there is no API key.
+
   size       mu*rho is defined size-independent, but the prompt states the
              object's dimensions. Re-asks a subset at 0.5x / 1x / 2x linear
              scale; any movement is prompt leakage, not physics.
 
-  nav        Runs whole scenarios with the estimator's output swapped out, and
-             measures what the planner actually pays. Arms:
-               oracle     perfect mu*rho              (the floor on cost)
-               llm        stage-1 medians             (what you would ship)
-               heuristic  `material_mu_rho` fallback  (what you get with no key)
-               x<f>       every estimate multiplied by f  (sensitivity curve)
-               noise<s>   per-obstacle lognormal error at the measured spread
-             Maps are relabelled with paraphrases of their own anchors, so the
-             ground-truth physics is untouched and the arms differ *only* in
-             what the estimator believes.
+  doors      What the measured error costs a route. Runs the `ten_doors`
+             scenario — ten walls, each offering push A / push B / walk around —
+             with the obstacles' difficulty and risk beliefs set offline: first
+             exactly right, then perturbed by the error the `accuracy` and
+             `risk` stages actually measured. No API calls: the perturbation is
+             sampled from those measurements, so a run is repeatable and costs
+             nothing.
 
-  report     Turns the saved JSON into report.md plus two charts. No API calls.
+  report     Turns the saved JSON into report.md plus two charts — one for
+             difficulty, one for risk. No API calls.
 
-Why the arms are comparable: the true `difficulty` is recomputed from the same
-reference mu*rho in every arm, and work is always charged at the true value
-(`planner.py` uses `_world_obstacle(oid).difficulty`). A bad estimate therefore
-cannot make the bill *look* cheaper — it can only cause the planner to choose
-worse, which is exactly the effect we want to isolate.
 
-Usage
------
-    python3 LLM_test.py all                 # ~15 min, ~200 API calls
-    python3 LLM_test.py accuracy --repeats 3
-    python3 LLM_test.py nav --maps two_doors,hidden_obstacle
-    python3 LLM_test.py report              # offline, re-renders from JSON
 """
 
 from __future__ import annotations
@@ -64,43 +63,43 @@ from config import Config
 from llm_difficulty import (
     MATERIAL_MU_RHO,
     DifficultyEstimator,
-    _canonical_anchor,
-    _normalise,
-    friction_force,
     material_mu_rho,
 )
 from llm_dataset import (
     DATASET,
-    PARAPHRASE_OF_ANCHOR,
     Item,
-    assert_all_off_anchor,
+    validate,
 )
 from executor import OnlineNAMO
+from risk import (
+    LEVELS,
+    LOW,
+    RiskEstimator,
+    _normalise as _risk_normalise,
+    detour_equivalent_m,
+    keyword_level,
+)
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_test_out")
 
-# Maps used by the nav stage. Every one offers the planner a real choice between
-# pushing and detouring — on a map with only one route the estimate cannot
-# change anything and the comparison is vacuous.
-DEFAULT_MAPS = ("two_doors", "hidden_obstacle", "maze_mixed", "corridor")
-
-# Sensitivity sweep: uniform multiplicative error applied to every estimate.
-# Spread wide on purpose — the response is expected to be flat then step, and a
-# narrow sweep would miss where the step is.
-SWEEP_FACTORS = (0.05, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 20.0)
-NOISE_SEEDS = (0, 1, 2, 3, 4)
-
 SIZE_SCALES = (0.5, 1.0, 2.0)
 
-# Palette: dataviz categorical slots 1/2/3/7, validated all-pairs on the light
-# surface (worst CVD dE 9.2, worst normal-vision dE 16.3).
+# One colour per dataset group. Three, not four: a scatter is an all-pairs form
+# and dataviz slots 1/2/3 are the largest set that clears the all-pairs gates on
+# the light surface (worst CVD dE 9.2, worst normal-vision dE 24.0). The
+# anchor/off-table split inside `object` lives in the report table instead, and
+# the marker shape carries identity a second time for the aqua slot, which sits
+# below 3:1 against the surface.
 GROUP_STYLE = {
-    "paraphrase": ("#2a78d6", "o"),
-    "novel":      ("#eb6834", "s"),
-    "state":      ("#1baf7a", "^"),
-    "brand":      ("#4a3aa7", "D"),
+    "object": ("#2a78d6", "o"),
+    "state":  ("#eb6834", "^"),
+    "brand":  ("#1baf7a", "D"),
 }
-INK, MUTED, GRID = "#0b0b0b", "#898781", "#e1e0d9"
+# Sequential blue, dataviz steps 100 -> 700: magnitude, one hue, light to dark.
+SEQ_BLUE = ("#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
+            "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281",
+            "#0d366b")
+INK, MUTED, GRID, SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#fcfcfb"
 
 
 def log(msg: str) -> None:
@@ -126,13 +125,66 @@ def _load(name: str):
         return json.load(fh)
 
 
+def _preflight(cfg: Config) -> None:
+    """One call before the hundreds, so a dead key fails in a second.
+
+    `Config.log` is silent unless `cfg.verbose`, and these stages run with it
+    off, so an HTTP error raised inside a worker thread leaves no trace at all:
+    every call returns `None`, the stage writes a file full of nulls, reports a
+    plausible-looking wall time, and the failure only surfaces much later as a
+    `KeyError` in the report. This asks the endpoint one cheap question first
+    and quotes back exactly what the server said — the run that taught us this
+    burned 330 calls against an account reading `Insufficient Balance`.
+    """
+    import requests
+    log(f"model {cfg.deepseek_model} at {cfg.deepseek_base_url}")
+    try:
+        # Deliberately the cheapest possible shape — no reasoning, one token,
+        # not streamed. Everything this is here to catch (a bad key, no
+        # balance, an unknown model, an unreachable host) fails the same way
+        # whatever the body asks for, and the real calls are expensive.
+        r = requests.post(
+            cfg.deepseek_base_url, timeout=cfg.llm_timeout,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {cfg.deepseek_api_key}"},
+            json={"model": cfg.deepseek_model, "max_tokens": 1, "stream": False,
+                  "messages": [{"role": "user", "content": "ok"}],
+                  "thinking": {"type": "disabled"}})
+    except Exception as e:
+        raise SystemExit(f"cannot reach {cfg.deepseek_base_url}: {e}")
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("error", r.json())
+        except Exception:
+            detail = r.text[:300]
+        raise SystemExit(
+            f"the API refused the very first call - HTTP {r.status_code}: "
+            f"{detail}\nNothing was run; fix this before spending a stage on it.")
+
+
+def _require_answers(kind: str, n_ok: int, n_total: int) -> None:
+    """Refuse to save a stage that learned nothing.
+
+    A file of nulls is worse than no file: every later stage reads it as
+    measured data. `doors` in particular would take an all-null risk stage as
+    'the estimator never misreads risk' and report a clean bill of health.
+    """
+    if n_ok:
+        return
+    raise SystemExit(
+        f"{kind}: not one of the {n_total} calls returned a usable answer, so "
+        f"there is nothing to save. Check the key, the balance and the model "
+        f"name in Config, then run this stage again.")
+
+
 # Stage 1 - estimator accuracy
 
 def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
-    assert_all_off_anchor()
+    validate()
     est = DifficultyEstimator(cfg)
     if not est.api_key:
         raise SystemExit("no DeepSeek API key in Config.deepseek_api_key / $DEEPSEEK_API_KEY")
+    _preflight(cfg)
 
     jobs = [(item, rep) for item in DATASET for rep in range(repeats)]
     log(f"accuracy: {len(DATASET)} items x {repeats} repeats = {len(jobs)} calls, "
@@ -163,15 +215,86 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
             **{k: v for k, v in asdict(item).items()},
             "mu_rho_true": item.mu_rho,
             "preds": by_label[item.label],
-            # median over repeats is what the nav stage ships: one number per
-            # material, robust to a single malformed reply
+            # median over repeats is the number to quote for a material:
+            # robust to a single malformed reply
             "pred": statistics.median(preds) if preds else None,
             "n_ok": len(preds),
             "heuristic": material_mu_rho(item.label),
         })
+    _require_answers("accuracy", sum(1 for r in rows if r["pred"]), len(jobs))
     payload = {"model": cfg.deepseek_model, "repeats": repeats,
                "seconds": round(time.time() - t0, 1), "rows": rows}
     _save("accuracy.json", payload)
+    return payload
+
+
+# Stage 1b - risk-level accuracy
+
+# The robot asks about risk twice, so the benchmark does too:
+#   on sight     label and size only, before it has touched anything
+#   after contact the same object with the measured push force supplied
+# The reference level is identical in both arms — touching an obstacle does not
+# make it less dangerous — so the contact arm answers one narrow question: does
+# knowing the force help, or does a heavy reading just frighten the model? One
+# pass is enough for that, hence its own repeat count.
+RISK_CONTACT_REPEATS = 1
+
+
+def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
+    validate()
+    est = RiskEstimator(cfg)
+    if not est.api_key:
+        raise SystemExit("no DeepSeek API key in Config.deepseek_api_key / $DEEPSEEK_API_KEY")
+    _preflight(cfg)
+
+    # (item, difficulty): None is the sight arm, a number is the contact arm.
+    jobs = [(it, None) for it in DATASET for _ in range(repeats)]
+    jobs += [(it, it.difficulty) for it in DATASET for _ in range(RISK_CONTACT_REPEATS)]
+    log(f"risk: {len(DATASET)} items x {repeats} on sight + {RISK_CONTACT_REPEATS} "
+        f"after contact = {len(jobs)} calls, {workers} workers, "
+        f"model={cfg.deepseek_model}")
+    done = [0]
+
+    def ask(job):
+        item, difficulty = job
+        # Production normalises the label before it reaches the prompt; asking a
+        # prettier question here would measure a prompt the robot never sends.
+        level = est._deepseek(item.observation(), _risk_normalise(item.label),
+                              difficulty)
+        done[0] += 1
+        if done[0] % 20 == 0 or done[0] == len(jobs):
+            log(f"  {done[0]}/{len(jobs)} calls")
+        return item.label, difficulty is not None, level
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(ask, jobs))
+    log(f"risk: {len(jobs)} calls in {time.time() - t0:.1f}s")
+
+    sight: Dict[str, List[Optional[str]]] = {}
+    contact: Dict[str, List[Optional[str]]] = {}
+    for label, is_contact, level in results:
+        (contact if is_contact else sight).setdefault(label, []).append(level)
+
+    rows = []
+    for it in DATASET:
+        rows.append({
+            "label": it.label, "group": it.group, "category": it.category,
+            "risk_true": it.risk, "mu_rho_true": it.mu_rho,
+            "difficulty": it.difficulty,
+            "sight_levels": sight.get(it.label, []),
+            "sight": _modal_level(sight.get(it.label, [])),
+            "contact_levels": contact.get(it.label, []),
+            "contact": _modal_level(contact.get(it.label, [])),
+            # the no-API fallback, scored on exactly the same labels
+            "keyword": keyword_level(it.label),
+            "risk_note": it.risk_note,
+        })
+    _require_answers("risk", sum(1 for r in rows if r["sight"]), len(jobs))
+    payload = {"model": cfg.deepseek_model, "repeats": repeats,
+               "contact_repeats": RISK_CONTACT_REPEATS,
+               "seconds": round(time.time() - t0, 1), "rows": rows}
+    _save("risk.json", payload)
     return payload
 
 
@@ -183,6 +306,7 @@ def stage_size(cfg: Config, workers: int) -> dict:
     Anything that moves with scale is the model reading size as a mass cue,
     which double-counts volume: the caller multiplies by volume again.
     """
+    _preflight(cfg)
     est = DifficultyEstimator(cfg)
     subset = [it for it in DATASET
               if it.label in {
@@ -268,6 +392,7 @@ def _ask_raw(cfg: Config, model: str, thinking: str, max_tokens: int,
 
 
 def stage_ablate(cfg: Config, workers: int) -> dict:
+    _preflight(cfg)
     est = DifficultyEstimator(cfg)
     prompts = {it.label: est._build_prompt(it.observation()) for it in DATASET}
     variants = []
@@ -337,10 +462,11 @@ def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
 
 
 def stage_order(cfg: Config, workers: int) -> dict:
+    _preflight(cfg)
     est = DifficultyEstimator(cfg)
     # Only the off-table objects: the paraphrase items have an anchor as their
     # correct answer, so they cannot show whether a hit is copying or reasoning.
-    items = [it for it in DATASET if it.group != "paraphrase"]
+    items = [it for it in DATASET if it.anchor is None]
     orders = [("ascending", 0), ("descending", 0), ("shuffled", 1), ("shuffled", 2)]
 
     variants = []
@@ -358,7 +484,8 @@ def stage_order(cfg: Config, workers: int) -> dict:
             f"last row = {last_value:g}, largest = {max_value:g}")
 
         def ask(it: Item, _p=prompts):
-            value, _ = _ask_raw(cfg, cfg.deepseek_model, "disabled", 32, _p[it.label])
+            value, _ = _ask_raw(cfg, cfg.deepseek_model, "disabled", 32,
+                                _p[it.label])
             return it.label, value
 
         t0 = time.time()
@@ -394,211 +521,291 @@ def stage_order(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# Stage 3 - navigation impact
+# Stage 3 - what the measured error costs a route
 
-def _resolve_anchor(material: str) -> str:
-    """Map a scenario's material label onto a PROMPT_ANCHORS entry.
+DOORS_MAP = "ten_doors"
 
-    Scenario authors write labels by hand, so a stray plural has to be tolerated
-    — but silently guessing would corrupt the ground truth, so anything else is
-    an error rather than a fallback.
+# Perturbation seeds per arm family. Each seed is one whole run of the scenario
+# in each of three families, so this is the knob that sets the runtime: a run is
+# ~40 s when the beliefs are close to the truth and a few minutes when they are
+# not, because a planner that believes a wrong number tries harder before it
+# gives up. Three seeds is nine runs plus the exact one; raise it with
+# `--doors-seeds` when the spread between seeds matters more than the wait.
+DOORS_SEEDS = 3
+
+# A transition row is believed only if the risk stage actually observed this
+# many items at that reference level. Below it the row is left as the identity:
+# with three `extreme` items in the dataset, a smoothed row would be mostly
+# invented, and inventing the transition that matters most is the one thing this
+# must not do.
+_MIN_TRANSITION_ROW = 5
+
+
+def _error_model(accuracy: Optional[dict]):
+    """The difficulty error to simulate, as (bias, spread) in log10 units.
+
+    Measured, not assumed: `bias` is the median log10 ratio — positive when the
+    model over-estimates, and a median rather than a mean so one wild reply
+    cannot set it — and `spread` is the standard deviation of the same errors. A
+    perturbed belief is `true * 10 ** (bias + N(0, spread))`, which reproduces
+    both halves of what the accuracy stage saw: being wrong by a factor, and
+    being wrong in a consistent direction.
     """
-    for candidate in (material, str(material).rstrip("sS")):
-        anchor = _canonical_anchor(candidate)
-        if anchor is not None:
-            return anchor
-    raise ValueError(
-        f"scenario material {material!r} is not an anchor or alias; the nav "
-        "experiment needs a calibrated ground truth for every obstacle")
+    errs = _log_errors(accuracy["rows"]) if accuracy else []
+    if len(errs) < 2:
+        return 0.0, 0.0
+    return statistics.median(errs), statistics.pstdev(errs)
 
 
-def _relabel_map(scenario: dict) -> Dict[str, float]:
-    """Rewrite every obstacle's material as a paraphrase of its own anchor.
+def _risk_measured(risk_payload: Optional[dict], key: str = "sight") -> bool:
+    """Did the risk stage actually produce verdicts to learn an error from?"""
+    return bool(risk_payload) and any(r.get(key) for r in risk_payload["rows"])
 
-    The obstacle keeps its geometry and its true difficulty (recomputed from the
-    same anchor mu*rho it already used), so the world is physically identical.
-    Only the string the estimator sees changes — which is precisely the variable
-    under test.
+
+def _risk_transition(risk_payload: Optional[dict], key: str = "sight") -> dict:
+    """P(estimated level | true level), from the risk stage's own confusion."""
+    table = {name: {name: 1.0} for name in LEVELS}          # identity default
+    if not _risk_measured(risk_payload, key):
+        return table
+    grid = _risk_confusion(risk_payload["rows"], key)
+    for i, want in enumerate(LEVELS):
+        total = sum(grid[i])
+        if total >= _MIN_TRANSITION_ROW:
+            table[want] = {got: grid[i][j] / total
+                           for j, got in enumerate(LEVELS) if grid[i][j]}
+    return table
+
+
+def _sample_level(transition: dict, true_level: str, rng: random.Random) -> str:
+    row = transition.get(true_level) or {true_level: 1.0}
+    levels = list(row)
+    return rng.choices(levels, weights=[row[k] for k in levels], k=1)[0]
+
+
+def _doors_beliefs(gates: List[dict], seed: int, bias: float, spread: float,
+                   transition: dict, perturb: tuple):
+    """One draw of what the estimator believes about every obstacle.
+
+    Difficulty and risk draw from their own seeded streams, so the
+    difficulty-only arm gets exactly the difficulty draw the both-perturbed arm
+    got, and the two families differ by the risk term alone.
     """
-    ground_truth: Dict[str, float] = {}
-    for w in scenario["movable"]:
-        anchor = _resolve_anchor(w.material)
-        label = PARAPHRASE_OF_ANCHOR[anchor]
-        mu_rho = MATERIAL_MU_RHO[anchor]
-        w.material = label
-        w.difficulty = max(0.01, round(friction_force(mu_rho, w.volume), 3))
-        ground_truth[_normalise(label)] = mu_rho
-    return ground_truth
+    rng_d = random.Random(f"difficulty-{seed}")
+    rng_r = random.Random(f"risk-{seed}")
+    difficulty, level = {}, {}
+    for r in gates:
+        d, lvl = r["difficulty"], r["risk"]
+        draw_d = 10.0 ** (bias + rng_d.gauss(0.0, spread)) if spread or bias else 1.0
+        draw_r = _sample_level(transition, r["risk"], rng_r)
+        if "difficulty" in perturb:
+            d = max(0.01, d * draw_d)
+        if "risk" in perturb:
+            lvl = draw_r
+        difficulty[r["oid"]] = d
+        level[r["oid"]] = lvl
+    return difficulty, level
 
 
-def _run_map(map_name: str, arm: str,
-             mu_rho_by_label: Optional[Dict[str, float]],
-             lambda_distance: Optional[float] = None) -> dict:
-    """One scenario, one belief about mu*rho. `None` means the no-LLM heuristic."""
-    scenario = scenarios.load(map_name)          # fresh objects every call
+def _gate_choices(gates: List[dict], removed) -> Dict[int, str]:
+    """What the run did at each gate: `A`, `B`, `AB`, or `detour`."""
+    by_oid = {r["oid"]: r for r in gates}
+    choice = {r["gate"]: "detour" for r in gates}
+    for oid in removed:
+        r = by_oid.get(oid)
+        if r:
+            choice[r["gate"]] = (r["side"] if choice[r["gate"]] == "detour"
+                                 else choice[r["gate"]] + r["side"])
+    return choice
+
+
+def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
+               level: Dict[int, str]) -> dict:
+    """One crossing of the map under one set of beliefs.
+
+    The network is cut out and both estimators are pre-seeded per obstacle, so
+    the run is deterministic and free. What is *not* frozen is the correction
+    the robot earns by touching something: `Belief.get_difficulty` swaps in the
+    true force on contact and `RiskEstimator.reassess` re-rates the label, both
+    exactly as they do in a live run. A wrong belief therefore costs what it
+    costs in practice — a decision taken before the robot knew better — and not
+    an imaginary error that survives being disproved.
+
+    The bill to read is `C`, not `J`. `J` is walking plus work; the risk
+    surcharge is charged outside it. An arm that pushes a `medium` obstacle it
+    should have walked around therefore books a *lower* J than the arm that
+    detoured — it saved the walk — and only `C = J + risk_cost` (at the shipped
+    `time_importance = 0`) notices what was disturbed to get it. Both are kept.
+    """
+    scenario = scenarios.load(DOORS_MAP)             # fresh objects every call
     cfg: Config = scenario["cfg"]
     cfg.save_frames = False
     cfg.verbose = False
-    if lambda_distance is not None:
-        cfg.lambda_distance = float(lambda_distance)
-    ground_truth = _relabel_map(scenario)
 
-    sim = OnlineNAMO(scenario["workspace"], scenario["static"], scenario["movable"],
-                     scenario["start"], scenario["goal"], cfg)
-    # Cut the network out: every arm is served from a pre-seeded cache, so runs
-    # are deterministic and repeatable without burning calls.
+    sim = OnlineNAMO(scenario["workspace"], scenario["static"],
+                     scenario["movable"], scenario["start"], scenario["goal"], cfg)
     sim.estimator.api_key = ""
     sim.estimator.mode = arm
-    if mu_rho_by_label is not None:
-        for label, value in mu_rho_by_label.items():
-            key = _normalise(label)
-            sim.estimator.material_mu_rho_cache[key] = value
-            sim.estimator.material_source_cache[key] = arm
+    sim.risk.api_key = ""
+    for oid, value in difficulty.items():
+        sim.estimator.cache[oid] = round(float(value), 3)
+    for oid, lvl in level.items():
+        sim.risk.level[oid] = lvl
+        sim.risk.source[oid] = arm
 
     t0 = time.time()
     res = sim.run()
-    wall = time.time() - t0
-
-    # What the planner believed, per obstacle, for the record.
-    beliefs = {str(oid): round(v, 4) for oid, v in sim.estimator.mu_rho_cache.items()}
+    choices = _gate_choices(gates, res.removed)
+    true_risk = {r["oid"]: r["risk"] for r in gates}
     return {
-        "map": map_name, "arm": arm, "success": res.success, "J": res.J,
+        "arm": arm, "success": res.success, "J": res.J, "C": res.C,
         "walk_cost": res.walk_cost, "work_cost": res.work_cost,
-        "pushes": len(res.removed), "removed": res.removed, "cycles": res.cycles,
-        "expansions": res.total_expansions, "plan_time": res.plan_time,
-        "wall_s": round(wall, 2), "message": res.message,
-        "ground_truth": ground_truth, "believed_mu_rho": beliefs,
+        "risk_cost": res.risk_cost, "pushes": len(res.removed),
+        "removed": sorted(res.removed),
+        # obstacles moved that were not `low` risk in the first place: the
+        # failure that a cheaper route does not make up for
+        "risky_pushes": sorted(oid for oid in res.removed
+                               if true_risk.get(oid, LOW) != LOW),
+        "choices": {str(g): c for g, c in sorted(choices.items())},
+        "cycles": res.cycles, "expansions": res.total_expansions,
+        "wall_s": round(time.time() - t0, 1), "message": res.message,
+        "believed_difficulty": {str(k): round(v, 1) for k, v in difficulty.items()},
+        "believed_risk": {str(k): v for k, v in level.items()},
     }
 
 
-def _preds_and_sigma(rows: Optional[List[dict]]):
-    """Predictions keyed the way `_relabel_map` keys ground truth, plus the
-    spread of that estimator's log10 error over the whole dataset.
+def stage_doors(seeds: int, accuracy: Optional[dict],
+                risk_payload: Optional[dict]) -> dict:
+    gates = scenarios.load(DOORS_MAP)["gates"]
+    bias, spread = _error_model(accuracy)
+    transition = _risk_transition(risk_payload)
+    # An arm that perturbs nothing is not a measurement of "this term does not
+    # matter" — it is a missing input wearing the costume of a result. Run only
+    # the families whose error model was actually measured, and record which.
+    has_difficulty = bool(spread or bias)
+    has_risk = _risk_measured(risk_payload)
+    if not has_difficulty:
+        log("doors: no usable accuracy.json - skipping the difficulty families")
+    if not has_risk:
+        log("doors: no usable risk.json - skipping the risk families")
+    if not (has_difficulty or has_risk):
+        raise SystemExit(
+            "doors: neither estimator has a measured error to simulate. Run "
+            "`accuracy` and/or `risk` first - with both missing every arm would "
+            "be a copy of `exact`.")
 
-    Only the paraphrase rows can be used as an arm — those are the labels the
-    relabelled maps carry — but sigma is taken over every item, because it
-    stands for the error the estimator would show on arbitrary real-world
-    labels, which is the deployment case.
-    """
-    if not rows:
-        return {}, 0.0
-    pred = {_normalise(r["label"]): r["pred"] for r in rows
-            if r["pred"] and r["group"] == "paraphrase"}
-    errs = [math.log10(r["pred"] / r["mu_rho_true"]) for r in rows if r["pred"]]
-    return pred, (statistics.pstdev(errs) if len(errs) > 1 else 0.0)
+    families = [f for f, perturb in (("both", ("difficulty", "risk")),
+                                     ("difficulty", ("difficulty",)),
+                                     ("risk", ("risk",)))
+                if all((p == "difficulty" and has_difficulty)
+                       or (p == "risk" and has_risk) for p in perturb)]
+    log(f"doors: {DOORS_MAP}, error model bias {10 ** bias:.2f}x, spread "
+        f"{10 ** spread:.2f}x, families {'+'.join(families)}, {seeds} seeds = "
+        f"{len(families) * seeds + 1} runs")
 
+    runs = [_run_doors("exact", gates,
+                       {r["oid"]: r["difficulty"] for r in gates},
+                       {r["oid"]: r["risk"] for r in gates})]
+    log(f"  {'exact':<14s} C={runs[0]['C']:>12,.0f}  J={runs[0]['J']:>12,.0f}  "
+        f"pushes={runs[0]['pushes']}  ({runs[0]['wall_s']}s)")
 
-def _llm_and_sigma(accuracy: Optional[dict]):
-    return _preds_and_sigma(accuracy["rows"] if accuracy else None)
-
-
-def _thinking_rows(ablate: Optional[dict]) -> Optional[List[dict]]:
-    """The reasoning-mode variant, but only if it answered essentially
-    everything — a truncated variant has dropped its hardest items and would
-    make reasoning mode look better than it is."""
-    if not ablate:
-        return None
-    for v in ablate["variants"]:
-        if v["thinking"] == "enabled" and v["n_parsed"] >= 0.9 * len(v["rows"]):
-            return v["rows"]
-    return None
-
-
-# Extra estimators to run alongside the current one, as (arm name, results file).
-# The no-reasoning file is the estimator this project shipped before 2026-08-10;
-# keeping it as an arm means the before/after comparison lives in a single
-# nav.json and can be re-derived without re-running the old configuration.
-COMPARISON_ESTIMATORS = (("llm_nothink", "accuracy_nothink_backup.json"),)
-
-
-def stage_lambda(maps: List[str], lambdas: List[float],
-                 accuracy: Optional[dict]) -> dict:
-    """Where the cost of a bad estimate turns on.
-
-    lambda_distance is the price of a metre of driving, so it sets the exchange
-    rate between detouring and pushing. Estimation error is only expensive when
-    obstacles sit near that break-even; the shipped lambda may or may not put
-    them there, and that is a property of the tuning, not of the model. This
-    sweep locates the regime instead of assuming it.
-    """
-    llm_pred, sigma = _llm_and_sigma(accuracy)
-    runs = []
-    for map_name in maps:
-        gt = _relabel_map(scenarios.load(map_name))
-        for lam in lambdas:
-            arms: List[tuple] = [("oracle", dict(gt)), ("heuristic", None)]
-            if llm_pred and all(k in llm_pred for k in gt):
-                arms.append(("llm", {k: llm_pred[k] for k in gt}))
-            for seed in NOISE_SEEDS:
-                rng = random.Random(seed)
-                arms.append((f"noise{seed}",
-                             {k: v * (10.0 ** rng.gauss(0.0, max(sigma, 1e-6)))
-                              for k, v in gt.items()}))
-            for arm, mapping in arms:
-                row = _run_map(map_name, arm, mapping, lambda_distance=lam)
-                row["lambda"] = lam
-                runs.append(row)
-            log(f"  {map_name:<14s} lambda={lam:<6g} "
-                f"oracle J={runs[-len(arms)]['J']:,.0f}")
-    payload = {"maps": maps, "lambdas": lambdas,
-               "sigma_log10": round(sigma, 4), "runs": runs}
-    _save("lambda.json", payload)
-    return payload
-
-
-def stage_nav(maps: List[str], accuracy: Optional[dict]) -> dict:
-    llm_pred: Dict[str, float] = {}
-    llm_pred, sigma = _llm_and_sigma(accuracy)
-    if llm_pred:
-        log(f"nav: {len(llm_pred)} LLM medians available; "
-            f"log10 error sigma {sigma:.3f} ({10 ** sigma:.2f}x)")
-    else:
-        log("nav: no accuracy.json - skipping the 'llm' arm, sweep only")
-
-    # Every estimator gets both a point arm (its actual predictions) and a noise
-    # family drawn from its own measured error spread. The point arm can be
-    # lucky on one map's labels; the noise family is what generalises.
-    estimators = [("llm", llm_pred, sigma)]
-    for arm_name, filename in COMPARISON_ESTIMATORS:
-        pred, s = _preds_and_sigma((_load(filename) or {}).get("rows"))
-        if pred:
-            estimators.append((arm_name, pred, s))
-            log(f"nav: {arm_name} from {filename}; sigma {s:.3f} ({10 ** s:.2f}x)")
-
-    runs = []
-    for map_name in maps:
-        gt = _relabel_map(scenarios.load(map_name))     # labels + true mu*rho
-
-        arms: List[tuple] = [("oracle", dict(gt)), ("heuristic", None)]
-        for arm_name, pool, s in estimators:
-            missing = [k for k in gt if k not in pool]
-            if missing:
-                # a partial arm would be half model, half heuristic fallback and
-                # would measure neither, so refuse it rather than report a blend
-                log(f"  {map_name}: no {arm_name!r} arm, missing {missing}")
-                continue
-            arms.append((arm_name, {k: pool[k] for k in gt}))
-            if s <= 0.0:
-                continue
-            for seed in NOISE_SEEDS:
-                rng = random.Random(seed)
-                arms.append((f"noise_{arm_name}_{seed}",
-                             {k: v * (10.0 ** rng.gauss(0.0, s))
-                              for k, v in gt.items()}))
-        for f in SWEEP_FACTORS:
-            arms.append((f"x{f:g}", {k: v * f for k, v in gt.items()}))
-
-        for arm, mapping in arms:
-            row = _run_map(map_name, arm, mapping)
+    perturbs = {"both": ("difficulty", "risk"),
+                "difficulty": ("difficulty",), "risk": ("risk",)}
+    for seed in range(seeds):
+        for family in families:
+            perturb = perturbs[family]
+            difficulty, level = _doors_beliefs(gates, seed, bias, spread,
+                                               transition, perturb)
+            row = _run_doors(f"{family}{seed}", gates, difficulty, level)
+            row["family"], row["seed"] = family, seed
+            row["changed"] = sum(1 for g, c in row["choices"].items()
+                                 if c != runs[0]["choices"][g])
             runs.append(row)
-            log(f"  {map_name:<18s} {arm:<12s} J={row['J']:>14,.1f} "
-                f"pushes={row['pushes']} ok={row['success']} ({row['wall_s']}s)")
+            log(f"  {row['arm']:<14s} C={row['C']:>12,.0f}  "
+                f"J={row['J']:>12,.0f}  pushes={row['pushes']}  "
+                f"changed={row['changed']}/10  "
+                f"risky={len(row['risky_pushes'])}  ({row['wall_s']}s)")
 
-    payload = {"maps": maps, "sigma_log10": round(sigma, 4),
-               "estimator_sigmas": {name: round(s, 4) for name, _, s in estimators},
-               "factors": list(SWEEP_FACTORS), "runs": runs}
-    _save("nav.json", payload)
+    payload = {"map": DOORS_MAP, "seeds": seeds, "families": families,
+               "difficulty_measured": has_difficulty, "risk_measured": has_risk,
+               "bias_log10": round(bias, 4), "spread_log10": round(spread, 4),
+               "transition": transition, "gates": gates, "runs": runs}
+    _save("doors.json", payload)
     return payload
+
+
+# Risk metrics
+
+# Which key in a risk row each reported arm reads from.
+RISK_ARMS = (("keyword fallback", "keyword"),
+             ("LLM on sight", "sight"),
+             ("LLM after contact", "contact"))
+
+
+def _modal_level(levels) -> Optional[str]:
+    """The verdict to ship for one object: the most common reply, and on a tie
+    the more dangerous of them.
+
+    An estimator that cannot decide between `medium` and `high` should be
+    believed at `high` — that is the same rule `risk.higher` applies everywhere
+    else, and it keeps the tie-break from quietly flattering the model.
+    """
+    got = [lvl for lvl in levels if lvl]
+    if not got:
+        return None
+    counts: Dict[str, int] = {}
+    for lvl in got:
+        counts[lvl] = counts.get(lvl, 0) + 1
+    best = max(counts.values())
+    return max((lvl for lvl, n in counts.items() if n == best), key=LEVELS.index)
+
+
+def _risk_stats(rows, key: str) -> dict:
+    """Agreement with the reference level, and what disagreeing costs.
+
+    `under` is the number the safety case turns on: the estimator called
+    something safer than it is, so the planner is willing to push an obstacle it
+    should have routed around. `over` only ever costs distance.
+
+    The two `_m` figures price both directions in the planner's own units.
+    `RISK_DETOUR_EQUIV_M` says what each level is worth as a detour, so the
+    shortfall is the protection the estimator dropped and the excess is the
+    detour it invented — both averaged over every item, not just the wrong ones.
+    """
+    pairs = [(r["risk_true"], r[key]) for r in rows if r.get(key)]
+    if not pairs:
+        return {"n": 0}
+    order = {name: i for i, name in enumerate(LEVELS)}
+    deltas = [order[got] - order[want] for want, got in pairs]
+    gaps = [detour_equivalent_m(got) - detour_equivalent_m(want) for want, got in pairs]
+    n = len(pairs)
+    return {
+        "n": n,
+        "exact": round(sum(1 for d in deltas if d == 0) / n, 3),
+        "within_1": round(sum(1 for d in deltas if abs(d) <= 1) / n, 3),
+        "under": round(sum(1 for d in deltas if d < 0) / n, 3),
+        "over": round(sum(1 for d in deltas if d > 0) / n, 3),
+        "worst_under_levels": -min(deltas) if min(deltas) < 0 else 0,
+        "shortfall_m": round(statistics.fmean(max(0.0, -g) for g in gaps), 1),
+        "excess_m": round(statistics.fmean(max(0.0, g) for g in gaps), 1),
+    }
+
+
+def _risk_confusion(rows, key: str) -> List[List[int]]:
+    """counts[reference][estimate], in LEVELS order."""
+    order = {name: i for i, name in enumerate(LEVELS)}
+    grid = [[0] * len(LEVELS) for _ in LEVELS]
+    for r in rows:
+        got = r.get(key)
+        if got:
+            grid[order[r["risk_true"]]][order[got]] += 1
+    return grid
+
+
+def _risk_under_calls(rows, key: str) -> List[dict]:
+    """Items called safer than they are, worst drop first."""
+    order = {name: i for i, name in enumerate(LEVELS)}
+    out = [r for r in rows if r.get(key) and order[r[key]] < order[r["risk_true"]]]
+    return sorted(out, key=lambda r: order[r[key]] - order[r["risk_true"]])
 
 
 # Metrics
@@ -682,34 +889,6 @@ def _repeatability(rows) -> dict:
             "max_spread": round(max(spreads), 3)}
 
 
-def _decision_flips(rows, cfg: Config, move_dist=2.0) -> List[dict]:
-    """How often the estimate flips the only decision the planner makes.
-
-    An obstacle is worth pushing when work < the detour it saves:
-        difficulty * move_dist  <  lambda * detour
-    so each obstacle has a break-even detour length. Comparing the estimated
-    break-even against the true one at a few plausible detour lengths turns the
-    mu*rho error into the quantity that actually reaches the search.
-    """
-    out = []
-    for detour in (2.0, 5.0, 10.0, 20.0, 50.0):
-        budget = cfg.lambda_distance * detour
-        flips = 0
-        total = 0
-        for r in rows:
-            if not r.get("pred"):
-                continue
-            volume = r["l"] * r["d"] * r["h"]
-            true_push = friction_force(r["mu_rho_true"], volume) * move_dist
-            est_push = friction_force(r["pred"], volume) * move_dist
-            total += 1
-            if (true_push < budget) != (est_push < budget):
-                flips += 1
-        out.append({"detour_m": detour, "n": total,
-                    "flip_rate": round(flips / total, 3) if total else None})
-    return out
-
-
 # Charts
 
 def _chart_accuracy(rows, path: str):
@@ -718,7 +897,11 @@ def _chart_accuracy(rows, path: str):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7.2, 6.4))
-    lo, hi = 0.5, 3000.0
+    # Bound the axes by the data, not by a constant: the dataset spans an
+    # exercise ball to a slab of granite, and a clipped point is a silently
+    # dropped result.
+    seen = [v for r in rows for v in (r["mu_rho_true"], r.get("pred")) if v]
+    lo, hi = min(0.2, min(seen) / 1.6), max(3000.0, max(seen) * 1.6)
     ax.plot([lo, hi], [lo, hi], color=INK, lw=1.2, zorder=2)
     for band, alpha in ((2.0, 0.10), (1.5, 0.14)):
         ax.fill_between([lo, hi], [lo / band, hi / band], [lo * band, hi * band],
@@ -734,7 +917,7 @@ def _chart_accuracy(rows, path: str):
     for value, n in sorted(counts.items(), key=lambda kv: -kv[1])[:2]:
         if n < 4 or value not in anchor_name:
             continue
-        ax.axhline(value, color=MUTED, lw=1.0, ls=(0, (5, 4)), zorder=2)
+        ax.axhline(value, color=MUTED, lw=0.8, zorder=2)
         ax.text(hi * 0.92, value * 1.12,
                 f"{n} replies = anchor '{anchor_name[value]}' ({value:g})",
                 ha="right", va="bottom", fontsize=8.5, color=INK)
@@ -744,8 +927,8 @@ def _chart_accuracy(rows, path: str):
                if r["group"] == group and r.get("pred")]
         if not pts:
             continue
-        ax.scatter([p[0] for p in pts], [p[1] for p in pts], s=46, marker=marker,
-                   facecolor=color, edgecolor="#fcfcfb", linewidth=1.0,
+        ax.scatter([p[0] for p in pts], [p[1] for p in pts], s=38, marker=marker,
+                   facecolor=color, edgecolor=SURFACE, linewidth=1.0,
                    label=f"{group} (n={len(pts)})", zorder=3)
 
     ax.set_xscale("log"); ax.set_yscale("log")
@@ -754,7 +937,8 @@ def _chart_accuracy(rows, path: str):
     ax.set_ylabel("LLM estimate  [kg/m$^3$]", color=INK)
     ax.set_title("LLM mu*rho vs reference — shaded bands are 1.5x and 2x",
                  color=INK, fontsize=11, loc="left")
-    ax.grid(True, which="both", color=GRID, lw=0.6, zorder=0)
+    # major decades only: a log grid with its minors on is a wall of lines
+    ax.grid(True, which="major", color=GRID, lw=0.6, zorder=0)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     ax.tick_params(colors=MUTED)
@@ -765,57 +949,77 @@ def _chart_accuracy(rows, path: str):
     log(f"wrote {path}")
 
 
-def _chart_sensitivity(nav: dict, path: str):
+def _chart_risk(risk: dict, path: str):
+    """One panel per arm: reference level down, estimated level across.
+
+    A confusion grid rather than a bar of accuracies, because the *direction* of
+    the mistake is the whole finding — and it is read off the geometry, with no
+    colour needed to carry it. Cells left of the outlined diagonal are objects
+    called safer than they are.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.patches import Rectangle
 
-    runs = nav["runs"]
-    maps = nav["maps"]
-    colors = ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"]
-    fig, ax = plt.subplots(figsize=(7.6, 5.0))
+    rows = risk["rows"]
+    arms = [(name, key) for name, key in RISK_ARMS
+            if any(r.get(key) for r in rows)]
+    grids = [(name, _risk_confusion(rows, key), _risk_stats(rows, key))
+             for name, key in arms]
+    vmax = max(max(max(row) for row in g) for _, g, _ in grids) or 1
 
-    # The dead zone is the result worth reading off this chart: inside it the
-    # planner makes the same choices it would with a perfect estimate.
-    free_lo, free_hi = 0.25, 4.0
-    ax.axvspan(free_lo, free_hi, color=MUTED, alpha=0.13, lw=0)
-    ax.text(1.0, 0.97, "estimates in this band cost nothing",
-            transform=ax.get_xaxis_transform(), ha="center", va="top",
-            fontsize=9, color=INK)
+    cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUE)
+    short = {"medium_high": "med-high"}
+    ticks = [short.get(name, name) for name in LEVELS]
+    n = len(LEVELS)
 
-    for i, map_name in enumerate(maps):
-        base = next((r for r in runs if r["map"] == map_name and r["arm"] == "oracle"), None)
-        if not base or not base["J"]:
-            continue
-        xs, ys = [], []
-        for f in nav["factors"]:
-            row = next((r for r in runs if r["map"] == map_name and r["arm"] == f"x{f:g}"), None)
-            if row and row["success"]:
-                xs.append(f)
-                ys.append(100.0 * (row["J"] - base["J"]) / base["J"])
-        color = colors[i % len(colors)]
-        ax.plot(xs, ys, color=color, lw=2.0, marker="o", ms=6,
-                markeredgecolor="#fcfcfb", markeredgewidth=1.0, label=map_name)
-        for arm, mark, size in (("llm", "*", 190), ("heuristic", "X", 90)):
-            row = next((r for r in runs if r["map"] == map_name and r["arm"] == arm), None)
-            if row and row["success"]:
-                ax.scatter([1.0], [100.0 * (row["J"] - base["J"]) / base["J"]],
-                           marker=mark, s=size, color=color,
-                           edgecolor=INK, linewidth=0.8, zorder=5)
+    fig, axes = plt.subplots(1, len(grids), figsize=(3.55 * len(grids) + 1.2, 4.5))
+    axes = list(axes) if len(grids) > 1 else [axes]
 
-    ax.axhline(0, color=INK, lw=1.0)
-    ax.set_xscale("log")
-    ax.set_xlabel("estimate error factor  (estimated mu*rho / true)", color=INK)
-    ax.set_ylabel("cost penalty vs oracle  [% of J]", color=INK)
-    ax.set_title("What a wrong mu*rho costs — star = LLM, cross = heuristic",
-                 color=INK, fontsize=11, loc="left")
-    ax.grid(True, which="both", color=GRID, lw=0.6)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    ax.tick_params(colors=MUTED)
-    ax.legend(frameon=False, fontsize=9)
+    for ax, (name, grid, stat) in zip(axes, grids):
+        ax.set_facecolor(SURFACE)
+        for i in range(n):
+            for j in range(n):
+                count = grid[i][j]
+                if count:
+                    shade = count / vmax
+                    ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, lw=0,
+                                           facecolor=cmap(shade), zorder=1))
+                    ax.text(j, i, str(count), ha="center", va="center",
+                            fontsize=9, zorder=3,
+                            color=SURFACE if shade > 0.55 else INK)
+            # the diagonal is "got it right"; outline it rather than colour it,
+            # so the sequential ramp keeps meaning count and nothing else
+            ax.add_patch(Rectangle((i - 0.5, i - 0.5), 1, 1, fill=False,
+                                   edgecolor=INK, lw=1.1, zorder=2))
+
+        # 2 px of surface between cells instead of a border around each one
+        ax.set_xticks([k - 0.5 for k in range(n + 1)], minor=True)
+        ax.set_yticks([k - 0.5 for k in range(n + 1)], minor=True)
+        ax.grid(which="minor", color=SURFACE, lw=2)
+        ax.tick_params(which="minor", length=0)
+
+        ax.set_xlim(-0.5, n - 0.5)
+        ax.set_ylim(n - 0.5, -0.5)
+        ax.set_xticks(range(n)); ax.set_yticks(range(n))
+        ax.set_xticklabels(ticks, rotation=30, ha="right", fontsize=8.5)
+        ax.set_yticklabels(ticks, fontsize=8.5)
+        ax.tick_params(colors=MUTED, length=0)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_title(f"{name}\n{stat['exact']:.0%} exact  ·  "
+                     f"{stat['under']:.0%} called too safe",
+                     color=INK, fontsize=10, loc="left", pad=10)
+
+    for ax in axes[1:]:
+        ax.set_yticklabels([])
+    axes[0].set_ylabel("reference risk level", color=INK, fontsize=9.5)
+    fig.supxlabel("level the estimator returned — left of the outline is an "
+                  "obstacle called safer than it is", color=MUTED, fontsize=9)
     fig.tight_layout()
-    fig.savefig(path, dpi=160)
+    fig.savefig(path, dpi=160, facecolor=SURFACE)
     plt.close(fig)
     log(f"wrote {path}")
 
@@ -829,16 +1033,22 @@ def _table(header: List[str], body: List[List[str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def stage_report(cfg: Config) -> str:
+def stage_report() -> str:
     acc = _load("accuracy.json")
-    nav = _load("nav.json")
+    risk = _load("risk.json")
+    doors = _load("doors.json")
+    # A risk file whose calls all failed is not risk data; treat it as absent
+    # and say why, rather than rendering a section of blanks.
+    risk_failed = bool(risk) and not _risk_measured(risk)
+    if risk_failed:
+        risk = None
     size = _load("size.json")
     abl = _load("ablate.json")
     if not acc:
         raise SystemExit("no accuracy.json - run `python3 LLM_test.py accuracy` first")
 
     rows = acc["rows"]
-    parts = [f"# LLM mu*rho accuracy and its cost in navigation\n",
+    parts = [f"# LLM estimator benchmark: difficulty and risk\n",
              f"Model `{acc['model']}`, {acc['repeats']} repeats per item, "
              f"{len(rows)} items, {acc['seconds']}s of API time.\n"]
 
@@ -851,10 +1061,64 @@ def stage_report(cfg: Config) -> str:
         f"**{overall['within_2x']:.0%}** of objects land within 2x of the "
         f"reference, and it over-estimates "
         f"({overall['median_ratio']:.1f}x median bias).",
-        f"- Cause: **{snapshot['on_max_anchor']:.0%} of replies are exactly "
-        f"{snapshot['max_anchor']:g}**, the largest anchor in the prompt. It is "
-        f"copying a table row, not estimating.",
     ]
+    # Whether the model collapses onto the anchor table is the finding this
+    # benchmark was built for — but it is a measurement, not a given. Reciting
+    # the collapse when the numbers no longer show one would be reporting a
+    # conclusion the run disproved.
+    if snapshot.get("n"):
+        if snapshot["on_max_anchor"] >= 0.15:
+            head.append(
+                f"- Cause: **{snapshot['on_max_anchor']:.0%} of replies are "
+                f"exactly {snapshot['max_anchor']:g}**, the largest anchor in "
+                f"the prompt. It is copying a table row, not estimating.")
+        elif snapshot["on_anchor"] >= 0.40:
+            head.append(
+                f"- **{snapshot['on_anchor']:.0%} of replies are a verbatim "
+                f"anchor value** rather than an interpolation between two of "
+                f"them — copying, but spread across the table rather than "
+                f"piled on one row.")
+        else:
+            head.append(
+                f"- It is interpolating rather than copying: only "
+                f"{snapshot['on_anchor']:.0%} of replies land exactly on an "
+                f"anchor value, and {snapshot['distinct_values']} distinct "
+                f"numbers come back for {snapshot['n']} objects.")
+    if risk_failed:
+        head.append(
+            "- **The risk stage has no results.** Every call in it failed, so "
+            "nothing below scores the risk estimator; re-run `risk` once the "
+            "API answers again.")
+    if risk:
+        sight = _risk_stats(risk["rows"], "sight")
+        kw = _risk_stats(risk["rows"], "keyword")
+        head.append(
+            f"- On **risk** the model agrees with the reference level on "
+            f"**{sight['exact']:.0%}** of objects against the keyword "
+            f"fallback's {kw['exact']:.0%}, and calls "
+            f"**{sight['under']:.0%} of them safer than they are** "
+            f"(fallback {kw['under']:.0%}). That direction is the one that "
+            f"matters: an under-called obstacle is one the planner is willing "
+            f"to push.")
+    if doors:
+        base = doors["runs"][0]
+        perturbed = [r for r in doors["runs"][1:] if r.get("family") == "both"]
+        if perturbed and base["C"]:
+            pen = [100.0 * (r["C"] - base["C"]) / base["C"] for r in perturbed
+                   if r["success"]]
+            changed = [r.get("changed", 0) for r in perturbed]
+            extra_risky = [len(r["risky_pushes"]) - len(base["risky_pushes"])
+                           for r in perturbed]
+            head.append(
+                f"- Put that error on a route and it moves the answer: across "
+                f"{len(perturbed)} crossings of the ten-gate map it changes "
+                f"**{statistics.fmean(changed):.1f} of 10 decisions** (worst "
+                f"{max(changed)}) and costs "
+                f"**{statistics.fmean(pen):+.1f}% of C** on average, worst "
+                f"{max(pen):+.1f}%"
+                + (f", and it pushes {statistics.fmean(extra_risky):+.1f} more "
+                   f"obstacles that were never safe to push."
+                   if any(extra_risky) else "."))
     heur = _accuracy_stats(rows, key="heuristic")
     if heur.get("n") and heur["median_abs_factor"] < overall["median_abs_factor"]:
         head.append(
@@ -863,23 +1127,6 @@ def stage_report(cfg: Config) -> str:
             f"({heur['within_2x']:.0%} within 2x) on the same items, against the "
             f"model's {overall['median_abs_factor']:.1f}x. In the shipped "
             f"configuration, calling the API makes the estimate worse.")
-    if nav:
-        pens = []
-        for m in nav["maps"]:
-            base = next((r for r in nav["runs"] if r["map"] == m and r["arm"] == "oracle"), None)
-            for r in nav["runs"]:
-                if (r["map"] == m and r["arm"].startswith("noise") and r["success"]
-                        and base and base["J"]):
-                    pens.append(100.0 * (r["J"] - base["J"]) / base["J"])
-        if pens:
-            head.append(
-                f"- Navigation still mostly survives it: over "
-                f"{len(pens)} runs at this error level the mean penalty is "
-                f"**{statistics.fmean(pens):+.1f}%** of J and the worst is "
-                f"**{max(pens):+.1f}%**. The planner's push-or-detour decision "
-                f"has wide margins, and touch sensing corrects the estimate on "
-                f"contact — so a bad mu*rho costs a wrong first choice, not a "
-                f"wrong final path.")
     if abl:
         # Only variants that answered nearly every item can be ranked: a
         # truncated run has silently dropped its hardest cases.
@@ -909,8 +1156,16 @@ def stage_report(cfg: Config) -> str:
                  "either direction. `median_ratio` separates bias from spread — "
                  "above 1.0 the model systematically over-estimates.\n\n")
     body = []
-    for group in ("paraphrase", "novel", "state", "brand", "ALL"):
-        sub = rows if group == "ALL" else [r for r in rows if r["group"] == group]
+    slices = (
+        ("object", lambda r: r["group"] == "object"),
+        ("- anchor paraphrase", lambda r: bool(r.get("anchor"))),
+        ("- off-table", lambda r: r["group"] == "object" and not r.get("anchor")),
+        ("state", lambda r: r["group"] == "state"),
+        ("brand", lambda r: r["group"] == "brand"),
+        ("ALL", lambda r: True),
+    )
+    for group, keep in slices:
+        sub = [r for r in rows if keep(r)]
         s = _accuracy_stats(sub)
         h = _accuracy_stats(sub, key="heuristic")
         if not s.get("n"):
@@ -924,15 +1179,22 @@ def stage_report(cfg: Config) -> str:
          "LLM Spearman", "heuristic typ. factor", "heuristic <=2x"], body))
 
     snap = _anchor_snapping(rows)
+    verdict = (
+        "This is the whole story behind the error above: the estimator is not "
+        "estimating, it is picking a row, and it disproportionately picks the "
+        "heaviest one."
+        if snap["on_max_anchor"] >= 0.15 else
+        "The prompt asks for an interpolation between anchors and mostly gets "
+        "one: the replies are spread over the range rather than piled on the "
+        "table's last line, so the error above is estimation error, not a "
+        "lookup wearing its clothes.")
     parts.append(
         f"\n**Anchor snapping.** {snap['on_anchor']:.0%} of replies are a "
         f"verbatim row of the anchor table rather than an interpolation, and "
         f"{snap['on_max_anchor']:.0%} are exactly {snap['max_anchor']:g} — the "
         f"largest anchor (`concrete_block`) and the last line of the table in "
-        f"the prompt. Across {snap['n']} distinct objects the model produced only "
-        f"{snap['distinct_values']} distinct numbers. This is the whole story "
-        f"behind the error above: the estimator is not estimating, it is picking "
-        f"a row, and it disproportionately picks the heaviest one.\n")
+        f"the prompt. Across {snap['n']} distinct objects the model produced "
+        f"{snap['distinct_values']} distinct numbers. {verdict}\n")
 
     rep = _repeatability(rows)
     parts.append(f"\n**Repeatability** at temperature 0: {rep['identical_frac']:.0%} "
@@ -944,9 +1206,63 @@ def stage_report(cfg: Config) -> str:
                    key=lambda r: -abs(math.log10(r["pred"] / r["mu_rho_true"])))[:10]
     parts.append("\n### Worst 10 items\n")
     parts.append(_table(
-        ["label", "group", "reference", "LLM", "factor", "why the reference says so"],
-        [[r["label"], r["group"], f"{r['mu_rho_true']:.1f}", f"{r['pred']:.1f}",
+        ["label", "category", "reference", "LLM", "factor", "why the reference says so"],
+        [[r["label"], r.get("category", r["group"]), f"{r['mu_rho_true']:.1f}",
+          f"{r['pred']:.1f}",
           f"{r['pred'] / r['mu_rho_true']:.2f}x", r["note"]] for r in worst]))
+
+    # -- risk ---------------------------------------------------------------
+    if risk:
+        rk = risk["rows"]
+        parts.append("\n## 1b. Risk assessment\n")
+        parts.append(
+            f"A different question from mu*rho, on the same objects: not how "
+            f"hard it is to push, but what happens to people and to the "
+            f"building if it is pushed. Model `{risk['model']}`, "
+            f"{risk['repeats']} replies per item on sight and "
+            f"{risk['contact_repeats']} after contact.\n\n"
+            "The two `m` columns price the mistake in the planner's own units. "
+            "`risk.RISK_DETOUR_EQUIV_M` says what each level is worth as a "
+            "detour (low 0 m, medium 20 m, medium_high 80 m, high 400 m, "
+            "extreme 5000 m), so **shortfall** is the protection the estimator "
+            "dropped and **excess** is the detour it invented, averaged over "
+            "every item. Shortfall is the one that hurts someone; excess only "
+            "costs distance.\n\n")
+        body = []
+        for name, key in RISK_ARMS:
+            st = _risk_stats(rk, key)
+            if not st.get("n"):
+                continue
+            body.append([name, st["n"], f"{st['exact']:.0%}",
+                         f"{st['within_1']:.0%}", f"{st['under']:.0%}",
+                         f"{st['over']:.0%}", f"{st['shortfall_m']:.0f}",
+                         f"{st['excess_m']:.0f}"])
+        parts.append(_table(
+            ["arm", "n", "exact", "within 1 level", "called too safe",
+             "called too dangerous", "shortfall m", "excess m"], body))
+
+        sight, contact = _risk_stats(rk, "sight"), _risk_stats(rk, "contact")
+        if sight.get("n") and contact.get("n"):
+            verdict = ("helps" if contact["under"] < sight["under"]
+                       else "does not help")
+            parts.append(
+                f"\n**Does touching it help?** Handing the model the measured "
+                f"push force moves exact agreement from {sight['exact']:.0%} to "
+                f"{contact['exact']:.0%}, and the too-safe rate from "
+                f"{sight['under']:.0%} to {contact['under']:.0%}: on the "
+                f"direction that matters, contact {verdict}. The reference "
+                f"level is identical in both arms, so all of that movement is "
+                f"the force number changing the model's mind.\n")
+
+        under = _risk_under_calls(rk, "sight")[:10]
+        if under:
+            parts.append("\n### Worst under-calls on sight\n")
+            parts.append("Every row is an obstacle the planner would have been "
+                         "willing to push.\n\n")
+            parts.append(_table(
+                ["label", "reference", "LLM", "keyword", "why the reference says so"],
+                [[r["label"], r["risk_true"], r["sight"], r["keyword"],
+                  r["risk_note"]] for r in under]))
 
     # -- size independence --------------------------------------------------
     if size:
@@ -968,155 +1284,10 @@ def stage_report(cfg: Config) -> str:
               r["by_scale"].get("2.0"), f"{s:.2f}x"]
              for s, r in sorted(moved, key=lambda t: -t[0])]))
 
-    # -- decision relevance -------------------------------------------------
-    parts.append("\n## 3. Does the error reach the planner?\n")
-    parts.append(f"The search only ever asks one question per obstacle: is "
-                 f"`difficulty x push_distance` cheaper than `lambda x detour`? "
-                 f"With lambda={cfg.lambda_distance:g} N and a 2 m push, an error "
-                 f"only matters if it moves an obstacle across that line.\n\n")
-    parts.append(_table(
-        ["detour available", "obstacles", "decisions flipped by the LLM error"],
-        [[f"{d['detour_m']:g} m", d["n"], f"{d['flip_rate']:.0%}"]
-         for d in _decision_flips(rows, cfg)]))
-
-    # -- navigation ---------------------------------------------------------
-    if nav:
-        parts.append("\n## 4. Navigation cost\n")
-        parts.append("Same maps, same physics, same true difficulties — only the "
-                     "estimator's belief differs. `oracle` knows the reference "
-                     "mu*rho exactly and is the floor; the penalty column is the "
-                     "extra J each arm pays over it.\n\n")
-        body = []
-        for map_name in nav["maps"]:
-            base = next((r for r in nav["runs"]
-                         if r["map"] == map_name and r["arm"] == "oracle"), None)
-            for arm in ("oracle", "llm", "heuristic"):
-                row = next((r for r in nav["runs"]
-                            if r["map"] == map_name and r["arm"] == arm), None)
-                if not row:
-                    continue
-                pen = ("-" if arm == "oracle" or not base or not base["J"]
-                       else f"{100.0 * (row['J'] - base['J']) / base['J']:+.1f}%")
-                body.append([map_name, arm, row["success"], f"{row['J']:,.0f}",
-                             f"{row['walk_cost']:,.0f}", f"{row['work_cost']:,.0f}",
-                             row["pushes"], row["cycles"], pen])
-        parts.append(_table(
-            ["map", "arm", "goal reached", "J", "lambda*D", "W", "pushes",
-             "replans", "penalty vs oracle"], body))
-
-        parts.append("\n### Sensitivity sweep\n")
-        parts.append("Every estimate multiplied by a fixed factor. A flat row "
-                     "means the map's decisions are not close to the break-even "
-                     "line and accuracy is free; a step means it is.\n\n")
-        header = ["map"] + [f"x{f:g}" for f in nav["factors"]]
-        body = []
-        for map_name in nav["maps"]:
-            base = next((r for r in nav["runs"]
-                         if r["map"] == map_name and r["arm"] == "oracle"), None)
-            line = [map_name]
-            for f in nav["factors"]:
-                row = next((r for r in nav["runs"]
-                            if r["map"] == map_name and r["arm"] == f"x{f:g}"), None)
-                if not row or not base or not base["J"]:
-                    line.append("-")
-                elif not row["success"]:
-                    line.append("FAIL")
-                else:
-                    line.append(f"{100.0 * (row['J'] - base['J']) / base['J']:+.1f}%")
-            body.append(line)
-        parts.append(_table(header, body))
-
-        parts.append(f"\n### Realistic-error replicates\n")
-        parts.append(f"The single `llm` row above is one draw, and one draw on "
-                     f"four maps is not a measurement. These re-run each map with "
-                     f"an independent per-obstacle lognormal error at the spread "
-                     f"measured over all {len(rows)} items "
-                     f"(sigma={nav['sigma_log10']:.3f} in log10, a typical "
-                     f"{10 ** nav['sigma_log10']:.2f}x miss), {len(NOISE_SEEDS)} "
-                     f"seeds per map — what an estimator this noisy costs on "
-                     f"average, rather than on the labels it happened to get right.\n\n")
-        def _noise_pens(map_name, estimator="llm"):
-            base = next((r for r in nav["runs"]
-                         if r["map"] == map_name and r["arm"] == "oracle"), None)
-            prefix = f"noise_{estimator}_"
-            rows_ = [r for r in nav["runs"] if r["map"] == map_name
-                     and r["arm"].startswith(prefix)
-                     and r["arm"][len(prefix):].isdigit()]
-            pens = [100.0 * (r["J"] - base["J"]) / base["J"]
-                    for r in rows_ if r["success"] and base and base["J"]]
-            return pens, sum(1 for r in rows_ if not r["success"])
-
-        body = []
-        for map_name in nav["maps"]:
-            pens, fails = _noise_pens(map_name)
-            if pens:
-                body.append([map_name, f"{statistics.fmean(pens):+.1f}%",
-                             f"{max(pens):+.1f}%", fails])
-        parts.append(_table(["map", "mean penalty", "worst penalty", "failed runs"], body))
-
-        # -- does a better estimator actually buy anything? -----------------
-        if "llm_nothink" in (nav.get("estimator_sigmas") or {}):
-            parts.append("\n### Is reasoning mode worth it, on the robot?\n")
-            parts.append(
-                f"The shipped estimator now reasons; the previous one did not "
-                f"({10 ** nav['estimator_sigmas']['llm']:.2f}x spread vs "
-                f"{10 ** nav['estimator_sigmas']['llm_nothink']:.2f}x). Accuracy is only worth "
-                f"buying if it changes what the robot does. `llm` and "
-                f"`llm_nothink` are the two estimators' actual predictions; the "
-                f"noise columns are {len(NOISE_SEEDS)} draws from each one's "
-                f"measured error distribution, which is the fairer comparison "
-                f"— a single point estimate can be lucky.\n\n")
-            body = []
-            for map_name in nav["maps"]:
-                base = next((r for r in nav["runs"] if r["map"] == map_name
-                             and r["arm"] == "oracle"), None)
-                cell = {}
-                for arm in ("llm", "llm_nothink"):
-                    row = next((r for r in nav["runs"] if r["map"] == map_name
-                                and r["arm"] == arm), None)
-                    cell[arm] = ("-" if not row or not base or not base["J"]
-                                 else f"{100.0 * (row['J'] - base['J']) / base['J']:+.1f}%")
-                think, _ = _noise_pens(map_name, "llm")
-                shipped, _ = _noise_pens(map_name, "llm_nothink")
-                body.append([
-                    map_name, cell["llm"], cell["llm_nothink"],
-                    f"{statistics.fmean(think):+.1f}% / {max(think):+.1f}%" if think else "-",
-                    f"{statistics.fmean(shipped):+.1f}% / {max(shipped):+.1f}%" if shipped else "-"])
-            parts.append(_table(
-                ["map", "llm (reasoning, current)", "llm (no reasoning, previous)",
-                 "current noise mean/worst", "previous noise mean/worst"], body))
-
-    # -- lambda regime ------------------------------------------------------
-    lam = _load("lambda.json")
-    if lam:
-        parts.append("\n## 4b. When does the error start to cost anything?\n")
-        parts.append(f"`lambda_distance` is the exchange rate between detouring "
-                     f"and pushing, so it decides how many obstacles sit near "
-                     f"the break-even where a wrong mu*rho changes the answer. "
-                     f"Each cell is the mean penalty over {len(NOISE_SEEDS)} "
-                     f"noisy-estimate runs against the oracle at the same "
-                     f"lambda. The shipped value is "
-                     f"{cfg.lambda_distance:g}.\n\n")
-        header = ["map"] + [f"lambda={x:g}" for x in lam["lambdas"]]
-        body = []
-        for map_name in lam["maps"]:
-            line = [map_name]
-            for x in lam["lambdas"]:
-                base = next((r for r in lam["runs"] if r["map"] == map_name
-                             and r["lambda"] == x and r["arm"] == "oracle"), None)
-                pens = [100.0 * (r["J"] - base["J"]) / base["J"]
-                        for r in lam["runs"]
-                        if r["map"] == map_name and r["lambda"] == x
-                        and r["arm"].startswith("noise") and r["success"]
-                        and base and base["J"]]
-                line.append(f"{statistics.fmean(pens):+.1f}%" if pens else "-")
-            body.append(line)
-        parts.append(_table(header, body))
-
     # -- anchor ordering ----------------------------------------------------
     order = _load("order.json")
     if order:
-        parts.append("\n## 4c. Proof that it is copying, not estimating\n")
+        parts.append("\n## 3. Proof that it is copying, not estimating\n")
         parts.append(
             f"The anchor table's row order is rewritten; every other byte of the "
             f"prompt is unchanged, and only the {order['n_items']} off-table "
@@ -1145,7 +1316,7 @@ def stage_report(cfg: Config) -> str:
 
     # -- request-setting ablation -------------------------------------------
     if abl:
-        parts.append("\n## 5. Is it the model or the way it is asked?\n")
+        parts.append("\n## 4. Is it the model or the way it is asked?\n")
         parts.append("Same prompt, same items, different request settings. "
                      "`parsed` counts replies a number could be read out of — "
                      "anything unparsed falls back to the heuristic in "
@@ -1166,6 +1337,102 @@ def stage_report(cfg: Config) -> str:
             ["setting", "parsed", "cut", "typ. factor", "bias", "<=2x", "<=3x",
              "Spearman", "wall time"], body))
 
+    # -- what it costs a route ----------------------------------------------
+    if doors:
+        runs = doors["runs"]
+        base = runs[0]
+        parts.append("\n## 5. What the error costs a route\n")
+        parts.append(
+            f"The `{doors['map']}` map is ten walls in a row, each with three "
+            f"ways past it: move the obstacle in door A, move the one in door "
+            f"B, or walk around through a third opening placed far enough off "
+            f"the axis to cost a real detour. Every gate is one independent "
+            f"three-way decision, so a run is ten of them and the arms differ "
+            f"only in what the planner was told to believe.\n\n"
+            f"`exact` is the floor: beliefs equal the truth. The perturbed arms "
+            f"take the same true values and apply the error this benchmark "
+            f"actually measured — difficulty multiplied by "
+            f"`10 ** ({doors['bias_log10']:+.3f} + N(0, "
+            f"{doors['spread_log10']:.3f}))`, i.e. a "
+            f"{10 ** doors['bias_log10']:.2f}x bias with a "
+            f"{10 ** doors['spread_log10']:.2f}x spread, and risk resampled "
+            f"from the confusion matrix in section 1b. `difficulty` and `risk` "
+            f"perturb one term each, sharing the seed with `both`, so the "
+            f"families are the same draw with pieces switched off.\n\n"
+            f"Beliefs are seeded per obstacle and no API is called, but the "
+            f"corrections a real run earns are left in: touching an obstacle "
+            f"reveals its true difficulty and re-rates its risk. What the "
+            f"perturbation buys is therefore a wrong *decision*, taken before "
+            f"the robot could know better — which is exactly what a bad "
+            f"estimate costs in practice.\n\n")
+        if not doors.get("risk_measured", True):
+            parts.append(
+                "**The risk families are absent from this run.** The risk stage "
+                "had produced no measurements, so there was no risk error to "
+                "simulate and only difficulty is perturbed below.\n\n")
+        if not doors.get("difficulty_measured", True):
+            parts.append(
+                "**The difficulty families are absent from this run.** The "
+                "accuracy stage had produced no measurements.\n\n")
+
+        body = []
+        for family in ("exact", "both", "difficulty", "risk"):
+            sub = ([base] if family == "exact"
+                   else [r for r in runs if r.get("family") == family])
+            if not sub:
+                continue
+            ok = [r for r in sub if r["success"]]
+            cs = [r["C"] for r in ok]
+            js = [r["J"] for r in ok]
+            pen = [100.0 * (r["C"] - base["C"]) / base["C"] for r in ok
+                   if base["C"]]
+            changed = [r.get("changed", 0) for r in sub]
+            risky = [len(r["risky_pushes"]) for r in sub]
+            body.append([
+                family, len(sub), f"{len(ok)}/{len(sub)}",
+                f"{statistics.fmean(cs):,.0f}" if cs else "-",
+                f"{statistics.fmean(js):,.0f}" if js else "-",
+                "-" if family == "exact" else
+                (f"{statistics.fmean(pen):+.1f}% / {max(pen):+.1f}%" if pen else "-"),
+                f"{statistics.fmean(r['pushes'] for r in sub):.1f}",
+                "-" if family == "exact" else
+                f"{statistics.fmean(changed):.1f} / {max(changed)}",
+                f"{statistics.fmean(risky):.1f}"])
+        parts.append(_table(
+            ["arm", "runs", "reached goal", "mean C", "mean J",
+             "penalty on C mean / worst", "mean pushes",
+             "gates changed mean / worst",
+             "mean pushes of a risky obstacle"], body))
+
+        parts.append(
+            f"\n`gates changed` counts gates where the perturbed run chose "
+            f"differently from `exact` — the direct measure of an estimate "
+            f"changing a decision. The penalty is taken on **C**, not J: the "
+            f"risk surcharge is charged outside J, so a run that pushed "
+            f"something it should have avoided books a cheaper J and a dearer "
+            f"C, and only C tells the two apart. `pushes of a risky obstacle` counts "
+            f"obstacles moved that were not `low` risk to begin with; `exact` "
+            f"moves {len(base['risky_pushes'])} of them, and every one above "
+            f"that is the planner disturbing something it should have walked "
+            f"around.\n")
+
+        # Per-gate detail: which gates are actually load-bearing for the result.
+        parts.append("\n### Where the decisions moved\n")
+        gates_by_i: Dict[str, dict] = {}
+        for r in doors["gates"]:
+            g = gates_by_i.setdefault(str(r["gate"]), {"detour_m": r["detour_m"]})
+            g[r["side"]] = f"{r['difficulty']:.0f} N {r['risk']}"
+        body = []
+        for g in sorted(gates_by_i, key=int):
+            flips = sum(1 for r in runs[1:] if r["choices"][g] != base["choices"][g])
+            body.append([g, f"{gates_by_i[g]['detour_m']:g} m",
+                         gates_by_i[g]["A"], gates_by_i[g]["B"],
+                         base["choices"][g],
+                         f"{flips}/{len(runs) - 1}"])
+        parts.append(_table(
+            ["gate", "detour", "door A", "door B", "exact chose",
+             "perturbed runs that chose otherwise"], body))
+
     text = "".join(parts)
     os.makedirs(OUT_DIR, exist_ok=True)
     path = os.path.join(OUT_DIR, "report.md")
@@ -1174,8 +1441,8 @@ def stage_report(cfg: Config) -> str:
     log(f"wrote {path}")
 
     _chart_accuracy(rows, os.path.join(OUT_DIR, "accuracy.png"))
-    if nav:
-        _chart_sensitivity(nav, os.path.join(OUT_DIR, "sensitivity.png"))
+    if risk:
+        _chart_risk(risk, os.path.join(OUT_DIR, "risk.png"))
     return path
 
 
@@ -1183,43 +1450,33 @@ def stage_report(cfg: Config) -> str:
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("stage", choices=["accuracy", "size", "ablate", "order", "nav",
-                                      "lambda", "report", "all"])
-    ap.add_argument("--lambdas", default="50,100,200,350,700,1400",
-                    help="lambda_distance values for the lambda stage")
-    ap.add_argument("--lambda-maps", default="two_doors,maze_mixed",
-                    help="scenarios for the lambda stage (kept short - it is "
-                         "len(lambdas) x 8 runs per map)")
-    ap.add_argument("--repeats", type=int, default=3,
-                    help="LLM calls per item in the accuracy stage")
+    ap.add_argument("stage", choices=["accuracy", "risk", "size", "ablate",
+                                      "order", "doors", "report", "all"])
+    ap.add_argument("--repeats", type=int, default=2,
+                    help="LLM calls per item in the accuracy and risk stages")
     ap.add_argument("--workers", type=int, default=8, help="parallel API calls")
-    ap.add_argument("--maps", default=",".join(DEFAULT_MAPS),
-                    help="comma-separated scenario names for the nav stage")
+    ap.add_argument("--doors-seeds", type=int, default=DOORS_SEEDS,
+                    help="perturbation seeds per family in the doors stage; "
+                         "each one is three whole runs of the scenario")
     args = ap.parse_args()
 
     cfg = Config()
     cfg.verbose = False
-    maps = [m.strip() for m in args.maps.split(",") if m.strip()]
-    unknown = [m for m in maps if m not in scenarios.names()]
-    if unknown:
-        ap.error(f"unknown map(s): {', '.join(unknown)}")
 
     if args.stage in ("accuracy", "all"):
         stage_accuracy(cfg, args.repeats, args.workers)
+    if args.stage in ("risk", "all"):
+        stage_risk(cfg, args.repeats, args.workers)
     if args.stage in ("size", "all"):
         stage_size(cfg, args.workers)
     if args.stage in ("ablate", "all"):
         stage_ablate(cfg, args.workers)
     if args.stage in ("order", "all"):
         stage_order(cfg, args.workers)
-    if args.stage in ("nav", "all"):
-        stage_nav(maps, _load("accuracy.json"))
-    if args.stage in ("lambda", "all"):
-        lam_maps = [m.strip() for m in args.lambda_maps.split(",") if m.strip()]
-        lambdas = [float(x) for x in args.lambdas.split(",") if x.strip()]
-        stage_lambda(lam_maps, lambdas, _load("accuracy.json"))
+    if args.stage in ("doors", "all"):
+        stage_doors(args.doors_seeds, _load("accuracy.json"), _load("risk.json"))
     if args.stage in ("report", "all"):
-        stage_report(cfg)
+        stage_report()
 
 
 if __name__ == "__main__":
