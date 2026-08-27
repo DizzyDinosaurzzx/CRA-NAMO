@@ -275,7 +275,7 @@ def create():
             h=0.8,
             theta=0.5,
             material="cardboard_box",
-            oid="BX-A",
+            oid="box101",
         ),
         # BX_A_1：左侧上部、靠近通道 B 的长条薄箱。
         MovableObstacle(
@@ -286,7 +286,7 @@ def create():
             h=0.8,
             theta=1.2,
             material="cardboard_box",
-            oid="BX_A_1",
+            oid="box102",
         ),
         # BX_A_2：左侧中部手推车。
         MovableObstacle(
@@ -297,7 +297,7 @@ def create():
             h=250,
             theta=0.5,
             material="cart",
-            oid="BX_A_2",
+            oid="cart101",
         ),
         # PL(H)：左侧中部的方形大件。
         MovableObstacle(
@@ -308,7 +308,7 @@ def create():
             h=10,
             theta=0.8,
             material="cardboard_box",
-            oid="PL(H)",
+            oid="box103",
         ),
 
         # ------------------------------------------------------------------
@@ -323,7 +323,7 @@ def create():
             h=1.1,
             theta=0.23,
             material="cart",
-            oid="CT",
+            oid="cart102",
         ),
         # PL(L)：中央下部的低矮托盘。
         MovableObstacle(
@@ -334,7 +334,7 @@ def create():
             h=0.15,
             theta=0.0,
             material="pallet",
-            oid="PL(L)",
+            oid="pallet101",
         ),
         # SC：中央偏右的重载托盘。
         MovableObstacle(
@@ -345,7 +345,7 @@ def create():
             h=2.0,
             theta=0.8,
             material="loaded_pallet",
-            oid="SC",
+            oid="loadedPallet101",
         ),
 
         # ------------------------------------------------------------------
@@ -360,7 +360,7 @@ def create():
             h=0.8,
             theta=0.0,
             material="cardboard_box",
-            oid="BX_D",
+            oid="box201",
         ),
         # BX_D_1：BX_D 上方的长条薄箱。
         MovableObstacle(
@@ -371,7 +371,7 @@ def create():
             h=0.8,
             theta=0.0,
             material="cardboard_box",
-            oid="BX_D_1",
+            oid="box202",
         ),
         # BX_D_2：右侧上部、靠近通道 B 的箱体。
         MovableObstacle(
@@ -382,7 +382,7 @@ def create():
             h=0.8,
             theta=0.3,
             material="cardboard_box",
-            oid="BX_D_2",
+            oid="box203",
         ),
 
         # ------------------------------------------------------------------
@@ -397,7 +397,7 @@ def create():
             h=0.3,
             theta=0.0,
             material="wooden_crate",
-            oid="33",
+            oid="crate101",
         ),
         MovableObstacle(
             x=16.0,
@@ -407,7 +407,7 @@ def create():
             h=0.3,
             theta=0.0,
             material="wooden_crate",
-            oid="33_1",
+            oid="crate102",
         ),
 
         # 35：中央上部、通道 A 内的大型手推车。
@@ -419,7 +419,7 @@ def create():
             h=1000,
             theta=0.70,
             material="cart",
-            oid="35",
+            oid="cart103",
         ),
 
         # 34_1 / 36_1：仓库底部中央区域的两个小型手推车。
@@ -431,7 +431,7 @@ def create():
             h=300,
             theta=0.70,
             material="cart",
-            oid="34_1",
+            oid="cart104",
         ),
         MovableObstacle(
             x=33.5,
@@ -441,7 +441,7 @@ def create():
             h=10.0,
             theta=0.5,
             material="cart",
-            oid="36_1",
+            oid="cart105",
         ),
         # 38 / 38_2：右侧中部并排的两条窄型手推车。
         MovableObstacle(
@@ -452,7 +452,7 @@ def create():
             h=1000.0,
             theta=0.3,
             material="cart",
-            oid="38",
+            oid="cart106",
         ),
         MovableObstacle(
             x=48.8,
@@ -462,7 +462,7 @@ def create():
             h=5000.0,
             theta=0.0,
             material="cart",
-            oid="38_2",
+            oid="cart107",
         ),
         # 39：右侧下部、通道 D 附近的窄型手推车。
         MovableObstacle(
@@ -473,7 +473,7 @@ def create():
             h=100.0,
             theta=0.4,
             material="cart",
-            oid="39",
+            oid="cart108",
         ),
     
         # ------------------------------------------------------------------
@@ -489,7 +489,7 @@ def create():
             h=2.0,
             theta=0.0,
             material="cardboard_box",
-            oid="post-0",
+            oid="deliveryBox101",
         ),
 
      MovableObstacle(
@@ -500,7 +500,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-1",
+            oid="deliveryBox102",
         ),
      MovableObstacle(
             x=24.5,
@@ -510,7 +510,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-1-2",
+            oid="deliveryBox103",
         ),
      MovableObstacle(
             x=24.5,
@@ -520,7 +520,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-1-3",
+            oid="deliveryBox104",
         ),
      MovableObstacle(
             x=24.5,
@@ -530,7 +530,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-1-4",
+            oid="deliveryBox105",
         ),
 
         MovableObstacle(
@@ -541,7 +541,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-2",
+            oid="deliveryBox106",
         ),
     
         MovableObstacle(
@@ -552,7 +552,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-3",
+            oid="deliveryBox107",
         ),
         MovableObstacle(
             x=28.0,
@@ -562,7 +562,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-2-2",
+            oid="deliveryBox108",
         ),
         MovableObstacle(
             x=26.0,
@@ -572,7 +572,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-3-2",
+            oid="deliveryBox109",
         ),
         MovableObstacle(
             x=28.0,
@@ -582,7 +582,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-2-3",
+            oid="deliveryBox110",
         ),
         MovableObstacle(
             x=26.0,
@@ -592,7 +592,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-3-3",
+            oid="deliveryBox111",
         ),
         MovableObstacle(
             x=28.0,
@@ -602,7 +602,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-2-4",
+            oid="deliveryBox112",
         ),
         MovableObstacle(
             x=26.0,
@@ -612,7 +612,7 @@ def create():
             h=1.2,
             theta=0.0,
             material="cardboard_box",
-            oid="post-3-4",
+            oid="deliveryBox113",
         ),
   
         MovableObstacle(
@@ -623,7 +623,7 @@ def create():
             h=1.5,
             theta=0.0,
             material="cardboard_box",
-            oid="post-4",
+            oid="deliveryBox114",
         ),
     ]
 
@@ -642,7 +642,7 @@ def create():
             name="post-0 enters the upper delivery aisle",
             trigger=at_time(20.0),
             effect=MoveTo(
-                oid="post-0",
+                oid="deliveryBox101",
                 goal=(18, 35, 0.0),
                 speed=0.1,
             ),
@@ -651,7 +651,7 @@ def create():
             name="post-1 enters the upper delivery aisle",
             trigger=at_time(40.0),
             effect=MoveTo(
-                oid="post-1",
+                oid="deliveryBox102",
                 goal=(24.5, 5, 0.0),
                 speed=0.2,
             ),
@@ -661,7 +661,7 @@ def create():
             name="post-2 enters the upper delivery aisle",
             trigger=at_time(50.0),
             effect=MoveTo(
-                oid="post-2",
+                oid="deliveryBox106",
                 goal=(28, 5, 0.0),
                 speed=0.3,
             ),
@@ -670,7 +670,7 @@ def create():
             name="post-3 enters the upper delivery aisle",
             trigger=at_time(60.0),
             effect=MoveTo(
-                oid="post-3",
+                oid="deliveryBox107",
                 goal=(26, 5, 0.0),
                 speed=0.3,
             ),
@@ -680,7 +680,7 @@ def create():
             name="post-1-2 enters the upper delivery aisle",
             trigger=at_time(45.0),
             effect=MoveTo(
-                oid="post-1-2",
+                oid="deliveryBox103",
                 goal=(24.5, 7, 0.0),
                 speed=0.3,
             ),
@@ -690,7 +690,7 @@ def create():
             name="post-2-2 enters the upper delivery aisle",
             trigger=at_time(55.0),
             effect=MoveTo(
-                oid="post-2-2",
+                oid="deliveryBox108",
                 goal=(28, 7, 0.0),
                 speed=0.3,
             ),
@@ -699,7 +699,7 @@ def create():
             name="post-3-2 enters the upper delivery aisle",
             trigger=at_time(65.0),
             effect=MoveTo(
-                oid="post-3-2",
+                oid="deliveryBox109",
                 goal=(26, 7, 0.0),
                 speed=0.3,
             ),
@@ -708,7 +708,7 @@ def create():
             name="post-1-3 enters the upper delivery aisle",
             trigger=at_time(50.0),
             effect=MoveTo(
-                oid="post-1-3",
+                oid="deliveryBox104",
                 goal=(24.5, 9, 0.0),
                 speed=0.3,
             ),
@@ -719,7 +719,7 @@ def create():
             name="post-2-3 enters the upper delivery aisle",
             trigger=at_time(60.0),
             effect=MoveTo(
-                oid="post-2-3",
+                oid="deliveryBox110",
                 goal=(28, 9, 0.0),
                 speed=0.3,
             ),
@@ -728,7 +728,7 @@ def create():
             name="post-3-3 enters the upper delivery aisle",
             trigger=at_time(70.0),
             effect=MoveTo(
-                oid="post-3-3",
+                oid="deliveryBox111",
                 goal=(26, 9, 0.0),
                 speed=0.3,
             ),
@@ -737,7 +737,7 @@ def create():
             name="post-1-4 enters the upper delivery aisle",
             trigger=at_time(55.0),
             effect=MoveTo(
-                oid="post-1-4",
+                oid="deliveryBox105",
                 goal=(24.5, 11, 0.0),
                 speed=0.3,
             ),
@@ -746,7 +746,7 @@ def create():
             name="post-2-4 enters the upper delivery aisle",
             trigger=at_time(65.0),
             effect=MoveTo(
-                oid="post-2-4",
+                oid="deliveryBox112",
                 goal=(28, 11, 0.0),
                 speed=0.3,
             ),
@@ -755,7 +755,7 @@ def create():
             name="post-3-4 enters the upper delivery aisle",
             trigger=at_time(75.0),
             effect=MoveTo(
-                oid="post-3-4",
+                oid="deliveryBox113",
                 goal=(26, 11, 0.0),
                 speed=0.3,
             ),
@@ -766,7 +766,7 @@ def create():
             name="post-4 enters the upper delivery aisle",
             trigger=at_time(110.0),
             effect=MoveTo(
-                oid="post-4",
+                oid="deliveryBox114",
                 goal=(57, 15, 0.5),
                 speed=0.3,
             ),
