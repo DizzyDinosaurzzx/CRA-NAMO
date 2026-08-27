@@ -132,22 +132,6 @@ python CRA-NAMO/main.py --scenario corridor --frames
 
 图片和 GIF 默认保存在 `img/`。其他算法、机器人和动态地图参数集中在 `CRA-NAMO/config.py`。
 
-### 场景回归测试
-
-安装测试依赖后，一条命令会依次运行全部四个场景并打印统一摘要：
-
-```bash
-python -m pip install -r requirements-dev.txt
-pytest
-```
-
-只运行场景测试或单个场景：
-
-```bash
-pytest -m scenario
-pytest tests/test_scenarios.py::test_scenario_reaches_goal[corridor]
-```
-
 ## 场景
 
 | 场景 | 主要用途 |
@@ -198,4 +182,4 @@ CRA-NAMO/
 
 ## 当前阶段
 
-当前版本已经具备在线感知、路径与搬移联合决策、风险评估和基础动态地图事件。后续工作主要是加入移动障碍物轨迹预测、不确定性建模、时空碰撞检查，以及更完整的自动化测试和动态场景评估指标。
+当前版本已经具备在线感知、路径与搬移联合决策、风险评估和基础动态地图事件。后续工作主要是加入移动障碍物轨迹预测、不确定性建模、时空碰撞检查，以及更完整的动态场景评估指标。
