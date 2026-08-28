@@ -123,6 +123,7 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
         forward_penalty=forward_penalty,
         oid=obs.oid,
         verbose=cfg.verbose,
+        logger=cfg.log,
     )
     _PLANNER_CACHE[key] = planner
     while len(_PLANNER_CACHE) > _PLANNER_CACHE_MAX:

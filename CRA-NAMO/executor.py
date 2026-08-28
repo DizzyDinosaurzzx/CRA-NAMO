@@ -23,7 +23,6 @@ from search import Planner, move_signature
 import cost
 import geometry
 import kinematics
-import log
 import manipulation
 
 # How many of the nearest roadmap nodes to try when putting the robot back on the
@@ -113,7 +112,7 @@ class OnlineNAMO:
         try:
             return self._run()
         finally:
-            log.flush()
+            self.cfg.flush_log()
 
     def _run(self) -> RunResult:
         cfg = self.cfg

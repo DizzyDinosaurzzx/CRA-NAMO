@@ -1,10 +1,10 @@
 """Runtime configuration and validation."""
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable
 
 import kinematics
-import log
 
 
 STRATEGIES = ("normal", "shortest")
@@ -123,6 +123,8 @@ class Config:
     gif_time_step: float = 1.0
     gif_max_frames: int = 400
     verbose: bool = True
+    _log_sink: Callable[[str], None] = field(default=print, repr=False)
+    _log_flush: Callable[[], None] = field(default=lambda: None, repr=False)
 
     def __post_init__(self):
         self.lambda_distance = validate_lambda(self.lambda_distance)
@@ -143,4 +145,13 @@ class Config:
 
     def log(self, *args):
         if self.verbose:
-            log.emit(" ".join(str(a) for a in args))
+            self._log_sink(" ".join(str(a) for a in args))
+
+    def set_logger(self, sink: Callable[[str], None],
+                   flush: Callable[[], None]) -> None:
+        """Set the console logger used by planning and execution."""
+        self._log_sink = sink
+        self._log_flush = flush
+
+    def flush_log(self) -> None:
+        self._log_flush()

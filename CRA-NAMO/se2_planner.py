@@ -3,10 +3,9 @@
 from __future__ import annotations
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
-import log
 from geometry import (
     c_obstacle,
     convex_hull,
@@ -56,7 +55,8 @@ class SE2Planner:
                  containment: str = "centroid",
                  forward_penalty: float = 0.0,
                  oid: int = -1,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 logger: Callable[[str], None] = print):
         assert connectivity in (8, 16), "connectivity supports only 8 or 16"
         assert containment in ("body", "centroid")
 
@@ -72,6 +72,7 @@ class SE2Planner:
         self.connectivity = connectivity
         self.containment = containment
         self.verbose = verbose
+        self.logger = logger
 
         xmin, xmax, ymin, ymax = bounds
         self.xs = np.arange(xmin + cell / 2, xmax, cell)
@@ -98,9 +99,9 @@ class SE2Planner:
         self._cache: Optional[Tuple[np.ndarray, np.ndarray, int]] = None
 
         if verbose:
-            log.emit(f"[se2] oid={self.oid} | "
-                     f"free {self.free.mean() * 100:.0f}% "
-                     f"-> reachable {self.allowed.mean() * 100:.0f}%")
+            self.logger(f"[se2] oid={self.oid} | "
+                        f"free {self.free.mean() * 100:.0f}% "
+                        f"-> reachable {self.allowed.mean() * 100:.0f}%")
 
     def _build_moves(self) -> None:
         """(di, dj, dk, integer weight). Translation and rotation are mutually exclusive."""
@@ -241,8 +242,8 @@ class SE2Planner:
             self._unstuck_for = start_idx
             if self.verbose:
                 x, y, _ = self._pose(*start_idx)
-                log.emit(f"[se2] oid={self.oid} unstuck {freed:,} states at "
-                         f"({x:.1f}, {y:.1f}) clearance={clearance:.3f}")
+                self.logger(f"[se2] oid={self.oid} unstuck {freed:,} states at "
+                            f"({x:.1f}, {y:.1f}) clearance={clearance:.3f}")
         return freed
 
     def _snap(self, x: float, y: float, theta: float) -> Tuple[int, int, int]:
@@ -603,7 +604,8 @@ def build_se2_planner(wall_polys,             # list of shapely Polygons — imp
                        containment: str = "centroid",
                        forward_penalty: float = 0.0,
                        oid: int = -1,
-                       verbose: bool = False) -> SE2Planner:
+                       verbose: bool = False,
+                       logger: Callable[[str], None] = print) -> SE2Planner:
     """Build a SE2Planner from CA-NAMO-style data."""
     wall_verts = [polygon_exterior_coords(p) for p in wall_polys]
 
@@ -622,5 +624,5 @@ def build_se2_planner(wall_polys,             # list of shapely Polygons — imp
         forward_penalty=forward_penalty,
         oid=oid,
         verbose=verbose,
+        logger=logger,
     )
-

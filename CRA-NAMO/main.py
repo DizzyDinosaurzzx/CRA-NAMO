@@ -3,6 +3,32 @@
 from __future__ import annotations
 import argparse
 import os
+from typing import Optional
+
+
+_pending_log: Optional[str] = None
+_log_repeats = 0
+
+
+def emit_log(line: str) -> None:
+    """Print a line, folding consecutive duplicates into a repeat count."""
+    global _pending_log, _log_repeats
+    if line == _pending_log:
+        _log_repeats += 1
+        return
+    flush_log()
+    print(line)
+    _pending_log = line
+
+
+def flush_log() -> None:
+    """Finish the current run of folded console messages."""
+    global _pending_log, _log_repeats
+    if _log_repeats:
+        times = "time" if _log_repeats == 1 else "times"
+        print(f"  ... last line repeated {_log_repeats} more {times}")
+    _pending_log = None
+    _log_repeats = 0
 
 import config
 import scenarios
@@ -41,6 +67,7 @@ def main():
 
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
+    cfg.set_logger(emit_log, flush_log)
 
     if args.strategy is not None:
         cfg.strategy = args.strategy
@@ -124,4 +151,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
