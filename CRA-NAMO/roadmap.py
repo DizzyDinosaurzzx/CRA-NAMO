@@ -34,21 +34,13 @@ class Roadmap:
         self.edge_corridor: Dict[EdgeKey, Polygon] = {}
         self._kdtree: KDTree | None = None
         self._corridor_tree: STRtree | None = None
+        self._corridor_keys: List[EdgeKey] = []
         self._free_eroded_tol: Polygon | None = None
         self._build()
         self._rebuild_kdtree()
 
     @property
     def free_eroded_tol(self):
-        """`free_eroded`, relaxed by `contact_clearance`.
-
-        Built lazily because only the contact model needs it. Roadmap
-        construction deliberately uses the strict `free_eroded`: a node is a place
-        the robot parks, and it should have real clearance. A grip point is not —
-        it is pressed flush against an obstacle that may itself be flush against a
-        wall, so it lands exactly on the strict boundary and gets rejected for a
-        rounding error. Hence the hair of slack, and hence two sets rather than one.
-        """
         if self._free_eroded_tol is None:
             eps = max(1e-6, self.cfg.robot_radius - self.cfg.contact_clearance)
             geom = self.static_free.buffer(-eps, quad_segs=16)
@@ -57,7 +49,6 @@ class Roadmap:
         return self._free_eroded_tol
 
     def _build(self):
-        """Uniform grid across the entire map"""
         cfg = self.cfg
         assert cfg.grid_step > 0 and cfg.conn_radius > 0
         minx, miny, maxx, maxy = self.workspace.bounds
@@ -104,10 +95,16 @@ class Roadmap:
             yield v, key, self.edge_len[key]
 
     def count_blocked_edges(self, poly: Polygon) -> int:
-        """How many edge corridors this footprint would block"""
+        return len(self.corridors_intersecting(poly))
+
+    def corridors_intersecting(self, poly: Polygon) -> List[EdgeKey]:
+        """Return only roadmap edges whose swept corridor intersects *poly*."""
         if self._corridor_tree is None:
-            self._corridor_tree = STRtree(list(self.edge_corridor.values()))
-        return len(self._corridor_tree.query(poly, predicate="intersects"))
+            self._corridor_keys = list(self.edge_corridor)
+            self._corridor_tree = STRtree(
+                [self.edge_corridor[key] for key in self._corridor_keys])
+        indices = self._corridor_tree.query(poly, predicate="intersects")
+        return [self._corridor_keys[int(i)] for i in indices]
 
     def _rebuild_kdtree(self):
         if self.nodes:
@@ -123,11 +120,6 @@ class Roadmap:
 
     def can_drive(self, a: Tuple[float, float], b: Tuple[float, float],
                   blocked=None) -> bool:
-        """Can the robot drive straight from *a* to *b*?
-
-        *blocked* is an optional prepared geometry of robot-centre positions
-        ruled out by known movable obstacles.
-        """
         if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9:
             # degenerate segment: shapely predicates on a zero-length LineString
             # are unreliable, and standing still is trivially possible anyway
@@ -171,6 +163,7 @@ class Roadmap:
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
         self._corridor_tree = None      # new corridors, index is stale
+        self._corridor_keys = []
         self._rebuild_kdtree()
         return nid
 

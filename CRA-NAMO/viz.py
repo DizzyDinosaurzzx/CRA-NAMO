@@ -7,9 +7,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# Times New Roman throughout — figures go into a paper, and the fallbacks are
-# ordered so a machine without it still renders a serif rather than silently
-# dropping to the sans-serif default.
 matplotlib.rcParams["font.family"] = "serif"
 matplotlib.rcParams["font.serif"] = ["Times New Roman", "Times", "STIXGeneral",
                                      "DejaVu Serif"]
@@ -23,8 +20,6 @@ from shapely.geometry import LineString, Point
 
 from executor import OnlineNAMO
 
-# Everything that has a colour has it named here, so a change is one edit and
-# two things can never drift into the same shade by accident.
 _BACKGROUND     = "#f6f6f3"      # workspace fill
 _WALL           = "#585d63"      # static obstacles
 _WALL_EDGE      = "#3a3e42"
@@ -46,16 +41,9 @@ _WORLD_EDGE     = "#7a0177"      # ... one the world moved on its own
 _UNPERCEIVED    = "#9a9a9a"      # outline of one it has not seen yet
 _DIFFICULTY_CMAP = "YlOrBr"
 
-# The gradient runs over the *true* difficulties, which is ground truth the robot
-# does not have. That is deliberate and safe: it reaches the picture only, never
-# the belief or the planner, exactly as the dashed "original pose" outlines
-# already do. Reading the map, a human can see at a glance what the robot has to
-# work out by touching things.
 _DIFFICULTY_SHADE = (0.18, 0.92)   # crop the colormap: pure white reads as absent
 
-# Obstacle fills are translucent, so what a label actually sits on is the fill
-# blended with the workspace behind it — not the fill. Named here because the
-# drawing and the black-or-white decision have to use the same number.
+
 _OBSTACLE_ALPHA = 0.9
 _TEXT_DARK      = "#111111"
 _TEXT_LIGHT     = "#ffffff"
@@ -63,24 +51,12 @@ _TRAIL_Z        = 5                # the robot's trail; labels go above it
 
 
 def _difficulty_cmap():
-    """The colormap, cropped to the shades actually used.
-
-    Built once here and used for both the obstacle fills and the colourbar, so
-    the key under the plot cannot drift out of step with what it is explaining.
-    """
     base = matplotlib.colormaps[_DIFFICULTY_CMAP]
     lo, hi = _DIFFICULTY_SHADE
     return ListedColormap([base(lo + (hi - lo) * i / 255.0) for i in range(256)])
 
 
 def difficulty_palette(world):
-    """Map each obstacle id to a fill colour, shading by true difficulty.
-
-    Log scale, because difficulty spans four orders of magnitude across the
-    scenarios — on a linear ramp every obstacle in a map holding one heavy item
-    collapses to the same pale shade. Returns (colours, low, high) so the key
-    below the plot can be drawn over the same range.
-    """
     values = {w.oid: max(float(w.difficulty), 1e-6) for w in world}
     if not values:
         return {}, 0.0, 0.0
@@ -93,51 +69,30 @@ def difficulty_palette(world):
 
 
 def _luminance(colour) -> float:
-    """Relative luminance, Rec. 709."""
     r, g, b = colour[:3]
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
 def _over(fg, bg, alpha: float) -> tuple:
-    """`fg` painted onto `bg` at `alpha` — what the eye actually gets."""
     return tuple(alpha * f + (1.0 - alpha) * b for f, b in zip(fg[:3], to_rgb(bg)))
 
 
 def _contrast(a, b) -> float:
-    """Contrast ratio between two colours, larger being more readable."""
     la, lb = _luminance(to_rgb(a)) + 0.05, _luminance(to_rgb(b)) + 0.05
     return max(la, lb) / min(la, lb)
 
 
 def _label_colour(fill, alpha: float = _OBSTACLE_ALPHA) -> str:
-    """Whichever of the two text shades stands out more, once `fill` is on the page.
-
-    The gradient runs from near-white to dark brown, so a single fixed text
-    colour is illegible at one end or the other. Two things this gets right that
-    a luminance threshold did not. It measures the *blended* colour, because the
-    fill is translucent and a shade dark enough to carry white text on its own
-    is not once the near-white workspace shows through it. And it compares the
-    two contrast ratios outright rather than against a hand-set cut-off — the
-    old one sat at 0.55, far above where the two actually cross, so every
-    mid-tone obstacle got white text on a pale fill at a ratio under 2:1.
-    """
     seen = _over(fill, _BACKGROUND, alpha)
     return max((_TEXT_DARK, _TEXT_LIGHT), key=lambda c: _contrast(c, seen))
 
 
 def _label_effects(colour: str):
-    """A thin halo in the opposite shade, so a label survives what crosses it.
-
-    The robot's trail is drawn over the obstacles it has squeezed past, and a
-    translucent wash across a label costs it most of its contrast. A one-pixel
-    outline is cheaper than reserving space no other element may enter.
-    """
     edge = _TEXT_LIGHT if colour == _TEXT_DARK else _TEXT_DARK
     return [patheffects.withStroke(linewidth=1.6, foreground=edge, alpha=0.75)]
 
 
 def _obstacle_edge(oid, removed: bool, world_moved) -> tuple:
-    """Outline colour and width for one obstacle, by who last moved it."""
     if removed:
         return _MOVED_EDGE, 2.0
     if oid in world_moved:
@@ -146,12 +101,6 @@ def _obstacle_edge(oid, removed: bool, world_moved) -> tuple:
 
 
 def _draw_obstacle_key(ax, show_unperceived: bool, show_world_moved: bool = False):
-    """Legend proxies for what an obstacle's *outline* means.
-
-    Fill shades difficulty, so the state of an obstacle had to move to the
-    outline — and an encoding nobody can read is not an encoding. Zero-size
-    rectangles carry the styling into the legend without drawing on the plot.
-    """
     ax.add_patch(Rectangle((0, 0), 0, 0, facecolor="none",
                            edgecolor=_MOVED_EDGE, lw=2.0,
                            label="moved by the robot"))
@@ -166,17 +115,6 @@ def _draw_obstacle_key(ax, show_unperceived: bool, show_world_moved: bool = Fals
 
 
 def _draw_difficulty_key(fig, ax, colours, low, high):
-    """Explain what an obstacle's shade means, below the plot.
-
-    A colourbar rather than swatches: two squares can name the ends but cannot
-    show that the ramp between them is continuous and logarithmic, and that is
-    the part that makes a 66 N door and a 167 kN block legible on one map. Ticks
-    are placed at the two ends and the geometric middle, which are meaningful for
-    any range, rather than at whatever decades happen to fall inside it.
-
-    A map whose obstacles are all equally hard has no ramp to draw, so it falls
-    back to a single labelled swatch in the ordinary legend.
-    """
     if not colours:
         return
     if high - low < 1e-9:
@@ -194,13 +132,9 @@ def _draw_difficulty_key(fig, ax, colours, low, high):
     ticks = [low, math.sqrt(low * high), high]
     bar.set_ticks(ticks)
     bar.set_ticklabels([f"{t:,.0f}" for t in ticks])
-    # a log scale labels its minor ticks too, which over a range narrower than
-    # two decades writes "3 x 10^1" on top of the three ticks actually wanted
     bar.ax.minorticks_off()
     bar.ax.tick_params(labelsize=6, length=2, pad=1)
     bar.outline.set_linewidth(0.5)
-    # the title sits above the bar; a colourbar label would land under the ticks,
-    # which is where the ordinary legend already is
     bar.ax.set_title("obstacle difficulty — push force [N], shown for the reader "
                      "only", fontsize=6.5, pad=3)
 
@@ -216,18 +150,6 @@ def _plot_poly(ax, poly, **kw):  # draw basic polygon
 
 
 def _obstacle_label(oid: int, estimates, touched=None, risk=None) -> str:
-    """Obstacle ID, what moving it is thought to cost, and how dangerous it is.
-
-    The difficulty line switches rather than accumulates: an estimate while the
-    obstacle has only been seen, the measured value once it has been touched.
-    Showing both would be showing a number nothing consults any more —
-    `Belief.get_difficulty` stops asking the estimator the moment a true value
-    exists, and so should the picture.
-
-    The risk line is shown at every level including `low`, because a blank is
-    ambiguous between "assessed as safe" and "not assessed yet". Obstacles that
-    genuinely have no verdict — never perceived — get no line at all.
-    """
     true = touched.get(oid) if touched else None
     est = estimates.get(oid) if estimates else None
     level = risk.get(oid) if risk else None
@@ -319,18 +241,6 @@ _LEGEND_NCOL = 6
 
 
 def _lay_out_title(groups, width_inch: float, max_lines: int = _TITLE_LINES) -> str:
-    """Lay the title out one category per line: `groups` is [(label, segments)].
-
-    Two rules, both about being read rather than being compact. Each category
-    starts its own line, because someone scanning the figure is after one number
-    and knowing which line it lives on is worth more than saving a line. And a
-    line is only ever broken *between* segments, never inside one — `textwrap`
-    breaks on spaces, which used to put a line end in the middle of
-    "lambda*D=11,740.872" and orphan a bare number onto the next line.
-
-    A category too wide for the plot continues on the following line instead of
-    being squeezed or clipped.
-    """
     ncols = max(20, int(width_inch / (0.55 * _TITLE_FS / 72.0)))
     lines = []
     for label, segments in groups:
@@ -356,12 +266,6 @@ def _lay_out_title(groups, width_inch: float, max_lines: int = _TITLE_LINES) -> 
     return "\n".join(lines)
 
 def _new_canvas(sim: OnlineNAMO, title_lines: int = _TITLE_LINES):
-    """Blank figure with room reserved above the axes for `title_lines` of title.
-
-    Animation frames must all reserve the same height whatever their title says,
-    or the GIF ends up with frames of differing sizes; a one-off summary can size
-    itself to the title it actually has.
-    """
     minx, miny, maxx, maxy = sim.workspace.bounds
     w, h = (maxx - minx) + 2.0, (maxy - miny) + 2.0   # consistent with xlim/ylim padding below
     s = min(_PLOT_BOX[0] / w, _PLOT_BOX[1] / h)
@@ -391,14 +295,6 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
                          framealpha=0.9, borderaxespad=0.0)
 
 def _summary_title(sim: OnlineNAMO, res) -> list:
-    """The facts above the summary plot, grouped into the categories they belong to.
-
-    Deliberately absent: the combined objective C, the total elapsed time, which
-    difficulty estimator ran, and the risk surcharge R. C and T are sums of
-    things already on the line below; the estimator says nothing about the run
-    itself; and R is carried by the obstacles — every one of them shows its own
-    `risk=` verdict, which is the form in which it actually explains the route.
-    """
     moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
              else (str(res.removed) if res.removed else "none"))
     return [
@@ -414,7 +310,6 @@ def _summary_title(sim: OnlineNAMO, res) -> list:
 
 
 def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
-    """Generate the final summary plot of the simulation"""
     title = _lay_out_title(_summary_title(sim, res),
                            _PLOT_BOX[0], max_lines=8)
     fig, ax = _new_canvas(sim, title_lines=title.count("\n") + 1)
@@ -422,7 +317,7 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     _draw_roadmap_bg(ax, sim)
     # fill shades true difficulty; the outline says whether the robot moved it
     colours, low, high = difficulty_palette(sim.world)
-    world_moved = set(sim.dynamics.actors)
+    world_moved = set(sim.dynamics.moved_on_own)
     for w in sim.world:
         edge, lw = _obstacle_edge(w.oid, w.removed, world_moved)
         _plot_poly(ax, w.polygon, facecolor=colours[w.oid], alpha=_OBSTACLE_ALPHA,
@@ -453,7 +348,6 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
 
 def render_frame(sim: OnlineNAMO, frame, original_poses,
                  idx: int, total: int, cur_node: int | None = None):
-    """Render a single frame from the simulation; returns the figure (caller closes it)"""
     fig, ax = _new_canvas(sim)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim, cur_node=cur_node)
@@ -515,12 +409,6 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
 
 
 def _shared_palette(buffers, colors: int = 255):
-    """One palette for the whole animation, sampled from start / middle / end.
-
-    Frames sharing a palette let Pillow store only the pixels that changed
-    between them, which matters here: the roadmap background is redrawn
-    identically every step and dominates the file size otherwise.
-    """
     picks = sorted({0, len(buffers) // 2, len(buffers) - 1})
     tiles = [Image.open(buffers[i]).convert("RGB") for i in picks]
     w, h = tiles[0].size
@@ -531,22 +419,6 @@ def _shared_palette(buffers, colors: int = 255):
 
 
 def _time_sampled(frames, step: float, max_frames: int):
-    """Indices of the frames to show, one per `step` seconds of simulated time.
-
-    Frames are recorded at events — a node reached, a grip taken, a collision —
-    and events are not evenly spaced in time: dragging an obstacle one metre
-    takes several times longer than driving that metre free, and a replan takes
-    seconds during which nothing moves at all. Playing the event list back at a
-    fixed frame rate flattens all of that, which hides the very thing the time
-    axis is for. So the animation is resampled onto the clock: at each tick it
-    shows whichever frame was current then, repeating one that is still current
-    and skipping past any that came and went inside a single tick.
-
-    `step` is stretched if a run is long enough that honouring it would produce
-    more frames than `max_frames` — a GIF too big to open shows nothing at all.
-    Returns the indices and the step actually used, since a caller reporting the
-    configured one would be quoting a number the animation does not run at.
-    """
     times = [float(f.get("t", i)) for i, f in enumerate(frames)]
     span = times[-1] - times[0]
     if span <= 0.0:                       # no clock to speak of, show it as recorded
@@ -566,18 +438,11 @@ def _time_sampled(frames, step: float, max_frames: int):
 
 
 def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
-    """Render the run into one animated GIF, played on the simulated clock.
-
-    Returns (frames written, simulated seconds each one stands for).
-    """
     cfg = sim.cfg
     total = len(res.frames)
     if total == 0:
         return 0, cfg.gif_time_step
     picks, step = _time_sampled(res.frames, cfg.gif_time_step, cfg.gif_max_frames)
-    # keep the frames as encoded PNG bytes rather than decoded bitmaps: a long
-    # run on a large map would otherwise hold hundreds of MB of pixels at once.
-    # A frame still current across several ticks is drawn once and shown again.
     rendered = {}
     for i in sorted(set(picks)):
         frame = res.frames[i]
@@ -600,5 +465,4 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
     images[0].save(gif_path, save_all=True, append_images=images[1:],
                    duration=durations, loop=0, optimize=True)
     return len(images), step
-
 

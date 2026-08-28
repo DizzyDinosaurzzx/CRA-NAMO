@@ -33,6 +33,7 @@ class Belief:
         """Reveal visible obstacles and synchronize known ones."""
         self.newly_revealed = []
         self.updated = []
+        new_observations = []
         rp = Point(robot_pos)
         for w in world_obstacles:
             known = self.perceived.get(w.oid)
@@ -48,9 +49,11 @@ class Belief:
             obs = w.perceived_copy()
             self.perceived[w.oid] = obs
             self.newly_revealed.append(w.oid)
-            self._assess_risk(obs)
+            new_observations.append(obs.observation())
             self._update_edges_for(obs)
             self._clear_contacts_overlapping(obs.polygon)
+        if self.risk is not None and new_observations:
+            self.risk.assess_many(new_observations)
         self._forget_vacated(world_obstacles, robot_pos)
         return self.newly_revealed
 
@@ -175,20 +178,8 @@ class Belief:
         return False
 
     def _update_edges_for(self, obs: MovableObstacle):
-        poly = obs.polygon
-        minx, miny, maxx, maxy = poly.bounds
-        pad = 1.0
-        for key, corridor in self.roadmap.edge_corridor.items():
-            cminx, cminy, cmaxx, cmaxy = corridor.bounds
-            if cmaxx < minx - pad or cminx > maxx + pad:
-                continue
-            if cmaxy < miny - pad or cminy > maxy + pad:
-                continue
-            blockers = self.edge_blockers.setdefault(key, set())
-            if corridor.intersects(poly):
-                blockers.add(obs.oid)
-            else:
-                blockers.discard(obs.oid)
+        for key in self.roadmap.corridors_intersecting(obs.polygon):
+            self.edge_blockers.setdefault(key, set()).add(obs.oid)
 
     def register_contact(self, region: Polygon):
         if region is None or region.is_empty:

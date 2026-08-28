@@ -6,9 +6,7 @@ from typing import Callable
 
 import kinematics
 
-
 STRATEGIES = ("normal", "shortest")
-
 
 def validate_strategy(value: str) -> str:
     if value not in STRATEGIES:
@@ -74,7 +72,6 @@ class Config:
     se2_connectivity: int = 8
     se2_containment: str = "centroid"
     se2_rot_weight: float | None = None
-    # Candidate drop poses are checked in ascending cost order.
     se2_goal_candidates: int = 24
 
     # World motion. Obstacles may travel under their own steam; speed is in the
@@ -84,12 +81,6 @@ class Config:
     dynamic_step: float = 0.25          # simulated seconds per motion sub-step
     dynamic_block_patience: float = 2.0  # seconds waiting before seeking another route
     dynamic_give_up: float = 30.0       # seconds stuck before it parks where it is
-    # Planning takes real seconds and by default they are spent on the shared
-    # clock like any others. With a world that moves, that makes a run depend on
-    # how fast the machine planning it happens to be — a loaded machine gives the
-    # obstacles longer to travel. Set False to take planning off the clock: it is
-    # still measured and reported, the world then advances only with the robot,
-    # and a dynamic run repeats exactly.
     plan_time_in_clock: bool = True
 
     dynamic_wait_step: float = 2.0      # seconds the robot waits per unplannable cycle
@@ -112,14 +103,14 @@ class Config:
     llm_max_tokens: int | None = None
     llm_timeout: float = 300.0
     llm_max_retries: int = 2
+    perception_llm_timeout: float = 60.0
+    perception_llm_max_calls: int = 8
 
-    rng_seed: int = 0
     out_dir: str = "img"
     save_frames: bool = True
     gif_fps: float = 10
     gif_end_hold_s: float = 2
     gif_dpi: int = 300
-    # Sample animation frames on simulated time, capped by gif_max_frames.
     gif_time_step: float = 1.0
     gif_max_frames: int = 400
     verbose: bool = True

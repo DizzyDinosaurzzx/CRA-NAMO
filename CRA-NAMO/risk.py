@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
-from typing import Dict, Optional
+import time
+from typing import Dict, List, Optional
 
 import requests
 
@@ -19,14 +21,7 @@ EXTREME = "extreme"
 LEVELS = (LOW, MEDIUM, MEDIUM_HIGH, HIGH, EXTREME)
 _ORDER = {name: i for i, name in enumerate(LEVELS)}
 
-# What each level costs, as the detour in metres that would be worth taking to
-# avoid it. Multiplied by lambda_distance in `cost`, so the ladder stays in
-# proportion to the map whatever the robot's driving resistance is set to.
-#
-# The steps are wide on purpose. `low` is free: ordinary furniture is what a
-# NAMO robot is *for*. `extreme` is far past any detour a finite map can offer,
-# which is the point — a load-bearing column in a damaged building is not a
-# trade-off, and the planner should route around it or fail rather than price it.
+# What each level costs, as the detour in metres that would be worth taking to avoid it
 RISK_DETOUR_EQUIV_M: Dict[str, float] = {
     LOW: 0.0,
     MEDIUM: 20.0,
@@ -146,6 +141,8 @@ class RiskEstimator:
         self.on_contact: set[int] = set()        # oids re-assessed after touching
         self.label_cache: Dict[str, str] = {}    # label -> level, to spare repeat calls
         self.calls = 0
+        self.perception_calls = 0
+        self._perception_started: Optional[float] = None
         self.mode = "deepseek" if self.api_key else "heuristic"
 
     def assess(self, observation: dict) -> str:
@@ -157,6 +154,37 @@ class RiskEstimator:
         self.level[oid] = level
         self.source[oid] = source
         return level
+
+    def assess_many(self, observations: List[dict]) -> Dict[int, str]:
+        """Assess newly visible obstacles in one request, within a stage budget."""
+        unresolved: Dict[str, List[dict]] = {}
+        for observation in observations:
+            oid = observation["oid"]
+            if oid in self.level:
+                continue
+            label = self._label(observation, difficulty=None)
+            cached = self.label_cache.get(label)
+            if cached is not None:
+                self.level[oid] = cached
+                self.source[oid] = "cache"
+            else:
+                unresolved.setdefault(label, []).append(observation)
+
+        representatives = [(label, group[0])
+                           for label, group in unresolved.items()]
+        decided = self._deepseek_many(representatives) if self.api_key else {}
+        for label, group in unresolved.items():
+            level = decided.get(label)
+            source = "deepseek-batch"
+            if level is None:
+                level = keyword_level(label)
+                source = "keyword"
+            self.label_cache[label] = level
+            for observation in group:
+                oid = observation["oid"]
+                self.level[oid] = level
+                self.source[oid] = source
+        return {o["oid"]: self.level[o["oid"]] for o in observations}
 
     def reassess(self, observation: dict, difficulty: float) -> str:
         """Second look, once the robot has touched it and knows what it weighs.
@@ -267,6 +295,74 @@ class RiskEstimator:
             if name in found:
                 return name
         return None
+
+    def _deepseek_many(self, items) -> Dict[str, str]:
+        if not items or self.cfg.perception_llm_max_calls <= 0:
+            return {}
+        if self._perception_started is None:
+            self._perception_started = time.monotonic()
+        rows = [
+            {"id": str(i), "label": label,
+             "size_m": [float(o["l"]), float(o["d"]),
+                        float(o.get("h", 1.0))]}
+            for i, (label, o) in enumerate(items)
+        ]
+        prompt = (
+            "Rate the consequence of a mobile robot pushing each obstacle. "
+            "Risk is about harm to people, contents, or the building, not push "
+            "force. Levels: low=ordinary furniture; medium=spill/break/cost; "
+            "medium_high=hazardous or damaged structure; high=person involved; "
+            "extreme=load-bearing/collapse risk. Return only one JSON object "
+            "mapping every id to one of low, medium, medium_high, high, extreme.\n"
+            f"Items: {json.dumps(rows, ensure_ascii=False)}"
+        )
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {self.api_key}"}
+        body = {
+            "model": self.cfg.deepseek_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+            "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
+                         else "disabled"},
+        }
+        if self.cfg.llm_max_tokens:
+            body["max_tokens"] = int(self.cfg.llm_max_tokens)
+
+        for attempt in range(self.cfg.llm_max_retries + 1):
+            elapsed = time.monotonic() - self._perception_started
+            remaining = self.cfg.perception_llm_timeout - elapsed
+            if (self.perception_calls >= self.cfg.perception_llm_max_calls
+                    or remaining <= 0.0):
+                self.cfg.log("[risk] perception LLM budget exhausted; using keywords")
+                return {}
+            timeout = min(self.cfg.llm_timeout, remaining)
+            try:
+                self.calls += 1
+                self.perception_calls += 1
+                response = requests.post(self.cfg.deepseek_base_url,
+                                         headers=headers, json=body,
+                                         timeout=timeout)
+                data = response.json()
+                if response.status_code >= 400:
+                    error = data.get("error", data) if isinstance(data, dict) else data
+                    self.cfg.log(f"[risk] HTTP {response.status_code}: {error}")
+                    if not (response.status_code >= 500
+                            or response.status_code in {408, 409, 429}):
+                        return {}
+                    continue
+                content = data["choices"][0]["message"].get("content") or ""
+                match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+                parsed = json.loads(match.group(0) if match else content)
+                result = {}
+                for i, (label, _) in enumerate(items):
+                    level = self._parse(str(parsed.get(str(i), "")))
+                    if level is not None:
+                        result[label] = level
+                return result
+            except Exception as e:
+                self.cfg.log(f"[risk] batch call failed ({attempt}): {e}")
+        return {}
 
     def _deepseek(self, o: dict, label: str,
                   difficulty: Optional[float]) -> Optional[str]:

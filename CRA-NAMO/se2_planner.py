@@ -1,6 +1,7 @@
 """Plan obstacle motion on a discretized SE(2) grid."""
 
 from __future__ import annotations
+import heapq
 import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -267,9 +268,7 @@ class SE2Planner:
         return i, j, rem - j * nT
 
     def _search(self, start_idx: Tuple[int, int, int], max_bucket: int | None = None):
-        """Dial-bucket Dijkstra. If *max_bucket* is given, stop expanding once the
-        current bucket exceeds that value — states beyond that distance are unreachable
-        in practice and skipping them saves the majority of the search time."""
+        """Bucketed Dijkstra using a heap of occupied distance buckets."""
         N = self.nx * self.ny * self.n_theta
         allowed = self.allowed.reshape(-1)
         rot_ok = self.rot_ok
@@ -280,11 +279,15 @@ class SE2Planner:
         s = int(self._flat(*start_idx))
         dist[s] = 0
         buckets: Dict[int, List[np.ndarray]] = {0: [np.array([s], dtype=np.int64)]}
-        max_b = 0
+        occupied = [0]
+        queued = {0}
         nx, ny, nT = self.nx, self.ny, self.n_theta
 
-        b = 0
-        while b <= max_b:
+        while occupied:
+            b = heapq.heappop(occupied)
+            queued.discard(b)
+            if max_bucket is not None and b > max_bucket:
+                break
             while True:  # inner loop: compatible with zero-weight edges (when rotation is free)
                 arrs = buckets.pop(b, None)
                 if not arrs:
@@ -310,9 +313,10 @@ class SE2Planner:
                         continue
                     dist[tgt] = nd
                     parent[tgt] = src[better]
+                    if nd not in buckets and nd != b and nd not in queued:
+                        heapq.heappush(occupied, nd)
+                        queued.add(nd)
                     buckets.setdefault(nd, []).append(tgt)
-                    if nd > max_b:
-                        max_b = nd
 
                 nd = b + self.W_rot
                 for dk in (1, -1):
@@ -326,12 +330,10 @@ class SE2Planner:
                         continue
                     dist[tgt] = nd
                     parent[tgt] = idx[better]
+                    if nd not in buckets and nd != b and nd not in queued:
+                        heapq.heappush(occupied, nd)
+                        queued.add(nd)
                     buckets.setdefault(nd, []).append(tgt)
-                    if nd > max_b:
-                        max_b = nd
-            b += 1
-            if max_bucket is not None and b > max_bucket:
-                break
 
         return dist, parent
 

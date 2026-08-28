@@ -44,16 +44,18 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import random
 import re
 import statistics
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -81,6 +83,9 @@ from risk import (
 )
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_test_out")
+BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(BENCH_DIR)
+REPO_DIR = os.path.dirname(PROJECT_DIR)
 
 SIZE_SCALES = (0.5, 1.0, 2.0)
 
@@ -108,9 +113,58 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _save(name: str, payload) -> str:
+def _hash_files(paths) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(os.path.relpath(path, PROJECT_DIR).encode("utf-8"))
+        with open(path, "rb") as fh:
+            digest.update(fh.read())
+    return digest.hexdigest()
+
+
+def _source_files():
+    return [os.path.join(root, name)
+            for root, dirs, names in os.walk(PROJECT_DIR)
+            if "__pycache__" not in root.split(os.sep)
+            for name in names if name.endswith(".py")]
+
+
+def _config_snapshot(cfg: Config) -> dict:
+    snapshot = {}
+    for item in fields(cfg):
+        if item.name.startswith("_"):
+            continue
+        value = getattr(cfg, item.name)
+        if item.name == "deepseek_api_key":
+            value = "<set>" if value else ""
+        snapshot[item.name] = value
+    return snapshot
+
+
+def _benchmark_metadata(cfg: Optional[Config] = None) -> dict:
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_DIR,
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unknown"
+    prompt_files = [os.path.join(PROJECT_DIR, "llm_difficulty.py"),
+                    os.path.join(PROJECT_DIR, "risk.py")]
+    return {
+        "code_version": commit,
+        "source_hash": _hash_files(_source_files()),
+        "prompt_hash": _hash_files(prompt_files),
+        "dataset_version": _hash_files(
+            [os.path.join(BENCH_DIR, "llm_dataset.py")]),
+        "config": _config_snapshot(cfg or Config()),
+    }
+
+
+def _save(name: str, payload, cfg: Optional[Config] = None) -> str:
     os.makedirs(OUT_DIR, exist_ok=True)
     path = os.path.join(OUT_DIR, name)
+    payload = dict(payload)
+    payload["metadata"] = _benchmark_metadata(cfg)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
     log(f"wrote {path}")
@@ -122,7 +176,14 @@ def _load(name: str):
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        payload = json.load(fh)
+    saved = payload.get("metadata", {})
+    current = _benchmark_metadata()
+    identity = ("code_version", "source_hash", "prompt_hash", "dataset_version")
+    if any(saved.get(key) != current[key] for key in identity):
+        log(f"ignored stale benchmark result {path}")
+        return None
+    return payload
 
 
 def _preflight(cfg: Config) -> None:
@@ -224,7 +285,7 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
     _require_answers("accuracy", sum(1 for r in rows if r["pred"]), len(jobs))
     payload = {"model": cfg.deepseek_model, "repeats": repeats,
                "seconds": round(time.time() - t0, 1), "rows": rows}
-    _save("accuracy.json", payload)
+    _save("accuracy.json", payload, cfg)
     return payload
 
 
@@ -294,7 +355,7 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
     payload = {"model": cfg.deepseek_model, "repeats": repeats,
                "contact_repeats": RISK_CONTACT_REPEATS,
                "seconds": round(time.time() - t0, 1), "rows": rows}
-    _save("risk.json", payload)
+    _save("risk.json", payload, cfg)
     return payload
 
 
@@ -338,7 +399,7 @@ def stage_size(cfg: Config, workers: int) -> dict:
         rows[it.label]["mu_rho_true"] = it.mu_rho
         rows[it.label]["group"] = it.group
     payload = {"scales": list(SIZE_SCALES), "rows": list(rows.values())}
-    _save("size.json", payload)
+    _save("size.json", payload, cfg)
     return payload
 
 
@@ -423,7 +484,7 @@ def stage_ablate(cfg: Config, workers: int) -> dict:
         log(f"  {tag}: {variants[-1]['n_parsed']}/{len(DATASET)} parsed "
             f"({truncated} truncated) in {variants[-1]['seconds']}s")
     payload = {"variants": variants}
-    _save("ablate.json", payload)
+    _save("ablate.json", payload, cfg)
     return payload
 
 
@@ -517,7 +578,7 @@ def stage_order(cfg: Config, workers: int) -> dict:
             f"distinct={v['distinct']}")
 
     payload = {"n_items": len(items), "variants": variants}
-    _save("order.json", payload)
+    _save("order.json", payload, cfg)
     return payload
 
 

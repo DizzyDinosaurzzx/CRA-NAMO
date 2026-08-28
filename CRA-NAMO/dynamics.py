@@ -165,6 +165,7 @@ class WorldDynamics:
         self.events: List[Event] = list(events or ())
         self.actors: Dict[int, Actor] = {}
         self.moved_by_robot: set = set()
+        self.moved_on_own: set = set()
         self.log: List[Tuple[float, str]] = []      # (clock, what happened)
         self.version = 0            # bumped whenever ground truth changes
         bounds = workspace.bounds
@@ -353,6 +354,7 @@ class WorldDynamics:
 
         if moved:
             obs.x, obs.y, obs.theta = pose
+            self.moved_on_own.add(actor.oid)
             actor.waited = 0.0
             if actor.leg + 1 >= len(actor.path):
                 actor.arrived = True

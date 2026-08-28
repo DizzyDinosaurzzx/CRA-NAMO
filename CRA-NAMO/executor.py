@@ -779,7 +779,7 @@ class OnlineNAMO:
             "robot": self.robot_xy,     # true position — off-node while holding an obstacle
             "track": list(res.robot_track),
             "obstacles": [(w.oid, w.polygon, w.removed) for w in self.world],
-            "world_moved": sorted(self.dynamics.actors),   # sent somewhere by the world
+            "world_moved": sorted(self.dynamics.moved_on_own, key=str),
             "perceived": perceived,
             "estimated_difficulty": {
                 oid: value for oid, value in self.estimator.cache.items()

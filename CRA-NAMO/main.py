@@ -49,9 +49,13 @@ def main():
                          "energy alone (default), 1 minimises time alone")
     ap.add_argument("--no-llm-order", action="store_true",
                     help="Disable LLM-based intelligent ordering of obstacle processing")
-    ap.add_argument("--frames", action="store_true",
+    frames = ap.add_mutually_exclusive_group()
+    frames.add_argument("--frames", dest="save_frames", action="store_true",
+                    default=None,
                     help="Save the per-step robot motion as an animated GIF: "
                          "img/frames_<map_name>.gif")
+    frames.add_argument("--no-frames", dest="save_frames", action="store_false",
+                        help="Do not save per-step frames or an animated GIF")
     ap.add_argument("--strategy", default=None,
                     choices=["normal", "shortest"],
                     help="Planning strategy: normal (optimal J=λD+W), "
@@ -92,8 +96,8 @@ def main():
     if args.forward_penalty is not None:
         cfg.manip_forward_penalty = max(0.0, args.forward_penalty)
 
-    if args.frames:
-        cfg.save_frames = True
+    if args.save_frames is not None:
+        cfg.save_frames = args.save_frames
 
     os.makedirs(cfg.out_dir, exist_ok=True)
 
