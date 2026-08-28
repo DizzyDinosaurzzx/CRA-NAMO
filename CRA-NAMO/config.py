@@ -6,14 +6,6 @@ from typing import Callable
 
 import kinematics
 
-STRATEGIES = ("normal", "shortest")
-
-def validate_strategy(value: str) -> str:
-    if value not in STRATEGIES:
-        raise ValueError(f"strategy must be one of {', '.join(STRATEGIES)}")
-    return value
-
-
 def validate_time_importance(value: float) -> float:
     value = float(value)
     if not 0.0 <= value <= 1.0:
@@ -89,7 +81,6 @@ class Config:
     grid_step: float = 0.3          # roadmap node spacing [m]
     conn_radius: float = 0.6        # roadmap connection radius [m]
 
-    strategy: str = "normal"    # "normal" | "shortest"
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
@@ -120,7 +111,6 @@ class Config:
     def __post_init__(self):
         self.lambda_distance = validate_lambda(self.lambda_distance)
         self.time_importance = validate_time_importance(self.time_importance)
-        self.strategy = validate_strategy(self.strategy)
 
     def free_profile(self) -> kinematics.MotionProfile:
         """Return the unloaded motion profile."""

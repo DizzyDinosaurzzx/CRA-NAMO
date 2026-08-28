@@ -56,10 +56,6 @@ def main():
                          "img/frames_<map_name>.gif")
     frames.add_argument("--no-frames", dest="save_frames", action="store_false",
                         help="Do not save per-step frames or an animated GIF")
-    ap.add_argument("--strategy", default=None,
-                    choices=["normal", "shortest"],
-                    help="Planning strategy: normal (optimal J=λD+W), "
-                         "shortest (minimise path, ignore W)")
     ap.add_argument("--no-contact", action="store_true",
                     help="Drop the requirement that the robot stays in contact with "
                          "an obstacle while moving it (obstacles then move while the "
@@ -72,9 +68,6 @@ def main():
     s = scenarios.load(args.scenario)
     cfg = s["cfg"]
     cfg.set_logger(emit_log, flush_log)
-
-    if args.strategy is not None:
-        cfg.strategy = args.strategy
 
     if args.lambda_distance is not None:
         try:
@@ -106,7 +99,7 @@ def main():
     
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
-    print(f"Scenario: {s['name']}   strategy={cfg.strategy}   {sim.roadmap}")
+    print(f"Scenario: {s['name']}   {sim.roadmap}")
     print(f"Difficulty estimator: {sim.estimator.mode}"
           + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
     print("-" * 60)
@@ -141,13 +134,12 @@ def main():
         for line in res.world_events:
             print(f"{'':<{W}}   {line}")
 
-    strategy_suffix = f"_{cfg.strategy}" if cfg.strategy != "normal" else ""
-    out = os.path.join(cfg.out_dir, f"summary_{s['name']}{strategy_suffix}.png")
+    out = os.path.join(cfg.out_dir, f"summary_{s['name']}.png")
     viz.visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
 
     if cfg.save_frames:
-        gif_path = os.path.join(cfg.out_dir, f"frames_{s['name']}{strategy_suffix}.gif")
+        gif_path = os.path.join(cfg.out_dir, f"frames_{s['name']}.gif")
         n, step = viz.render_sequence(sim, res, original_poses, gif_path)
         print(f"Saved {n:,}-frame animation ({step:g}s of simulated time per frame, "
               f"{cfg.gif_fps:g} fps) -> {gif_path}")

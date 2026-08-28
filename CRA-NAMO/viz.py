@@ -298,7 +298,7 @@ def _summary_title(sim: OnlineNAMO, res) -> list:
     moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
              else (str(res.removed) if res.removed else "none"))
     return [
-        ("", [f"[{sim.cfg.strategy}] {res.message}"]),
+        ("", [res.message]),
         ("cost", [f"J={res.J:,}",
                   f"lambda*D={res.walk_cost:,}",
                   f"W={res.work_cost:,}"]),
@@ -398,7 +398,7 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
 
     # every frame reserves the same title height, or the GIF frames differ in size
     title = _lay_out_title([
-        ("", [f"[{sim.cfg.strategy}] step {idx}/{total - 1}", frame["label"]]),
+        ("", [f"step {idx}/{total - 1}", frame["label"]]),
         ("cost", [f"J={frame['J']:,}"]),
         ("time", [f"plan {frame.get('plan_t', 0.0):,g}s",
                   f"move {frame.get('move_t', 0.0):,g}s",

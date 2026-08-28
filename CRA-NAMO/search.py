@@ -122,8 +122,7 @@ class Planner:
         """Cost of traversing one edge, including clearing whatever blocks it.
 
         Returns C, not J: how energy and time are weighed against each other
-        lives in `cost.combine`, and how the strategies weigh obstacle work in
-        `cost.work_multiplier`. This function only decides *what* has to be
+        lives in `cost.combine`. This function only decides *what* has to be
         moved.
         """
         base = cost.edge_cost(self.cfg, self.roadmap.edge_len[key])

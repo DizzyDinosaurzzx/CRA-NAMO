@@ -120,9 +120,6 @@ python CRA-NAMO/main.py --scenario maze_doors_complex
 # 调整能量和时间的权衡
 python CRA-NAMO/main.py --scenario corridor --time-importance 0.5
 
-# 忽略障碍物搬移功 W，偏向较短路径
-python CRA-NAMO/main.py --scenario corridor --strategy shortest
-
 # 关闭 LLM 搜索排序
 python CRA-NAMO/main.py --scenario corridor --no-llm-order
 

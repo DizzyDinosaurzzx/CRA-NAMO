@@ -99,17 +99,6 @@ def se2_path_length(obs, poses, cfg: Config) -> float:
     return total
 
 
-def work_multiplier(cfg: Config) -> float:
-    """How much of the obstacle-work term the search believes, per strategy.
-
-    Only W is scaled. The robot's own travel is never discounted — it is real
-    distance under every strategy — and execution always settles at true physical
-    cost regardless of which strategy chose the route.
-    """
-    # "shortest" ignores W entirely, taking the geometrically shortest route
-    return 0.0 if cfg.strategy == "shortest" else 1.0
-
-
 def edge_cost(cfg: Config, length: float) -> float:
     """What the search charges for driving one clear roadmap edge."""
     return combine(cfg, motion_cost(cfg, length), drive_time(cfg, length))
@@ -125,7 +114,7 @@ def removal_cost(cfg: Config, work: float, contact_travel: float,
     pass None for an obstacle that has already been moved once and so has already
     paid its surcharge.
     """
-    joules = work * work_multiplier(cfg) + motion_cost(cfg, contact_travel)
+    joules = work + motion_cost(cfg, contact_travel)
     return combine(cfg, joules, seconds) + risk_cost(cfg, risk_level)
 
 
