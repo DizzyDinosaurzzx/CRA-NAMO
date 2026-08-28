@@ -73,7 +73,7 @@ class Config:
     dynamic_step: float = 0.25          # simulated seconds per motion sub-step
     dynamic_block_patience: float = 2.0  # seconds waiting before seeking another route
     dynamic_give_up: float = 30.0       # seconds stuck before it parks where it is
-    plan_time_in_clock: bool = True
+    dynamic_replan_backoff: float = 2.0  # seconds before re-asking for a route that was not there
 
     dynamic_wait_step: float = 2.0      # seconds the robot waits per unplannable cycle
     dynamic_max_wait: float = 90.0      # total waiting before the way counts as shut

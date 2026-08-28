@@ -3,36 +3,16 @@ P0：正确性
 2. [ ] 真实接触后再揭示难度和隐藏标签；当前在机器人走到障碍物前就调用 reveal_by_interaction。
 3. [ ] 接触后按真实难度重规划；当前只有风险升高才中断，旧 removal cache 仍保留估计功。
 4. [ ] 修正 RiskEstimator.label_cache：缓存键只有标签，忽略尺寸、接触阶段和难度，会使“接触后重评估”直接复用首次结果。
-5. [ ] 实现机器人与动态障碍物的连续时空碰撞检测；当前只在运动前检查快照，世界随后在整段运动中独立前进。
-6. [ ] 修正动态事件时间：AtTime 跨过阈值时会先触发，再让障碍物运动整个时间段；NearPoint 使用机器人的旧位置。
 7. [ ] 修正 SE(2) Dijkstra 缓存：限定 max_bucket 的搜索结果不能在后续更大走廊中直接复用。
-8. [ ] 修正全局 SE(2) planner cache：键中缺少静态墙体几何，同一进程运行多场景可能复用错误 C-space。
-9. [ ] 修正 plan_anywhere：当 goal_accept 全部拒绝时仍返回 fallback，绕过“不增加堵边/不反向搬运”约束。
-10. [ ] 修正 contact.plan_contact：_standable 返回 None 时应判不可达，当前反而跳过进出路径检查。
 11. [ ] 统一 roadmap 边碰撞几何：规划用平头 corridor，执行用圆头 corridor，节点附近可能规划通过但实际碰撞。
-12. [ ] 动态 Mutate 后清理 touched、removed、_risk_charged 和规划缓存；当前难度单独变化后不会再接触测量，新风险也可能不再计费。
-13. [ ] 将风险评估和感知耗时纳入 plan time；当前只计 planner.plan 的墙钟时间，风险 LLM 调用被漏计，但是在最终的gif输出的时候按照move time来输出，不考虑plan time的部分
 
 P1：算法和逻辑完整性
 14. [ ] 在搜索状态中加入机器人朝向；当前搜索不计转向时间，执行时才计，time_importance > 0 时不能保证最优。
 16. [ ] 加入 wait 动作（时间成本，在config中设定每次等待的时间）；当前只在完全无解时等待，不会比较“等待/绕行/搬移”
 18. [ ] 修正多 blocker 规划：各障碍物按原始几何独立规划，执行顺序受 set 迭代影响，前一次搬移会使后一个路径过期
 19. [ ] 将 others geometry、已知难度和风险版本加入 removal cache 键；Belief.relocate/touch 后应主动失效。
-20. [ ] 动态地图变化后重置相关 failed_moves；当前一次失败可使后续已变得可行的动作永久被拒绝。
 21. [ ] 给 extreme 风险提供硬约束；当前只是有限罚分，无其他路径时仍会搬移承重结构。
-22. [ ] 加入机器人最大推力、抓取稳定性、倾覆和负载约束；当前再难搬的障碍物也只增加成本，设定不可以搬动的障碍物
-23. [ ] 动态障碍物的 plan_path 加入连续扫掠区域和墙体复核；当前网格节点间可能切过墙角。
-24. [ ] 修正动态无路状态；actor.path 为空时每个 dynamic_step 都重跑 SE(2) 规划，应等待世界版本变化或退避。
-25. [ ] 限制动态 Mutate：不得瞬间扩张到墙、机器人或其他障碍物内，并校验正尺寸和非负难度。
+22. [ ] 加入机器人最大推力、抓取稳定性、倾覆和负载约束；当前再难搬的障碍物也只增加成本，设定不可以搬动的障碍物 difficulty 上限，但是在目前的scenario中不用修改
 26. [ ] 评估并减少启发式剪枝的不完备性：se2_goal_candidates、不增加堵边和不反向搬运都可使实际可行问题返回无解。
 28. [ ] 让场景的 decision_points、interacts_with 和 interaction_risk 进入规划/动力学；当前只是未被核心代码读取的元数据。
-29. 优化现在的SE2_push planner的选择， 目前很多时候做出的决定都不是最优解，然后机器人移动障碍物之后不用回到一开始碰到障碍物的地方，而是继续规划
-
-P2：性能、工程和实验
-32. [x] 优化 Belief._update_edges_for：用 roadmap STRtree 查询候选边，避免每次感知扫描全部边。
-33. [x] 优化 SE(2) 搜索：用堆/radix queue 或目标导向搜索，避免 Dial bucket 按空整数 bucket 逐个递增。
-34. [x] 批量化 LLM 请求并为感知阶段设总超时/总调用预算，避免单个障碍物串行阻塞。
-35. [x] 给 benchmark 结果记录代码版本、prompt hash、配置和数据集版本，防止混用旧 JSON。
-37. [x] 修正帧开关：Config.save_frames 默认为 True，--frames 实际无开启作用；增加 --no-frames
-39. [x] 删除未使用的 Config.rng_seed。
-40. [x] 可视化中区分“已创建 actor”和“确实自主移动过”；当前 actors 键集会把未移动/规划失败的物体也标为 world moved。
+29. 优化现在的SE2_push planner的选择， 目前很多时候做出的决定都不是最优解

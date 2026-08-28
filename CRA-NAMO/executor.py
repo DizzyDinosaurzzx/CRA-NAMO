@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import numpy as np
 import shapely
-from shapely.geometry import Polygon, Point
+from shapely.geometry import LineString, Polygon, Point
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 from config import Config
@@ -19,7 +19,7 @@ from perception import Belief
 from llm_difficulty import DifficultyEstimator
 import risk
 from risk import RiskEstimator
-from search import Planner, move_signature
+from search import FailedMoves, Planner, move_signature
 import cost
 import geometry
 import kinematics
@@ -29,6 +29,23 @@ import manipulation
 # graph after a manipulation. At a 0.3 m grid step this reaches roughly 1.5 m out,
 # far enough to clear the obstacle it has just let go of.
 _REANCHOR_CANDIDATES = 64
+
+# How many times to try to get back onto the roadmap when the world keeps
+# interrupting the drive there. Each attempt looks again from wherever the robot
+# was stopped, so they are not repeats of one another; past a handful the map is
+# busy enough that standing still is the honest answer.
+_REANCHOR_ATTEMPTS = 4
+
+
+def _driven_fraction(elapsed: float, turn_s: float, drive_s: float) -> float:
+
+    if drive_s <= 0.0:
+        return 1.0 if elapsed >= turn_s + drive_s else 0.0
+    return min(1.0, max(0.0, (elapsed - turn_s) / drive_s))
+
+
+def _lerp_xy(a, b, s: float):
+    return (a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s)
 
 
 @dataclass
@@ -41,11 +58,11 @@ class RunResult:
     work_cost: float = 0.0                  # manipulation cost = Σ(true difficulty × distance moved)
     risk_cost: float = 0.0                  # R: one surcharge per obstacle moved, by risk level
     risk_levels: dict = field(default_factory=dict)   # oid -> level charged for
-    T: float = 0.0                          # simulated time elapsed = move_time + plan_time [s]
+    T: float = 0.0                          # simulated time elapsed = move_time + wait_time [s]
     move_time: float = 0.0                  # of which spent driving and turning [s]
     wait_time: float = 0.0                  # of which spent standing still for the world [s]
     cycles: int = 0                         # number of replan cycles
-    plan_time: float = 0.0                  # total planning time (seconds)
+    plan_time: float = 0.0                  # wall-clock planning time, measured but not on the clock (seconds)
     first_plan_time: float = 0.0            # first plan time (seconds) — cold-start cost measure
     total_expansions: int = 0               # total A* node expansions (all rounds combined)
     llm_calls: int = 0                      # LLM API call count
@@ -88,10 +105,18 @@ class OnlineNAMO:
         self._risk_charged: set = set()             # oids whose surcharge is already paid
         self.stranded = False       # robot ended a manipulation with no roadmap node in reach
         self._plan_paths: List[dict] = []           # all currently planned paths (for per-frame visualisation)
-        self.failed_moves: set = set()
+        self.failed_moves = FailedMoves()
+        # Set when the world ran into the robot in the middle of a leg: the oids
+        # that did it and where the robot stopped. Cleared once acted on.
+        self._world_hit: Optional[Tuple[List[int], Tuple[float, float]]] = None
+        self._holding: Optional[int] = None    # obstacle in the robot's grip
         # Manipulation may move the robot away from its current roadmap node.
         self.robot_xy: Tuple[float, float] = self.roadmap.nodes[self.start_node]
-        # Driving, turning, and planning advance the same simulated clock.
+        # Driving, turning and standing still are what pass the time. Thinking
+        # is not: the wall clock of a planner running on this machine is a
+        # property of the machine, and letting it move the world would make the
+        # world's behaviour depend on how loaded the laptop was. Planning time is
+        # still measured, and reported, as `RunResult.plan_time`.
         self.clock: float = 0.0
         # The disc footprint is symmetric, but turning still costs time.
         self.robot_heading: float = 0.0
@@ -127,12 +152,15 @@ class OnlineNAMO:
                           self.failed_moves, self.risk)
 
         for cycle in range(cfg.max_replans):
+            # A refusal collected in an arrangement of the world that has since
+            # moved on says nothing about this one; the manipulations costed
+            # against it go with it.
+            if self.failed_moves.drop_stale(self.dynamics.version):
+                planner.forget_removals()
             t0 = time.time()
             plan = planner.plan(node, self.goal_node)
             dt = time.time() - t0
             res.plan_time += dt
-            if cfg.plan_time_in_clock:
-                self._world_frame(res, self._advance_clock(res, dt, moving=False))
             if cycle == 0:
                 res.first_plan_time = dt
             self._plan_paths = self._plan_to_paths(plan)
@@ -208,11 +236,12 @@ class OnlineNAMO:
                         self._drive(res, from_pos, contact_pos, dist=leg)
                         self._drive(res, contact_pos, from_pos, dist=leg)
                         self.belief.touch_check(contact_pos, self.world, cfg)
-                        self.belief.perceive(self.world, from_pos)
+                        self.belief.perceive(self.world, self.robot_xy)
                         self._capture_frame(
                             res, node, f"collision revealed {hit_oids} -> replan")
                         break
-                    self._drive(res, from_pos, to_pos, dist=act["dist"])
+                    if not self._drive(res, from_pos, to_pos, dist=act["dist"]):
+                        break       # the world ran into it; recovered below
                     node = act["v"]
                     moves_done += 1
                     touched = self.belief.touch_check(
@@ -227,6 +256,9 @@ class OnlineNAMO:
                         break
                     if moves_done >= cfg.step_execute_edges:
                         break
+
+            if self._world_hit is not None:
+                node = self._recover_from_world_hit(res, node)
 
             res.cycles = cycle + 1
             if self.stranded:
@@ -355,20 +387,22 @@ class OnlineNAMO:
         """Let `seconds` of simulated time pass, for the robot and for the world.
 
         One clock drives both, so an obstacle with somewhere to be covers ground
-        while the robot drives, turns, and stands still thinking. Returns whether
-        ground truth changed, which the caller turns into an animation frame.
+        while the robot drives, turns, and stands waiting. Returns whether ground
+        truth changed, which the caller turns into an animation frame.
         """
         if seconds <= 0.0:
             return False
+        begins = self.clock
         self.clock += seconds
         if moving:
             res.move_time += seconds
         if not self.dynamics.active:
             return False
         before = self.dynamics.version
-        for note in self.dynamics.advance(seconds, self.clock, self.robot_xy):
-            res.world_events.append(f"t={self.clock:,.1f}s  {note}")
-            self.cfg.log(f"[world] t={self.clock:,.1f}s {note}")
+        for when, note in self.dynamics.advance(seconds, begins, self.robot_xy):
+            res.world_events.append(f"t={when:,.1f}s  {note}")
+            self.cfg.log(f"[world] t={when:,.1f}s {note}")
+        self._absorb_world_changes()
         return self.dynamics.version != before
 
     def _wait_for_world(self, res: RunResult, node: int) -> bool:
@@ -411,15 +445,142 @@ class OnlineNAMO:
         with — `edge_len`, which is rounded — rather than at one recomputed from
         the endpoints, so what execution bills and what the plan predicted agree
         to the last decimal instead of drifting apart by a rounding step an edge.
+
+        Returns whether the robot arrived. On a map that moves it may not: the
+        journey is spent in sub-steps alongside the world's own, and something
+        can cross in front of it on the way. It then stops where it stopped, and
+        pays for the part of the journey it made.
         """
-        self._charge_walk(res, math.dist(a, b) if dist is None else dist,
-                          in_contact)
+        length = math.dist(a, b) if dist is None else dist
         profile = self._loaded_profile if loaded else self._free_profile
-        seconds, self.robot_heading = kinematics.segment_time(
+        if not self.dynamics.active:
+            self._charge_walk(res, length, in_contact)
+            seconds, self.robot_heading = kinematics.segment_time(
+                profile, a, b, self.robot_heading)
+            moved = self._advance_clock(res, seconds)
+            self._set_robot(res, b)
+            self._world_frame(res, moved)
+            return True
+        return self._drive_alongside_world(res, a, b, profile, length,
+                                           in_contact)
+
+    def _drive_alongside_world(self, res: RunResult, a, b, profile,
+                               length: float, in_contact: bool) -> bool:
+        """Drive `a` to `b` in step with the world, watching for what it does.
+
+        The robot's whereabouts during the leg are what the two halves of this
+        matter to. The world is handed them, so a body with somewhere to be sees
+        the robot where it actually is rather than where it set off from, and
+        stops for it instead of driving through the space it has since entered.
+        And the leg is checked against them, sub-step by sub-step: the ground the
+        robot covers in one sub-step against the ground each moving body covers
+        in the same one. Sharing ground is not enough to collide — a collision is
+        sharing it at the same moment — which is why this is asked of one
+        sub-step at a time rather than of the leg as a whole.
+        """
+        turn_s, drive_s, heading = kinematics.segment_legs(
             profile, a, b, self.robot_heading)
-        moved = self._advance_clock(res, seconds)
-        self._set_robot(res, b)
-        self._world_frame(res, moved)
+        self.robot_heading = heading
+        total = turn_s + drive_s
+        if total <= 0.0:
+            self._charge_walk(res, length, in_contact)
+            self._set_robot(res, b)
+            return True
+        step = max(self.cfg.dynamic_step, 1e-3)
+        elapsed = 0.0
+        done = 1.0
+        while elapsed < total - 1e-9:
+            dt = min(step, total - elapsed)
+            here = _lerp_xy(a, b, _driven_fraction(elapsed, turn_s, drive_s))
+            there = _lerp_xy(a, b, _driven_fraction(elapsed + dt, turn_s, drive_s))
+            self.robot_xy = here          # where the world sees it this sub-step
+            was = {w.oid: (w.x, w.y, w.theta) for w in self.world}
+            moved = self._advance_clock(res, dt)
+            hits = self._crossed_by_world(here, there, was)
+            if hits:
+                done = _driven_fraction(elapsed, turn_s, drive_s)
+                self._world_hit = (hits, here)
+                self._set_robot(res, here)
+                self._world_frame(res, True)
+                break
+            elapsed += dt
+            self._world_frame(res, moved)
+        self._charge_walk(res, length * done, in_contact)
+        if done >= 1.0:
+            self._set_robot(res, b)
+            return True
+        return False
+
+    def _crossed_by_world(self, here, there, was: dict) -> List[int]:
+        """What the robot met between these two instants that no plan expected.
+
+        Two kinds of body qualify, and they are the same kind seen at two
+        moments: one that is moving right now, and one that has moved since the
+        robot last looked at it and is now standing somewhere the plan does not
+        have it. Everything else is where the plan left it, and the plan is what
+        routed the robot round it — including the obstacle in the robot's own
+        grip, which is not where the belief has it precisely because the robot is
+        putting it somewhere else.
+
+        Each candidate's swept region over the sub-step is compared with the
+        robot's own over the same sub-step, so an overlap is two bodies in the
+        same place at the same moment rather than one crossing the other's wake.
+        A body that has never been seen at all is left to
+        `Belief.check_robot_collision`: running into one of those is how the
+        robot is meant to find out about it.
+        """
+        candidates = []
+        for w in self.world:
+            if w.oid == self._holding:
+                continue
+            then = was.get(w.oid, (w.x, w.y, w.theta))
+            now = (w.x, w.y, w.theta)
+            if then != now or self.belief.is_stale(w):
+                candidates.append((w, then, now))
+        if not candidates:
+            return []
+        corridor = LineString([here, there]).buffer(self.cfg.robot_radius,
+                                                    cap_style=1)
+        hits = []
+        for w, then, now in candidates:
+            swept = (w.polygon if then == now
+                     else manipulation.swept_between(w, then, now))
+            if swept.intersection(corridor).area > geometry.CONTACT_AREA_EPS:
+                hits.append(w.oid)
+                self.belief.force_reveal(w)
+        return sorted(hits)
+
+    def _recover_from_world_hit(self, res: RunResult, node: int) -> int:
+        """Something crossed the robot mid-leg: look around, get back on the graph.
+
+        The robot is left standing between roadmap nodes, so nothing can be
+        planned from where it is until it is back on one — the same predicament
+        as the end of an abandoned manipulation, and the same way out of it.
+        """
+        hits, _stop = self._world_hit
+        self._world_hit = None
+        self.belief.touch_check(self.robot_xy, self.world, self.cfg)
+        self.belief.perceive(self.world, self.robot_xy)
+        new_node = self._reanchor(res, node)
+        if new_node is not None:
+            node = new_node
+        self._capture_frame(res, node,
+                            f"{hits} crossed the robot's path -> replan")
+        return node
+
+    def _absorb_world_changes(self):
+        """Expire what the robot measured off an object the world has rewritten.
+
+        A `Mutate` changes ground truth where nobody is looking. What the robot
+        believes is left exactly as it is — see `Belief.invalidate_contact` — but
+        the bookkeeping that says it need not look again lapses with the object
+        it was about. The planner's own caches need no such help: they are keyed
+        on what the robot believes, and a change it can see comes back through
+        `perceive` as an update, which clears them.
+        """
+        for oid in self.dynamics.drain_stale():
+            self.belief.invalidate_contact(oid)
+            self._risk_charged.discard(oid)
 
     def _set_robot(self, res: RunResult, p: Tuple[float, float]):
         self.robot_xy = (float(p[0]), float(p[1]))
@@ -455,9 +616,12 @@ class OnlineNAMO:
             if hits:
                 stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
                 self._drive(res, a, stop, in_contact=True, loaded=loaded)
-                self.belief.touch_check(stop, self.world, cfg)
-                return i - 1, hits, stop
-            self._drive(res, a, b, in_contact=True, loaded=loaded)
+                self.belief.touch_check(self.robot_xy, self.world, cfg)
+                return i - 1, hits, self.robot_xy
+            if not self._drive(res, a, b, in_contact=True, loaded=loaded):
+                # the world crossed it mid-leg; `_world_hit` is left standing for
+                # the replan loop to put the robot back on the roadmap
+                return i - 1, self._world_hit[0], self.robot_xy
             if i in frame_at:
                 self._capture_frame(res, node, label, move_oid=move_oid)
         return len(pts) - 1, [], (pts[-1] if pts else self.robot_xy)
@@ -468,7 +632,8 @@ class OnlineNAMO:
         needed, it was clear a moment ago and nothing has moved since."""
         frame_at = self._walk_frames(pts, self.cfg) if node is not None else ()
         for i in range(1, len(pts)):
-            self._drive(res, pts[i - 1], pts[i], in_contact=True)
+            if not self._drive(res, pts[i - 1], pts[i], in_contact=True):
+                return          # backing out interrupted; recovered by the caller
             if i in frame_at:
                 self._capture_frame(res, node, label, move_oid=move_oid)
 
@@ -481,21 +646,38 @@ class OnlineNAMO:
         checked: driving to the nearest node regardless, which is what used to
         happen when none was reachable, put the robot through whatever stood in
         between. If nothing is reachable it stays put and the run ends there.
+
+        On a map that moves, the drive back is itself something the world can
+        interrupt, and being stopped halfway is not a reason to give up — it is a
+        reason to look again from where it was stopped. Only a robot the world
+        keeps stopping, attempt after attempt, is stranded.
         """
-        blocked = self._known_obstacles_inflated()
         home = self.roadmap.nodes[node]
-        if self.roadmap.can_drive(self.robot_xy, home, blocked):
-            self._drive(res, self.robot_xy, home, in_contact=True)
-            return None
-        target = self.roadmap.nearest_reachable_node(self.robot_xy, blocked,
-                                                     k=_REANCHOR_CANDIDATES)
-        if target is None:
-            self.stranded = True
-            self.cfg.log(f"[reanchor] no roadmap node reachable from "
-                         f"({self.robot_xy[0]:,.2f}, {self.robot_xy[1]:,.2f})")
-            return None
-        self._drive(res, self.robot_xy, self.roadmap.nodes[target], in_contact=True)
-        return target
+        for _ in range(_REANCHOR_ATTEMPTS):
+            blocked = self._known_obstacles_inflated()
+            if self.roadmap.can_drive(self.robot_xy, home, blocked):
+                if self._drive(res, self.robot_xy, home, in_contact=True):
+                    return None
+            else:
+                target = self.roadmap.nearest_reachable_node(
+                    self.robot_xy, blocked, k=_REANCHOR_CANDIDATES)
+                if target is None:
+                    self.stranded = True
+                    self.cfg.log(f"[reanchor] no roadmap node reachable from "
+                                 f"({self.robot_xy[0]:,.2f}, {self.robot_xy[1]:,.2f})")
+                    return None
+                if self._drive(res, self.robot_xy,
+                               self.roadmap.nodes[target], in_contact=True):
+                    return target
+            # The world stopped it on the way. Where it stands now is not where
+            # it worked the route out from, so look again and work it out again.
+            self._world_hit = None
+            self.belief.perceive(self.world, self.robot_xy)
+        self.stranded = True
+        self.cfg.log(f"[reanchor] the world would not let the robot back onto "
+                     f"the roadmap from ({self.robot_xy[0]:,.2f}, "
+                     f"{self.robot_xy[1]:,.2f})")
+        return None
 
     def _known_obstacles_inflated(self):
         cfg = self.cfg
@@ -553,9 +735,11 @@ class OnlineNAMO:
         walked over to them.
         """
         self.dynamics.suspend(oid)
+        self._holding = oid
         try:
             return self._escort(oid, obs, act, res, node, cfg)
         finally:
+            self._holding = None
             self.dynamics.release(oid)
 
     def _escort(self, oid: int, obs, act: dict,
@@ -651,7 +835,7 @@ class OnlineNAMO:
                     self.belief.record_move_direction(oid, start_xy, move_path[last_i])
                 stop = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
                 self._drive(res, a, stop, in_contact=True, loaded=True)
-                self.belief.touch_check(stop, self.world, cfg)
+                self.belief.touch_check(self.robot_xy, self.world, cfg)
                 self.belief.perceive(self.world, self.robot_xy)
                 new_node = self._reanchor(res, node)
                 self._capture_frame(
@@ -661,7 +845,20 @@ class OnlineNAMO:
                         cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
                         new_node)
             self._relocate_world(oid, wx, wy, wth)
-            self._drive(res, a, b, in_contact=True, loaded=True)
+            if not self._drive(res, a, b, in_contact=True, loaded=True):
+                # Something crossed the robot while it was escorting. Neither of
+                # them finished the leg, so neither is charged for it: the
+                # obstacle goes back to the pose the pair last completed, and
+                # the replan loop picks the robot up off the floor.
+                self._relocate_world(oid, *move_path[last_i])
+                if last_i != 0:
+                    self.belief.relocate(obs, *move_path[last_i])
+                    self.belief.record_move_direction(oid, start_xy,
+                                                      move_path[last_i])
+                self.belief.perceive(self.world, self.robot_xy)
+                return (False, None,
+                        cost.se2_path_length(obs, move_path[:last_i + 1], cfg),
+                        None)
             last_i = i
             if i in frame_at:
                 self._capture_frame(res, node, f"move {oid} step {i}/{n - 1}",

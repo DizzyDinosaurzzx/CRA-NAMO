@@ -79,7 +79,8 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
                  bounds: Tuple[float, float, float, float],
                  cfg: Config, others_polys=None,
                  work_radius: Optional[float] = None,
-                 forward_penalty: Optional[float] = None) -> se2_planner.SE2Planner:
+                 forward_penalty: Optional[float] = None,
+                 transition_safe: bool = False) -> se2_planner.SE2Planner:
     """Planner for one body in one arrangement of the world.
 
     The reachable disc is centred on the body itself, which is what `R_manip`
@@ -102,7 +103,7 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
 
     key = (obs.l, obs.d, bounds, centre, round(work_radius, 6), cell,
            cfg.se2_n_theta, cfg.se2_connectivity, cfg.se2_rot_weight,
-           cfg.se2_containment, forward_penalty,
+           cfg.se2_containment, forward_penalty, transition_safe,
            _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
@@ -121,6 +122,7 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
         rot_weight=cfg.se2_rot_weight,
         containment=cfg.se2_containment,
         forward_penalty=forward_penalty,
+        transition_safe=transition_safe,
         oid=obs.oid,
         verbose=cfg.verbose,
         logger=cfg.log,
@@ -204,6 +206,48 @@ def plan_move_se2(
         return (False, None, math.inf, None)
 
 
+def _split_mixed_leg(obs: MovableObstacle, a, b, blockers) -> Optional[list]:
+    """Turn one leg that both slides and turns into two that do one thing each.
+
+    The SE(2) move set never combines the two — every planned leg is a pure
+    slide or a pure pivot, which is what the C-space was built to answer for.
+    The one leg that mixes them is the one joining the body's true pose to the
+    grid pose the search started from, and it is the one that clips door jambs.
+    Doing the two halves in turn is a motion of the kind the planner validated;
+    which half goes first is whichever of the two is clear.
+    """
+    for middle in ((b[0], b[1], a[2]), (a[0], a[1], b[2])):
+        if path_is_clear_against(obs, [a, middle, b], blockers):
+            return [a, middle, b]
+    return None
+
+
+def _verified_prefix(obs: MovableObstacle, path, blockers, cfg: Config) -> list:
+    """The longest part of *path* the body can be shown to travel safely.
+
+    The search answers in cell centres, so what it hands back is a sequence of
+    poses that are each clear rather than a motion that is clear throughout: a
+    grid pose either side of a door jamb says nothing about the corner between
+    them. Every leg is therefore swept and tested against the walls and the
+    other bodies before the route is believed, and the route is cut at the first
+    leg that cannot be shown to be clear.
+    """
+    if not path or len(path) < 2:
+        return []
+    out = [path[0]]
+    for a, b in zip(path, path[1:]):
+        if path_is_clear_against(obs, [a, b], blockers):
+            out.append(b)
+            continue
+        repaired = _split_mixed_leg(obs, a, b, blockers)
+        if repaired is None:
+            cfg.log(f"[dynamics] oid={obs.oid} route cut short at "
+                    f"({a[0]:,.2f}, {a[1]:,.2f}): next leg does not clear")
+            break
+        out += repaired[1:]
+    return out if len(out) >= 2 else []
+
+
 def plan_route_se2(obs: MovableObstacle,
                    goal_pose: Tuple[float, float, float],
                    static_obstacles,
@@ -216,16 +260,32 @@ def plan_route_se2(obs: MovableObstacle,
     steam: no corridor to clear, no drop pose to choose, and no robot to stay
     within reach of — only "get from here to there without hitting anything".
     Returns the pose list, or None when there is no route.
+
+    The route comes back swept-volume verified, the same way `plan_move_se2`
+    verifies the robot's manipulations. Nothing downstream re-tests it against
+    the walls, so this is the only place a body under its own steam is stopped
+    from cutting a corner off a doorway. It is planned in a C-space that keeps
+    enough clearance for the step between two cells to be as clear as the cells
+    themselves, so the verification is a check on the answer rather than the
+    thing standing between the body and the wall.
     """
     try:
         planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys,
-                               work_radius=float("inf"), forward_penalty=0.0)
+                               work_radius=float("inf"), forward_penalty=0.0,
+                               transition_safe=True)
         planner.set_corridor([])
         result = planner.plan_path((obs.x, obs.y, obs.theta), tuple(goal_pose))
         if not result.success:
             cfg.log(f"[dynamics] oid={obs.oid} no route: {result.reason}")
             return None
-        return result.path
+        path = _verified_prefix(obs, result.path,
+                                blocker_index(static_obstacles, others_polys),
+                                cfg)
+        if not path:
+            cfg.log(f"[dynamics] oid={obs.oid} no route: "
+                    "nothing it can reach without clipping something")
+            return None
+        return path
     except Exception as e:
         cfg.log(f"[dynamics] oid={obs.oid} route error: {type(e).__name__}: {e}")
         return None

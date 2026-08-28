@@ -26,6 +26,7 @@ class Belief:
         self.contacts: List[Polygon] = []
         self.touched: Set[int] = set()
         self.touched_difficulty: Dict[int, float] = {}
+        self.disturbed: Set[int] = set()   # moved by the robot since last seen to change
         self.move_dir: Dict[int, Tuple[float, float]] = {}
 
     def perceive(self, world_obstacles: List[MovableObstacle],
@@ -56,6 +57,17 @@ class Belief:
             self.risk.assess_many(new_observations)
         self._forget_vacated(world_obstacles, robot_pos)
         return self.newly_revealed
+
+    def is_stale(self, world_obs: MovableObstacle) -> bool:
+        """Is this body no longer where — or no longer what — the robot last saw?
+
+        Only asked of the world, never of the belief: it is how the *simulator*
+        decides whether the robot could have known about something, not a way for
+        the robot to find out. A body it has never seen is not stale, it is
+        unknown, and being run into is how that gets discovered.
+        """
+        known = self.perceived.get(world_obs.oid)
+        return known is not None and not self._matches(known, world_obs)
 
     @property
     def changed(self) -> bool:
@@ -110,6 +122,7 @@ class Belief:
         """
         self.touched.discard(obs.oid)
         self.touched_difficulty.pop(obs.oid, None)
+        self.disturbed.discard(obs.oid)
         if self.estimator is not None:
             self.estimator.forget(obs.oid)
         if self.risk is not None:
@@ -228,7 +241,23 @@ class Belief:
         self._forget_edges(obs.oid)
         obs.x, obs.y, obs.theta = x, y, theta
         obs.removed = True
+        self.disturbed.add(obs.oid)
         self._update_edges_for(obs)
+
+    def invalidate_contact(self, oid: int):
+        """The thing that was measured is not the thing that is standing there.
+
+        Called when ground truth changed where the robot could not see it. What
+        it believes it measured stays believed — it has no way of knowing the
+        object was rewritten behind its back, and being quietly handed the new
+        figure is exactly the free lunch this module exists to prevent. What
+        lapses is the record of *having* measured it, so the next time the robot
+        takes hold of the thing it reads it again instead of trusting a number
+        that belonged to the old one. Having disturbed the old one lapses with
+        it: shifting what is there now is a fresh decision, at a fresh price.
+        """
+        self.touched.discard(oid)
+        self.disturbed.discard(oid)
 
     @staticmethod
     def _first_contact_t(from_pos, to_pos, poly: Polygon, radius: float,

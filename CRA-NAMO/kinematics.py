@@ -61,21 +61,33 @@ def turn_between(heading: float, target: float) -> float:
     return abs((target - heading + math.pi) % (2.0 * math.pi) - math.pi)
 
 
-def segment_time(profile: MotionProfile, a: XY, b: XY,
-                 heading: float) -> Tuple[float, float]:
-    """Time to get from `a` to `b` starting out facing `heading`.
+def segment_legs(profile: MotionProfile, a: XY, b: XY,
+                 heading: float) -> Tuple[float, float, float]:
+    """The two halves of getting from `a` to `b`, kept apart.
 
-    Returns (seconds, heading on arrival). A zero-length segment costs nothing
-    and leaves the heading alone — there is no direction to turn towards.
+    Returns (seconds turning on the spot, seconds driving, heading on arrival).
+    The robot turns to face where it is going and then drives, so the split is
+    what says where it is at a given moment of the journey — it has not left `a`
+    until the turn is done. A zero-length segment is no journey at all and
+    leaves the heading alone: there is no direction to turn towards.
     """
     dx, dy = b[0] - a[0], b[1] - a[1]
     distance = math.hypot(dx, dy)
     if distance <= 1e-12:
-        return 0.0, heading
+        return 0.0, 0.0, heading
     target = math.atan2(dy, dx)
-    seconds = (profile.rotate_time(turn_between(heading, target))
-               + profile.translate_time(distance))
-    return seconds, target
+    return (profile.rotate_time(turn_between(heading, target)),
+            profile.translate_time(distance), target)
+
+
+def segment_time(profile: MotionProfile, a: XY, b: XY,
+                 heading: float) -> Tuple[float, float]:
+    """Time to get from `a` to `b` starting out facing `heading`.
+
+    Returns (seconds, heading on arrival).
+    """
+    turn, drive, target = segment_legs(profile, a, b, heading)
+    return turn + drive, target
 
 
 def path_time(profile: MotionProfile, points: Sequence[XY],

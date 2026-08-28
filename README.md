@@ -151,13 +151,15 @@ LLM 不是运行几何规划所必需的。没有 API Key 时，难度和风险�
 export DEEPSEEK_API_KEY="your-key"
 ```
 
-请不要将真实密钥写入代码或提交到 Git。为了得到更稳定的动态场景对比结果，可以关闭 LLM，并在场景配置中设置：
+请不要将真实密钥写入代码或提交到 Git。为了得到可复现的对比结果，可以关闭 LLM：
 
 ```python
 cfg.deepseek_api_key = ""
 cfg.use_llm_ordering = False
-cfg.plan_time_in_clock = False
 ```
+
+模拟时钟只由行驶、转向和等待推进；规划耗时会被测量并报告（`plan_time`），
+但不推进世界，所以动态场景不会因为机器负载不同而给出不同结果。
 
 ## 代码结构
 

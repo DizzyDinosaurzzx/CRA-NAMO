@@ -131,8 +131,9 @@ def heuristic(cfg: Config, distance: float) -> float:
     Bounding by `v_max` alone would also be admissible, but it assumes an
     acceleration the robot does not have: on these maps that bound is roughly a
     third of the real per-metre time, and a heuristic that loose makes the search
-    expand its way to the answer rather than aim at it. Since planning time is
-    itself part of T, a lazy bound makes the very thing being minimised worse.
+    expand its way to the answer rather than aim at it — which costs real seconds
+    on a map that moves while it thinks, even though those seconds are not on the
+    simulated clock.
     """
     longest = 2.0 * cfg.conn_radius          # `Roadmap.add_terminal` allows this much
     per_metre = cfg.free_profile().translate_time(longest) / longest

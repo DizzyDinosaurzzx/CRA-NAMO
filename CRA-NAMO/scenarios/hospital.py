@@ -1,19 +1,3 @@
-"""Hospital route planning with several time/work decision points.
-
-The courier starts in the north-west service corridor and finishes in the
-south-east service corridor.  Three parts of the trip can change while it is
-under way:
-
-* a temporary bed initially blocks the most convenient triage-room exit;
-* a mobile X-ray and a linen cart control the two openings in the central gate;
-* a cleaning cart temporarily joins an occupied bed at the ICU gate.
-
-The robot can wait, take a longer ward/bypass route, or move an obstacle.  The
-normal planner evaluates the same trade-off online; the ``decision_points``
-metadata returned by :func:`create` records small, human-readable estimates
-using the project's objective ``C = (1-w)J + w*time_value*T`` and manipulation
-work ``W = difficulty * distance``.
-"""
 
 from __future__ import annotations
 
@@ -437,21 +421,7 @@ def create():
         ),
     ]
 
-    cfg = Config(
-        grid_step=0.3,
-        conn_radius=0.65,
-        R_perc=7.5,
-        R_manip=4.5,
-        time_importance=0.32,
-        time_value=100.0,
-        plan_time_in_clock=False,
-        dynamic_speed=0.4,
-        dynamic_step=0.25,
-        dynamic_wait_step=1.5,
-        dynamic_max_wait=90.0,
-        use_llm_ordering=False,
-        save_frames=False,
-    )
+    cfg = Config()
 
     decision_points = [
         {

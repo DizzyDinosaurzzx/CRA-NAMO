@@ -24,7 +24,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon, box
 from shapely.ops import unary_union
 
 import geometry
@@ -112,12 +112,37 @@ class Mutate:
     difficulty: Optional[float] = None
     contact_reveals: Optional[str] = None
 
+    def __post_init__(self):
+        for name in ("l", "d", "h"):
+            value = getattr(self, name)
+            if value is not None and float(value) <= 0.0:
+                raise ValueError(f"Mutate {name} must be positive")
+        if self.difficulty is not None and float(self.difficulty) < 0.0:
+            raise ValueError("Mutate difficulty must be non-negative")
+
     def apply(self, dyn: "WorldDynamics") -> str:
+        """Apply what can be applied; refuse to grow the body into something else.
+
+        A change of size is the one effect that can put matter where matter
+        already is. Growing into a wall, into another body or into the robot is
+        not a change of state the world can make, so the size is left alone and
+        the rest of the change — what it is made of, how hard it is to shift —
+        goes through regardless: the load settling is still the load settling
+        even if the crate cannot get any wider where it stands.
+        """
         obs = dyn.obstacle(self.oid)
         if obs is None:
             return f"obstacle {self.oid} is not in the world"
+        fields = ["material", "l", "d", "h", "difficulty", "contact_reveals"]
+        refused = ""
+        if self.l is not None or self.d is not None:
+            l = obs.l if self.l is None else float(self.l)
+            d = obs.d if self.d is None else float(self.d)
+            refused = dyn.room_to_grow(obs, l, d)
+            if refused:
+                fields = [f for f in fields if f not in ("l", "d")]
         changed = []
-        for name in ("material", "l", "d", "h", "difficulty", "contact_reveals"):
+        for name in fields:
             value = getattr(self, name)
             if value is None or getattr(obs, name) == value:
                 continue
@@ -125,8 +150,9 @@ class Mutate:
             changed.append(name)
         if changed:
             dyn.mark_stale(self.oid)
-        return (f"obstacle {self.oid} changes {', '.join(changed)}" if changed
+        what = (f"obstacle {self.oid} changes {', '.join(changed)}" if changed
                 else f"obstacle {self.oid} unchanged")
+        return what if not refused else f"{what} (cannot grow into {refused})"
 
 
 @dataclass
@@ -152,6 +178,8 @@ class Actor:
     blocked_for: float = 0.0         # seconds since it last sought another route
     waited: float = 0.0              # seconds since it last made any progress
     avoid_robot: bool = False        # waited long enough to route around it
+    retry_at: float = -math.inf      # clock before which re-planning is pointless
+    tried_version: int = -1          # world version the last failed attempt saw
 
 
 class WorldDynamics:
@@ -168,6 +196,12 @@ class WorldDynamics:
         self.moved_on_own: set = set()
         self.log: List[Tuple[float, str]] = []      # (clock, what happened)
         self.version = 0            # bumped whenever ground truth changes
+        self.clock = 0.0            # simulated time the world has been advanced to
+        self.robot_xy: XY = (0.0, 0.0)   # where the robot was last seen standing
+        # Obstacles whose ground truth changed where nobody was looking. The
+        # executor drains this to expire what the robot measured off the old
+        # object — not to tell it the new figure, which still costs a touch.
+        self.stale: set = set()
         bounds = workspace.bounds
         self._bounds = (bounds[0], bounds[2], bounds[1], bounds[3])
 
@@ -195,9 +229,43 @@ class WorldDynamics:
     def mark_stale(self, oid: int):
         """Ground truth for this obstacle changed; any route it was on is void."""
         self.version += 1
+        self.stale.add(oid)
         actor = self.actors.get(oid)
         if actor is not None:
             actor.replan = True
+            actor.retry_at = -math.inf
+
+    def drain_stale(self) -> set:
+        """Which obstacles have changed since this was last asked."""
+        changed, self.stale = self.stale, set()
+        return changed
+
+    def room_to_grow(self, obs: MovableObstacle, l: float, d: float) -> str:
+        """What an ``l`` x ``d`` version of this body would grow into, if anything.
+
+        Only the part that is new has to be free: a body is allowed to keep the
+        space it already occupies, so shrinking never fails and growing is judged
+        on the ground it would take, not on the ground it stands on.
+        """
+        grown = (Polygon(geometry.rect_corners(obs.x, obs.y, l, d, obs.theta))
+                 .difference(obs.polygon))
+        if grown.is_empty or grown.area <= geometry.CONTACT_AREA_EPS:
+            return ""
+        xmin, xmax, ymin, ymax = self._bounds
+        if not box(xmin, ymin, xmax, ymax).contains(grown):
+            return "the world's edge"
+        for so in self.static_obstacles:
+            if grown.intersection(so.polygon).area > geometry.CONTACT_AREA_EPS:
+                return f"wall {so.name}"
+        for w in self.world:
+            if w.oid == obs.oid:
+                continue
+            if grown.intersection(w.polygon).area > geometry.CONTACT_AREA_EPS:
+                return f"obstacle {w.oid}"
+        robot = Point(self.robot_xy).buffer(self.cfg.robot_radius)
+        if grown.intersection(robot).area > geometry.CONTACT_AREA_EPS:
+            return "the robot"
+        return ""
 
     # --- what the executor tells it ---
     def send(self, oid: int, goal: Pose, speed: Optional[float] = None):
@@ -229,25 +297,44 @@ class WorldDynamics:
         actor.suspended = False
         actor.replan = True          # the route it was on started somewhere else
         actor.blocked_for = 0.0
+        actor.retry_at = -math.inf   # it is somewhere else now, so ask again at once
 
     # --- the clock ---
-    def advance(self, seconds: float, clock: float, robot_xy: XY) -> List[str]:
-        """Let `seconds` pass in the world. Returns what happened, for the log."""
+    def advance(self, seconds: float, clock: float,
+                robot_xy: XY) -> List[Tuple[float, str]]:
+        """Let `seconds` pass in the world, beginning at `clock`.
+
+        Time is spent in sub-steps, and each one is a moment at which the world
+        may do something: an event fires when the clock reaches it rather than
+        when the caller happens to hand back control, and the bodies it sets off
+        then move for the time that is actually left, not for the whole interval.
+        A step is cut short at a scheduled moment so a timed event lands exactly
+        on its second.
+
+        Returns (when, what happened) for the log — timed at the instant it
+        happened, which is not in general the end of the interval.
+        """
         if not self.active or seconds <= 0.0:
             return []
-        notes = self._fire_events(clock, robot_xy)
+        self.robot_xy = robot_xy
         step = max(self.cfg.dynamic_step, 1e-3)
+        notes: List[Tuple[float, str]] = []
+        t = clock
         left = seconds
         while left > 1e-9:
-            dt = min(step, left)
-            left -= dt
-            if self._step(dt, robot_xy):
+            self.clock = t
+            notes += self._fire_events(t, robot_xy)
+            dt = min(step, left, max(self._until_next_time_trigger(t), 1e-6))
+            if self._step(dt, t, robot_xy):
                 self.version += 1
-        for note in notes:
-            self.log.append((clock, note))
+            t += dt
+            left -= dt
+        self.clock = t
+        notes += self._fire_events(t, robot_xy)
+        self.log += notes
         return notes
 
-    def _fire_events(self, clock: float, robot_xy: XY) -> List[str]:
+    def _fire_events(self, clock: float, robot_xy: XY) -> List[Tuple[float, str]]:
         notes = []
         for ev in self.events:
             if ev.fired or not ev.trigger.ready(clock, robot_xy,
@@ -255,17 +342,31 @@ class WorldDynamics:
                 continue
             ev.fired = True
             what = ev.effect.apply(self)
-            notes.append(f"{ev.name or 'event'}: {what}")
+            notes.append((clock, f"{ev.name or 'event'}: {what}"))
             self.version += 1
         return notes
 
+    def _until_next_time_trigger(self, clock: float) -> float:
+        """How long until the next event that goes off on the clock alone.
+
+        Everything already due has just fired, so what is left is strictly in the
+        future and the gap is a real one. Triggers that read the world rather
+        than the clock cannot be anticipated this way — they are tested at every
+        sub-step boundary, which is as often as their answer can change.
+        """
+        gap = math.inf
+        for ev in self.events:
+            if not ev.fired and isinstance(ev.trigger, AtTime):
+                gap = min(gap, ev.trigger.t - clock)
+        return gap
+
     # --- motion ---
-    def _step(self, dt: float, robot_xy: XY) -> bool:
+    def _step(self, dt: float, clock: float, robot_xy: XY) -> bool:
         moved = False
         for actor in list(self.actors.values()):
             if actor.arrived or actor.suspended:
                 continue
-            if self._advance_actor(actor, dt, robot_xy):
+            if self._advance_actor(actor, dt, clock, robot_xy):
                 moved = True
         return moved
 
@@ -273,12 +374,12 @@ class WorldDynamics:
         """What the route could not have accounted for.
 
         Only the robot and the other movable bodies. The walls are deliberately
-        left out: the route came from a planner that has them in its C-space and
-        keeps its own margin from them, and re-testing the same route against
-        them here with a swept-area test of a different tolerance does not make
-        it safer — it makes a body threading a doorway refuse its own validated
-        route a few centimetres in, and stand in the door for the rest of the run
-        arguing with the planner that put it there.
+        left out: `manipulation.plan_route_se2` has already put the whole route
+        through this very test against them, and what is driven here is always a
+        sub-segment of a leg it passed — a subset of a swept region already found
+        clear. Testing it again could only disagree with itself, and a body that
+        refuses its own validated route a few centimetres in stands in the door
+        for the rest of the run arguing with the planner that put it there.
         """
         polys = [w.polygon for w in self.world if w.oid != oid]
         polys.append(Point(robot_xy).buffer(self.cfg.robot_radius))
@@ -297,12 +398,18 @@ class WorldDynamics:
             polys.append(Point(robot_xy).buffer(self.cfg.robot_radius))
         return unary_union(polys) if polys else None
 
-    def _advance_actor(self, actor: Actor, dt: float, robot_xy: XY) -> bool:
+    def _advance_actor(self, actor: Actor, dt: float, clock: float,
+                       robot_xy: XY) -> bool:
         obs = self.obstacle(actor.oid)
         if obs is None:
             actor.arrived = True
             return False
         if actor.replan or not actor.path:
+            if not self._may_replan(actor, clock):
+                actor.blocked_for += dt
+                actor.waited += dt
+                self._give_up_if_stuck(actor)
+                return False
             actor.path = manipulation.plan_route_se2(
                 obs, actor.goal, self.static_obstacles, self._bounds, self.cfg,
                 others_polys=self._others_union(
@@ -311,11 +418,16 @@ class WorldDynamics:
             actor.replan = False
             actor.avoid_robot = False
             if not actor.path:
-                # nowhere to go from here; try again once the world has changed
+                # Nowhere to go from here. Asking again this instant would get
+                # the same answer for the same money — a whole SE(2) search —
+                # so wait for the world to change or for the back-off to run out.
+                actor.retry_at = clock + max(self.cfg.dynamic_replan_backoff, 0.0)
+                actor.tried_version = self.version
                 actor.blocked_for += dt
                 actor.waited += dt
                 self._give_up_if_stuck(actor)
                 return False
+            actor.retry_at = -math.inf
             actor.blocked_for = 0.0
 
         budget = actor.speed * dt
@@ -359,6 +471,18 @@ class WorldDynamics:
             if actor.leg + 1 >= len(actor.path):
                 actor.arrived = True
         return moved
+
+    def _may_replan(self, actor: Actor, clock: float) -> bool:
+        """Is there any point looking for a route again yet?
+
+        A search that failed against one arrangement of the world fails again
+        against the same one, and an SE(2) search is the most expensive thing in
+        the loop. So a body that found nowhere to go waits for the world to
+        change under it, or for the back-off to run out — whichever comes first.
+        """
+        return (actor.retry_at == -math.inf
+                or actor.tried_version != self.version
+                or clock >= actor.retry_at)
 
     def _give_up_if_stuck(self, actor: Actor):
         """Stop trying, rather than spin on a route that will never open.

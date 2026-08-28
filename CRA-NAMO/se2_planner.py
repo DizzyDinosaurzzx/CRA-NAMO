@@ -55,6 +55,7 @@ class SE2Planner:
                  rot_weight: Optional[float] = None,
                  containment: str = "centroid",
                  forward_penalty: float = 0.0,
+                 transition_safe: bool = False,
                  oid: int = -1,
                  verbose: bool = False,
                  logger: Callable[[str], None] = print):
@@ -90,8 +91,14 @@ class SE2Planner:
 
         self.bulge = self.r_half_diag * (1.0 - math.cos(self.dtheta / 2.0))
         self.pose_margin = 0.1 * cell + self.bulge
-        self.margin = self.pose_margin
         self.snap_margin = 0.5 * math.hypot(cell, cell) + self.bulge
+        # A cell is free if the body fits *there*, which says nothing about the
+        # ground between it and the next cell — and it is that ground a body
+        # takes a door jamb's corner off. `transition_safe` asks for cells whose
+        # freedom carries over to the step: clearance of half a diagonal step at
+        # both ends leaves every pose between them clear as well, because no
+        # point of the step is farther than that from one end or the other.
+        self.margin = self.snap_margin if transition_safe else self.pose_margin
         self.unit = cell / self._W_AXIS
         self.W_rot = int(round(self.rot_step_cost / self.unit))
 
@@ -605,6 +612,7 @@ def build_se2_planner(wall_polys,             # list of shapely Polygons — imp
                        rot_weight: Optional[float] = None,
                        containment: str = "centroid",
                        forward_penalty: float = 0.0,
+                       transition_safe: bool = False,
                        oid: int = -1,
                        verbose: bool = False,
                        logger: Callable[[str], None] = print) -> SE2Planner:
@@ -624,6 +632,7 @@ def build_se2_planner(wall_polys,             # list of shapely Polygons — imp
         rot_weight=rot_weight,
         containment=containment,
         forward_penalty=forward_penalty,
+        transition_safe=transition_safe,
         oid=oid,
         verbose=verbose,
         logger=logger,

@@ -30,19 +30,50 @@ def move_signature(obs) -> tuple:
     return (obs.oid, round(obs.x, 3), round(obs.y, 3), round(obs.theta, 4))
 
 
+class FailedMoves:
+    """Manipulations the executor tried and could not carry out.
+
+    Keeping them is what stops the planner proposing, cycle after cycle, the
+    move that has just failed. On a map that moves, though, a refusal is only
+    good for the arrangement of the world it was collected in: the escort that
+    could not be walked because something stood in the way is walkable once that
+    something drives off. Each entry therefore carries the world version it
+    failed under, and is dropped as soon as the world moves on from it.
+    """
+
+    def __init__(self):
+        self._at: Dict[tuple, int] = {}
+
+    def add(self, key: tuple, version: int = 0):
+        self._at[key] = version
+
+    def drop_stale(self, version: int) -> int:
+        """Forget refusals collected before world version *version*."""
+        stale = [k for k, v in self._at.items() if v < version]
+        for k in stale:
+            del self._at[k]
+        return len(stale)
+
+    def __contains__(self, key) -> bool:
+        return key in self._at
+
+    def __len__(self) -> int:
+        return len(self._at)
+
+
 class Planner:
     """Plan robot motion and obstacle-removal actions against current belief."""
 
     def __init__(self, roadmap: Roadmap, belief: Belief,
                  estimator: DifficultyEstimator, cfg: Config,
-                 failed_moves: Optional[set] = None,
+                 failed_moves: Optional[FailedMoves] = None,
                  risk_estimator=None):
         self.roadmap = roadmap
         self.belief = belief
         self.est = estimator
         self.risk = risk_estimator
         self.cfg = cfg
-        self.failed_moves = set() if failed_moves is None else failed_moves
+        self.failed_moves = FailedMoves() if failed_moves is None else failed_moves
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
 
     def plan(self, start_node: int, goal_node: int) -> Optional[Plan]:
@@ -54,7 +85,7 @@ class Planner:
         # plan call — that changes the others_polys geometry for every removal
         # and would invalidate previously cached move plans.
         if self.belief.changed:
-            self._persistent_removal_cache.clear()
+            self.forget_removals()
 
         def h(node):
             x, y = rm.nodes[node]
@@ -118,6 +149,10 @@ class Planner:
         return Plan(cost=round(incumbent, 4), node_path=node_path,
                     actions=actions, expansions=expansions)
 
+    def forget_removals(self):
+        """Drop every cached manipulation; the world they were costed in is gone."""
+        self._persistent_removal_cache.clear()
+
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
         """Cost of traversing one edge, including clearing whatever blocks it.
 
@@ -148,9 +183,11 @@ class Planner:
 
         The surcharge buys the decision to disturb something at all, so it is paid
         once. An obstacle already shifted has paid; shifting it again is only the
-        work of shifting it.
+        work of shifting it. What the world rewrites while nobody is looking is
+        not the thing that was paid for, so `Belief.invalidate_contact` takes the
+        receipt back and the next decision to disturb it is priced afresh.
         """
-        if self.risk is None or self.belief.obstacle(oid).removed:
+        if self.risk is None or oid in self.belief.disturbed:
             return None
         return self.risk.level_of(oid)
 

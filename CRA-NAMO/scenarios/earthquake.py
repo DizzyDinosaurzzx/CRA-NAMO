@@ -328,7 +328,6 @@ def create():
             se2_cell=0.15,
             R_perc=8.0,
             R_manip=4.0,
-            save_frames=False,
         ),
         "entrance": _START,
         "survivor_region": _SURVIVOR_REGION,
