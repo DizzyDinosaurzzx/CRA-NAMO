@@ -14,7 +14,8 @@ matplotlib.rcParams["mathtext.fontset"] = "stix"
 import matplotlib.patheffects as patheffects
 from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, LogNorm, to_rgb
-from matplotlib.patches import Rectangle
+from matplotlib.patches import PathPatch, Rectangle
+from matplotlib.path import Path
 from PIL import Image
 from shapely.geometry import LineString, Point
 
@@ -139,14 +140,37 @@ def _draw_difficulty_key(fig, ax, colours, low, high):
                      "only", fontsize=6.5, pad=3)
 
 
-def _plot_poly(ax, poly, **kw):  # draw basic polygon
-    if poly.geom_type == "Polygon":
-        xs, ys = poly.exterior.xy
-        ax.fill(xs, ys, **kw)
-    else:
-        for g in poly.geoms:
-            xs, ys = g.exterior.xy
-            ax.fill(xs, ys, **kw)
+def _poly_path(poly) -> Path:
+    """One matplotlib path for a polygon, holes and all.
+
+    Shapely hands back closed rings — the last point repeats the first — which
+    is exactly what CLOSEPOLY expects to end a subpath with.
+    """
+    verts, codes = [], []
+    for ring in (poly.exterior, *poly.interiors):
+        xy = list(ring.coords)
+        if len(xy) < 4:            # three distinct corners, plus the repeat
+            continue
+        verts.extend(xy)
+        codes.extend([Path.MOVETO] + [Path.LINETO] * (len(xy) - 2)
+                     + [Path.CLOSEPOLY])
+    return Path(verts, codes)
+
+
+def _plot_poly(ax, poly, **kw):  # draw a polygon, leaving its holes empty
+    """Fill a polygon without filling the ground it encloses.
+
+    Filling the exterior ring alone is the same picture for a rectangle and the
+    wrong one for anything with a hole in it. The robot's trail is the buffer of
+    the path it has walked, so the moment that path closes a loop the trail
+    becomes a ring — and painting its exterior floods the middle, which is the
+    one patch of floor the robot has demonstrably *not* driven over.
+    """
+    kw.setdefault("edgecolor", "none")   # what ax.fill does when given only a face
+    for part in getattr(poly, "geoms", (poly,)):
+        if part.is_empty or part.geom_type != "Polygon":
+            continue
+        ax.add_patch(PathPatch(_poly_path(part), **kw))
 
 
 def _obstacle_label(oid: int, estimates, touched=None, risk=None) -> str:

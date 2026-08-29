@@ -23,16 +23,15 @@ Stages, run independently or with `all`:
              object's dimensions. Re-asks a subset at 0.5x / 1x / 2x linear
              scale; any movement is prompt leakage, not physics.
 
-  doors      What the measured error costs a route. Runs the `ten_doors`
-             scenario — ten walls, each offering push A / push B / walk around —
-             with the obstacles' difficulty and risk beliefs set offline: first
-             exactly right, then perturbed by the error the `accuracy` and
-             `risk` stages actually measured. No API calls: the perturbation is
-             sampled from those measurements, so a run is repeatable and costs
-             nothing.
+  doors      What a simulated estimator gap costs a route. Runs `ten_doors`
+             across a fixed Gap ladder. A seeded random draw changes each cost
+             within a multiplicative band and each risk within a level band.
+             Cost-only, risk-only and joint arms isolate the source of changed
+             decisions. No API calls. Also saves exact and maximum-Gap route
+             screenshots.
 
-  report     Turns the saved JSON into report.md plus two charts — one for
-             difficulty, one for risk. No API calls.
+  report     Turns the saved JSON into report.md plus three charts: cost
+             accuracy, risk accuracy, and route impact versus Gap. No API calls.
 
 
 """
@@ -582,82 +581,38 @@ def stage_order(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# Stage 3 - what the measured error costs a route
+# Stage 3 - what a simulated estimator gap costs a route
 
 DOORS_MAP = "ten_doors"
 
-# Perturbation seeds per arm family. Each seed is one whole run of the scenario
-# in each of three families, so this is the knob that sets the runtime: a run is
-# ~40 s when the beliefs are close to the truth and a few minutes when they are
-# not, because a planner that believes a wrong number tries harder before it
-# gives up. Three seeds is nine runs plus the exact one; raise it with
-# `--doors-seeds` when the spread between seeds matters more than the wait.
-DOORS_SEEDS = 3
+# Each pair is one point on the Gap ladder:
+#   cost_factor  every estimated/true cost ratio is sampled log-uniformly from
+#                [1 / cost_factor, cost_factor]
+#   risk_levels  every risk estimate is shifted by a random integer in
+#                [-risk_levels, risk_levels], then clipped to risk.LEVELS
+# The first point is exact. The last is deliberately extreme so the route-level
+# effect is visible even if ten_doors is insensitive around one break-even.
+DOORS_GAPS = ((1.0, 0), (1.5, 1), (2.0, 2), (4.0, 3), (10.0, 4))
 
-# A transition row is believed only if the risk stage actually observed this
-# many items at that reference level. Below it the row is left as the identity:
-# with three `extreme` items in the dataset, a smoothed row would be mostly
-# invented, and inventing the transition that matters most is the one thing this
-# must not do.
-_MIN_TRANSITION_ROW = 5
-
-
-def _error_model(accuracy: Optional[dict]):
-    """The difficulty error to simulate, as (bias, spread) in log10 units.
-
-    Measured, not assumed: `bias` is the median log10 ratio — positive when the
-    model over-estimates, and a median rather than a mean so one wild reply
-    cannot set it — and `spread` is the standard deviation of the same errors. A
-    perturbed belief is `true * 10 ** (bias + N(0, spread))`, which reproduces
-    both halves of what the accuracy stage saw: being wrong by a factor, and
-    being wrong in a consistent direction.
-    """
-    errs = _log_errors(accuracy["rows"]) if accuracy else []
-    if len(errs) < 2:
-        return 0.0, 0.0
-    return statistics.median(errs), statistics.pstdev(errs)
+# One seed means 1 exact + 4 Gap points x 3 arms = 13 full scenario runs.
+# Increase this for uncertainty bars; each seed preserves paired draws between
+# cost-only / risk-only / both, so arm differences are not random-sample noise.
+DOORS_SEEDS = 1
 
 
-def _risk_measured(risk_payload: Optional[dict], key: str = "sight") -> bool:
-    """Did the risk stage actually produce verdicts to learn an error from?"""
-    return bool(risk_payload) and any(r.get(key) for r in risk_payload["rows"])
-
-
-def _risk_transition(risk_payload: Optional[dict], key: str = "sight") -> dict:
-    """P(estimated level | true level), from the risk stage's own confusion."""
-    table = {name: {name: 1.0} for name in LEVELS}          # identity default
-    if not _risk_measured(risk_payload, key):
-        return table
-    grid = _risk_confusion(risk_payload["rows"], key)
-    for i, want in enumerate(LEVELS):
-        total = sum(grid[i])
-        if total >= _MIN_TRANSITION_ROW:
-            table[want] = {got: grid[i][j] / total
-                           for j, got in enumerate(LEVELS) if grid[i][j]}
-    return table
-
-
-def _sample_level(transition: dict, true_level: str, rng: random.Random) -> str:
-    row = transition.get(true_level) or {true_level: 1.0}
-    levels = list(row)
-    return rng.choices(levels, weights=[row[k] for k in levels], k=1)[0]
-
-
-def _doors_beliefs(gates: List[dict], seed: int, bias: float, spread: float,
-                   transition: dict, perturb: tuple):
-    """One draw of what the estimator believes about every obstacle.
-
-    Difficulty and risk draw from their own seeded streams, so the
-    difficulty-only arm gets exactly the difficulty draw the both-perturbed arm
-    got, and the two families differ by the risk term alone.
-    """
-    rng_d = random.Random(f"difficulty-{seed}")
-    rng_r = random.Random(f"risk-{seed}")
+def _doors_beliefs(gates: List[dict], seed: int, cost_factor: float,
+                   risk_levels: int, perturb: tuple):
+    """Draw offline LLM-like beliefs at one user-controlled Gap level."""
+    rng_d = random.Random(f"difficulty-{seed}-{cost_factor:g}")
+    rng_r = random.Random(f"risk-{seed}-{risk_levels}")
     difficulty, level = {}, {}
     for r in gates:
         d, lvl = r["difficulty"], r["risk"]
-        draw_d = 10.0 ** (bias + rng_d.gauss(0.0, spread)) if spread or bias else 1.0
-        draw_r = _sample_level(transition, r["risk"], rng_r)
+        log_band = math.log10(cost_factor)
+        draw_d = 10.0 ** rng_d.uniform(-log_band, log_band)
+        shift = rng_r.randint(-risk_levels, risk_levels) if risk_levels else 0
+        draw_r = LEVELS[max(0, min(len(LEVELS) - 1,
+                                  LEVELS.index(lvl) + shift))]
         if "difficulty" in perturb:
             d = max(0.01, d * draw_d)
         if "risk" in perturb:
@@ -680,7 +635,7 @@ def _gate_choices(gates: List[dict], removed) -> Dict[int, str]:
 
 
 def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
-               level: Dict[int, str]) -> dict:
+               level: Dict[int, str], summary_path: Optional[str] = None) -> dict:
     """One crossing of the map under one set of beliefs.
 
     The network is cut out and both estimators are pre-seeded per obstacle, so
@@ -704,6 +659,7 @@ def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
 
     sim = OnlineNAMO(scenario["workspace"], scenario["static"],
                      scenario["movable"], scenario["start"], scenario["goal"], cfg)
+    original_poses = {w.oid: w.polygon for w in sim.world}
     sim.estimator.api_key = ""
     sim.estimator.mode = arm
     sim.risk.api_key = ""
@@ -715,8 +671,18 @@ def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
 
     t0 = time.time()
     res = sim.run()
+    if summary_path:
+        import viz
+        os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+        viz.visualize(sim, res, original_poses, summary_path)
+        log(f"wrote {summary_path}")
     choices = _gate_choices(gates, res.removed)
+    true_difficulty = {r["oid"]: r["difficulty"] for r in gates}
     true_risk = {r["oid"]: r["risk"] for r in gates}
+    factor_gaps = [max(difficulty[oid] / true, true / difficulty[oid])
+                   for oid, true in true_difficulty.items()]
+    risk_gaps = [abs(LEVELS.index(level[oid]) - LEVELS.index(true))
+                 for oid, true in true_risk.items()]
     return {
         "arm": arm, "success": res.success, "J": res.J, "C": res.C,
         "walk_cost": res.walk_cost, "work_cost": res.work_cost,
@@ -729,68 +695,72 @@ def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
         "choices": {str(g): c for g, c in sorted(choices.items())},
         "cycles": res.cycles, "expansions": res.total_expansions,
         "wall_s": round(time.time() - t0, 1), "message": res.message,
+        "realized_mean_cost_factor": round(statistics.fmean(factor_gaps), 3),
+        "realized_max_cost_factor": round(max(factor_gaps), 3),
+        "realized_mean_risk_levels": round(statistics.fmean(risk_gaps), 3),
+        "realized_max_risk_levels": max(risk_gaps),
         "believed_difficulty": {str(k): round(v, 1) for k, v in difficulty.items()},
         "believed_risk": {str(k): v for k, v in level.items()},
     }
 
 
-def stage_doors(seeds: int, accuracy: Optional[dict],
-                risk_payload: Optional[dict]) -> dict:
+def stage_doors(seeds: int) -> dict:
+    if seeds < 1:
+        raise SystemExit("doors: --doors-seeds must be at least 1")
     gates = scenarios.load(DOORS_MAP)["gates"]
-    bias, spread = _error_model(accuracy)
-    transition = _risk_transition(risk_payload)
-    # An arm that perturbs nothing is not a measurement of "this term does not
-    # matter" — it is a missing input wearing the costume of a result. Run only
-    # the families whose error model was actually measured, and record which.
-    has_difficulty = bool(spread or bias)
-    has_risk = _risk_measured(risk_payload)
-    if not has_difficulty:
-        log("doors: no usable accuracy.json - skipping the difficulty families")
-    if not has_risk:
-        log("doors: no usable risk.json - skipping the risk families")
-    if not (has_difficulty or has_risk):
-        raise SystemExit(
-            "doors: neither estimator has a measured error to simulate. Run "
-            "`accuracy` and/or `risk` first - with both missing every arm would "
-            "be a copy of `exact`.")
-
-    families = [f for f, perturb in (("both", ("difficulty", "risk")),
-                                     ("difficulty", ("difficulty",)),
-                                     ("risk", ("risk",)))
-                if all((p == "difficulty" and has_difficulty)
-                       or (p == "risk" and has_risk) for p in perturb)]
-    log(f"doors: {DOORS_MAP}, error model bias {10 ** bias:.2f}x, spread "
-        f"{10 ** spread:.2f}x, families {'+'.join(families)}, {seeds} seeds = "
-        f"{len(families) * seeds + 1} runs")
+    families = {"both": ("difficulty", "risk"),
+                "difficulty": ("difficulty",), "risk": ("risk",)}
+    n_runs = 1 + (len(DOORS_GAPS) - 1) * len(families) * seeds
+    log(f"doors: {DOORS_MAP}, synthetic Gap ladder {DOORS_GAPS}, "
+        f"{seeds} seeds = {n_runs} runs; no API calls")
 
     runs = [_run_doors("exact", gates,
                        {r["oid"]: r["difficulty"] for r in gates},
-                       {r["oid"]: r["risk"] for r in gates})]
+                       {r["oid"]: r["risk"] for r in gates},
+                       os.path.join(OUT_DIR, "ten_doors_exact.png"))]
+    runs[0].update({"family": "exact", "seed": 0, "gap_index": 0,
+                    "cost_factor": 1.0, "risk_levels": 0, "changed": 0})
     log(f"  {'exact':<14s} C={runs[0]['C']:>12,.0f}  J={runs[0]['J']:>12,.0f}  "
         f"pushes={runs[0]['pushes']}  ({runs[0]['wall_s']}s)")
 
-    perturbs = {"both": ("difficulty", "risk"),
-                "difficulty": ("difficulty",), "risk": ("risk",)}
-    for seed in range(seeds):
-        for family in families:
-            perturb = perturbs[family]
-            difficulty, level = _doors_beliefs(gates, seed, bias, spread,
-                                               transition, perturb)
-            row = _run_doors(f"{family}{seed}", gates, difficulty, level)
-            row["family"], row["seed"] = family, seed
-            row["changed"] = sum(1 for g, c in row["choices"].items()
-                                 if c != runs[0]["choices"][g])
-            runs.append(row)
-            log(f"  {row['arm']:<14s} C={row['C']:>12,.0f}  "
-                f"J={row['J']:>12,.0f}  pushes={row['pushes']}  "
-                f"changed={row['changed']}/10  "
-                f"risky={len(row['risky_pushes'])}  ({row['wall_s']}s)")
+    max_gap_index = len(DOORS_GAPS) - 1
+    for gap_index, (cost_factor, risk_levels) in enumerate(DOORS_GAPS[1:], 1):
+        for seed in range(seeds):
+            for family, perturb in families.items():
+                difficulty, level = _doors_beliefs(
+                    gates, seed, cost_factor, risk_levels, perturb)
+                screenshot = None
+                if gap_index == max_gap_index and seed == 0 and family == "both":
+                    screenshot = os.path.join(OUT_DIR,
+                                              "ten_doors_max_gap.png")
+                row = _run_doors(
+                    f"gap{gap_index}_{family}_{seed}", gates, difficulty, level,
+                    screenshot)
+                row.update({"family": family, "seed": seed,
+                            "gap_index": gap_index,
+                            "cost_factor": cost_factor,
+                            "risk_levels": risk_levels})
+                row["changed"] = sum(
+                    1 for g, c in row["choices"].items()
+                    if c != runs[0]["choices"][g])
+                runs.append(row)
+                log(f"  gap={gap_index} {family:<10s} seed={seed}  "
+                    f"C={row['C']:>12,.0f}  J={row['J']:>12,.0f}  "
+                    f"changed={row['changed']}/10  "
+                    f"risky={len(row['risky_pushes'])}  ({row['wall_s']}s)")
 
-    payload = {"map": DOORS_MAP, "seeds": seeds, "families": families,
-               "difficulty_measured": has_difficulty, "risk_measured": has_risk,
-               "bias_log10": round(bias, 4), "spread_log10": round(spread, 4),
-               "transition": transition, "gates": gates, "runs": runs}
+    payload = {"map": DOORS_MAP, "seeds": seeds,
+               "gap_model": {
+                   "cost": "estimate/true sampled log-uniformly in [1/F, F]",
+                   "risk": "integer level shift sampled in [-K, K], then clipped",
+               },
+               "gaps": [{"gap_index": i, "cost_factor": f, "risk_levels": k}
+                        for i, (f, k) in enumerate(DOORS_GAPS)],
+               "families": list(families), "gates": gates, "runs": runs,
+               "screenshots": {"exact": "ten_doors_exact.png",
+                               "max_gap": "ten_doors_max_gap.png"}}
     _save("doors.json", payload)
+    _chart_doors_gap(payload, os.path.join(OUT_DIR, "doors_gap.png"))
     return payload
 
 
@@ -800,6 +770,11 @@ def stage_doors(seeds: int, accuracy: Optional[dict],
 RISK_ARMS = (("keyword fallback", "keyword"),
              ("LLM on sight", "sight"),
              ("LLM after contact", "contact"))
+
+
+def _risk_measured(risk_payload: Optional[dict], key: str = "sight") -> bool:
+    """Did the risk stage produce at least one usable verdict?"""
+    return bool(risk_payload) and any(r.get(key) for r in risk_payload["rows"])
 
 
 def _modal_level(levels) -> Optional[str]:
@@ -1085,6 +1060,66 @@ def _chart_risk(risk: dict, path: str):
     log(f"wrote {path}")
 
 
+def _chart_doors_gap(doors: dict, path: str):
+    """Show how route cost and decisions change as simulated Gap grows."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    runs, base = doors["runs"], doors["runs"][0]
+    gaps = doors["gaps"]
+    families = (("difficulty", "cost only", "#2a78d6", "o"),
+                ("risk", "risk only", "#eb6834", "^"),
+                ("both", "cost + risk", "#1baf7a", "D"))
+    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.2), sharex=True)
+
+    for family, label, color, marker in families:
+        xs, penalties, changes = [], [], []
+        lows_p, highs_p, lows_c, highs_c = [], [], [], []
+        for gap in gaps:
+            i = gap["gap_index"]
+            sample = ([base] if i == 0 else
+                      [r for r in runs if r.get("family") == family
+                       and r.get("gap_index") == i and r["success"]])
+            if not sample:
+                continue
+            ps = [100.0 * (r["C"] - base["C"]) / base["C"]
+                  for r in sample] if base["C"] else [0.0]
+            cs = [r.get("changed", 0) for r in sample]
+            xs.append(i)
+            penalties.append(statistics.fmean(ps))
+            changes.append(statistics.fmean(cs))
+            lows_p.append(min(ps)); highs_p.append(max(ps))
+            lows_c.append(min(cs)); highs_c.append(max(cs))
+        axes[0].plot(xs, penalties, color=color, marker=marker, lw=1.8,
+                     ms=5, label=label)
+        axes[1].plot(xs, changes, color=color, marker=marker, lw=1.8,
+                     ms=5, label=label)
+        if doors["seeds"] > 1:
+            axes[0].fill_between(xs, lows_p, highs_p, color=color, alpha=0.12)
+            axes[1].fill_between(xs, lows_c, highs_c, color=color, alpha=0.12)
+
+    labels = [f"{g['cost_factor']:g}x / +/-{g['risk_levels']}"
+              for g in gaps]
+    for ax in axes:
+        ax.axhline(0, color=INK, lw=0.8)
+        ax.set_xticks(range(len(gaps)), labels, rotation=25, ha="right")
+        ax.grid(True, axis="y", color=GRID, lw=0.6)
+        ax.tick_params(colors=MUTED)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+    axes[0].set_ylabel("change from exact C  [%]", color=INK)
+    axes[1].set_ylabel("gates chosen differently  [of 10]", color=INK)
+    axes[0].set_title("Route-cost impact", loc="left", color=INK)
+    axes[1].set_title("Decision impact", loc="left", color=INK)
+    fig.supxlabel("maximum simulated Gap: cost factor / risk levels", color=MUTED)
+    axes[0].legend(frameon=False, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160, facecolor=SURFACE)
+    plt.close(fig)
+    log(f"wrote {path}")
+
+
 # Report
 
 def _table(header: List[str], body: List[List[str]]) -> str:
@@ -1163,7 +1198,10 @@ def stage_report() -> str:
             f"to push.")
     if doors:
         base = doors["runs"][0]
-        perturbed = [r for r in doors["runs"][1:] if r.get("family") == "both"]
+        max_gap = max(g["gap_index"] for g in doors["gaps"])
+        perturbed = [r for r in doors["runs"][1:]
+                     if r.get("family") == "both"
+                     and r.get("gap_index") == max_gap]
         if perturbed and base["C"]:
             pen = [100.0 * (r["C"] - base["C"]) / base["C"] for r in perturbed
                    if r["success"]]
@@ -1171,8 +1209,8 @@ def stage_report() -> str:
             extra_risky = [len(r["risky_pushes"]) - len(base["risky_pushes"])
                            for r in perturbed]
             head.append(
-                f"- Put that error on a route and it moves the answer: across "
-                f"{len(perturbed)} crossings of the ten-gate map it changes "
+                f"- At the largest simulated Gap, across {len(perturbed)} "
+                f"crossings of the ten-gate map it changes "
                 f"**{statistics.fmean(changed):.1f} of 10 decisions** (worst "
                 f"{max(changed)}) and costs "
                 f"**{statistics.fmean(pen):+.1f}% of C** on average, worst "
@@ -1410,60 +1448,55 @@ def stage_report() -> str:
             f"the axis to cost a real detour. Every gate is one independent "
             f"three-way decision, so a run is ten of them and the arms differ "
             f"only in what the planner was told to believe.\n\n"
-            f"`exact` is the floor: beliefs equal the truth. The perturbed arms "
-            f"take the same true values and apply the error this benchmark "
-            f"actually measured — difficulty multiplied by "
-            f"`10 ** ({doors['bias_log10']:+.3f} + N(0, "
-            f"{doors['spread_log10']:.3f}))`, i.e. a "
-            f"{10 ** doors['bias_log10']:.2f}x bias with a "
-            f"{10 ** doors['spread_log10']:.2f}x spread, and risk resampled "
-            f"from the confusion matrix in section 1b. `difficulty` and `risk` "
-            f"perturb one term each, sharing the seed with `both`, so the "
-            f"families are the same draw with pieces switched off.\n\n"
+            f"`exact` is the floor: beliefs equal the truth. At a Gap point "
+            f"`F / K`, each cost estimate is a seeded log-uniform draw between "
+            f"`true/F` and `true*F`, while each risk estimate is shifted by a "
+            f"seeded random integer from `-K` to `+K` levels and clipped to the "
+            f"valid ladder. The tested points are "
+            + ", ".join(f"{g['cost_factor']:g}x/±{g['risk_levels']}" for g in doors["gaps"])
+            + ". `difficulty` and `risk` perturb one term each and `both` uses "
+            f"the same two draws, so arm differences isolate the source rather "
+            f"than a different random sample.\n\n"
             f"Beliefs are seeded per obstacle and no API is called, but the "
             f"corrections a real run earns are left in: touching an obstacle "
             f"reveals its true difficulty and re-rates its risk. What the "
             f"perturbation buys is therefore a wrong *decision*, taken before "
             f"the robot could know better — which is exactly what a bad "
-            f"estimate costs in practice.\n\n")
-        if not doors.get("risk_measured", True):
-            parts.append(
-                "**The risk families are absent from this run.** The risk stage "
-                "had produced no measurements, so there was no risk error to "
-                "simulate and only difficulty is perturbed below.\n\n")
-        if not doors.get("difficulty_measured", True):
-            parts.append(
-                "**The difficulty families are absent from this run.** The "
-                "accuracy stage had produced no measurements.\n\n")
+            f"estimate costs in practice. The two route screenshots compare "
+            f"the exact arm with seed 0 at the maximum joint Gap.\n\n")
 
         body = []
-        for family in ("exact", "both", "difficulty", "risk"):
-            sub = ([base] if family == "exact"
-                   else [r for r in runs if r.get("family") == family])
-            if not sub:
-                continue
-            ok = [r for r in sub if r["success"]]
-            cs = [r["C"] for r in ok]
-            js = [r["J"] for r in ok]
-            pen = [100.0 * (r["C"] - base["C"]) / base["C"] for r in ok
-                   if base["C"]]
-            changed = [r.get("changed", 0) for r in sub]
-            risky = [len(r["risky_pushes"]) for r in sub]
-            body.append([
-                family, len(sub), f"{len(ok)}/{len(sub)}",
-                f"{statistics.fmean(cs):,.0f}" if cs else "-",
-                f"{statistics.fmean(js):,.0f}" if js else "-",
-                "-" if family == "exact" else
-                (f"{statistics.fmean(pen):+.1f}% / {max(pen):+.1f}%" if pen else "-"),
-                f"{statistics.fmean(r['pushes'] for r in sub):.1f}",
-                "-" if family == "exact" else
-                f"{statistics.fmean(changed):.1f} / {max(changed)}",
-                f"{statistics.fmean(risky):.1f}"])
+        for gap in doors["gaps"]:
+            for family in ("exact", "difficulty", "risk", "both"):
+                if gap["gap_index"] == 0:
+                    if family != "exact":
+                        continue
+                    sub = [base]
+                else:
+                    if family == "exact":
+                        continue
+                    sub = [r for r in runs if r.get("family") == family
+                           and r.get("gap_index") == gap["gap_index"]]
+                ok = [r for r in sub if r["success"]]
+                pen = [100.0 * (r["C"] - base["C"]) / base["C"] for r in ok
+                       if base["C"]]
+                changed = [r.get("changed", 0) for r in sub]
+                risky = [len(r["risky_pushes"]) for r in sub]
+                body.append([
+                    f"{gap['cost_factor']:g}x/±{gap['risk_levels']}", family,
+                    len(sub), f"{len(ok)}/{len(sub)}",
+                    f"{statistics.fmean(r['realized_mean_cost_factor'] for r in sub):.2f}x",
+                    f"{statistics.fmean(r['realized_mean_risk_levels'] for r in sub):.2f}",
+                    f"{statistics.fmean(r['C'] for r in ok):,.0f}" if ok else "-",
+                    "-" if family == "exact" else
+                    (f"{statistics.fmean(pen):+.1f}%" if pen else "-"),
+                    "-" if family == "exact" else
+                    f"{statistics.fmean(changed):.1f}",
+                    f"{statistics.fmean(risky):.1f}"])
         parts.append(_table(
-            ["arm", "runs", "reached goal", "mean C", "mean J",
-             "penalty on C mean / worst", "mean pushes",
-             "gates changed mean / worst",
-             "mean pushes of a risky obstacle"], body))
+            ["Gap F/±K", "arm", "runs", "reached goal",
+             "realized cost gap", "realized risk gap", "mean C",
+             "C vs exact", "gates changed", "risky pushes"], body))
 
         parts.append(
             f"\n`gates changed` counts gates where the perturbed run chose "
@@ -1501,9 +1534,11 @@ def stage_report() -> str:
         fh.write(text)
     log(f"wrote {path}")
 
-    _chart_accuracy(rows, os.path.join(OUT_DIR, "accuracy.png"))
+    _chart_accuracy(rows, os.path.join(OUT_DIR, "cost_accuracy.png"))
     if risk:
         _chart_risk(risk, os.path.join(OUT_DIR, "risk.png"))
+    if doors:
+        _chart_doors_gap(doors, os.path.join(OUT_DIR, "doors_gap.png"))
     return path
 
 
@@ -1517,8 +1552,7 @@ def main():
                     help="LLM calls per item in the accuracy and risk stages")
     ap.add_argument("--workers", type=int, default=8, help="parallel API calls")
     ap.add_argument("--doors-seeds", type=int, default=DOORS_SEEDS,
-                    help="perturbation seeds per family in the doors stage; "
-                         "each one is three whole runs of the scenario")
+                    help="random seeds per Gap and arm in the offline doors stage")
     args = ap.parse_args()
 
     cfg = Config()
@@ -1535,7 +1569,7 @@ def main():
     if args.stage in ("order", "all"):
         stage_order(cfg, args.workers)
     if args.stage in ("doors", "all"):
-        stage_doors(args.doors_seeds, _load("accuracy.json"), _load("risk.json"))
+        stage_doors(args.doors_seeds)
     if args.stage in ("report", "all"):
         stage_report()
 

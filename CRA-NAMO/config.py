@@ -24,7 +24,7 @@ def validate_lambda(value: float) -> float:
 class Config:
     """Configuration shared by planning, execution, and visualization."""
 
-    robot_radius: float = 0.2
+    robot_radius: float = 0.1
 
     # Free and loaded motion limits for the turn-then-drive model.
     robot_v_max: float = 0.6         # [m/s]
@@ -83,16 +83,27 @@ class Config:
     # Maximum applied force relative to friction; zero disables the limit.
     contact_max_force_ratio: float = 1.0
     # What the robot physically cannot do, as opposed to what it would rather
-    # not. Both are off by default — a limit is a claim about a particular
-    # machine, and inventing one would quietly make maps unsolvable.
+    # not. Both are live, and both are set clear of every body in the shipped
+    # maps: the mechanism is there to be tightened against a real machine, and
+    # until someone measures one it should not be quietly deciding that a map
+    # has no answer. 0 turns either of them off entirely.
     #   robot_max_push_force  the push it can produce [N]; anything needing more
-    #                         cannot be moved at all. 0 leaves it unmodelled.
+    #                         cannot be moved at all. The heaviest body shipped
+    #                         is home/livingRoom1 at 166,786 N, so 200 kN clears
+    #                         everything with room to spare. A real differential
+    #                         drive is nearer 100-300 N — set it there and the
+    #                         maps start refusing their own furniture, which is
+    #                         a modelling decision to make deliberately.
     #   robot_push_height     how high up the body it pushes [m]. A push at
     #                         height y tips a body of width w instead of sliding
-    #                         it once y > w / (2*mu) — the mass cancels, so this
-    #                         is a statement about shape alone. 0 unmodelled.
-    robot_max_push_force: float = 0.0
-    robot_push_height: float = 0.0
+    #                         it once y > w / (2*mu). The mass cancels out of
+    #                         that comparison, so it is a statement about shape
+    #                         alone — and it is why this is a geometry knob and
+    #                         not a force one. The narrowest body shipped is
+    #                         warehouse/box101 at 0.20 m, which tips at a push
+    #                         above 0.20 m; 0.15 m stays under it.
+    robot_max_push_force: float = 200_000.0
+    robot_push_height: float = 0.15
     push_friction_mu: float = 0.5
 
     se2_cell: float = 0.15

@@ -515,16 +515,48 @@ class SE2Planner:
                       goal_rank=None,
                       ref_pos=None,
                       widen: int = 1) -> SE2PlanResult:
+        """The cheapest drop pose by push cost alone, or why there was none."""
+        for result in self.acceptable_goals(
+                start_pose, validate=validate, n_candidates=n_candidates,
+                goal_accept=goal_accept, goal_rank=goal_rank, ref_pos=ref_pos,
+                widen=widen):
+            return result
+        return self._last_refusal
+
+    def acceptable_goals(self,
+                         start_pose: Tuple[float, float, float],
+                         validate=None,
+                         n_candidates: int = 10,
+                         goal_accept=None,
+                         goal_rank=None,
+                         ref_pos=None,
+                         widen: int = 1):
+        """Every drop pose that passes, cheapest push first.
+
+        A generator, because the caller is not obliged to take the first one.
+        Push cost is the only thing this class knows how to compare poses by,
+        and it is not what the move will be billed at — that also includes how
+        far the robot walks to escort the body there, which can differ between
+        two poses by more than the push does. A caller that knows the real price
+        can walk down this list and stop once the rest cannot beat what it
+        already has, which is sound only because the list ascends in push cost
+        and every other term of the bill is non-negative.
+        """
+        self._last_refusal = SE2PlanResult(False, "no drop pose was tried")
         start_idx = self._snap(*start_pose)
 
         if not self.in_disk[start_idx]:
-            return SE2PlanResult(False, "start pose is outside the workspace circle")
+            self._last_refusal = SE2PlanResult(
+                False, "start pose is outside the workspace circle")
+            return
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
                 O_start + np.array([start_pose[0], start_pose[1]]),
                 wp, eps=_START_COLLISION_EPS):
-                return SE2PlanResult(False, "start pose collides with wall")
+                self._last_refusal = SE2PlanResult(
+                    False, "start pose collides with wall")
+                return
 
         if self._unstick_start(start_idx):
             self._cache = None            # C-space changed, invalidate previous Dijkstra result
@@ -552,11 +584,16 @@ class SE2Planner:
                 dist, start_pose, n_best=n_best, ref_pos=ref_pos)
             if not reachable:
                 return SE2PlanResult(False, "no reachable pose can clear the path")
-            result, refused = self._cheapest_acceptable(
-                candidates, parent, start_pose, validate, goal_accept,
-                self._reorder(candidates, dist, goal_rank))
-            if result is not None:
-                return result
+            found = refused = 0
+            for result, was_refused in self._acceptable(
+                    parent, start_pose, validate, goal_accept,
+                    self._reorder(candidates, dist, goal_rank)):
+                refused += was_refused
+                if result is not None:
+                    found += 1
+                    yield result
+            if found:
+                return
             # Every pose on the shortlist being one the caller will not have
             # may be a statement about the length of the shortlist rather than
             # about the map: an acceptable pose can sit just past the end of it.
@@ -569,10 +606,10 @@ class SE2Planner:
                 break
             n_best = max(n_candidates, 1) * int(widen)
 
-        if refused == len(candidates):
-            return SE2PlanResult(
-                False, f"every one of {refused:,} candidate drop poses was refused")
-        return SE2PlanResult(False, "all candidate routes failed swept-volume validation")
+        self._last_refusal = SE2PlanResult(
+            False, f"every one of {refused:,} candidate drop poses was refused"
+            if refused and refused == len(candidates)
+            else "all candidate routes failed swept-volume validation")
 
     def _reorder(self, candidates, dist, goal_rank):
         """Put the shortlist in the order the caller would rather have it.
@@ -596,8 +633,7 @@ class SE2Planner:
         scored.sort()
         return [b for _score, b in scored]
 
-    def _cheapest_acceptable(self, candidates, parent, start_pose,
-                             validate, goal_accept, ordered=None):
+    def _acceptable(self, parent, start_pose, validate, goal_accept, ordered):
         """The best drop pose the caller would actually accept, and how many it would not.
 
         `goal_accept` is a hard constraint on where the thing may be left, not a
@@ -610,25 +646,22 @@ class SE2Planner:
         asked first.
         """
         nyT = self.ny * self.n_theta
-        refused = 0
-        for best in (candidates if ordered is None else ordered):
+        for best in ordered:
             goal_idx = (best // nyT, (best % nyT) // self.n_theta,
                         best % self.n_theta)
             goal_pose = self._pose(*goal_idx)
             if goal_accept is not None and not goal_accept(goal_pose):
-                refused += 1
+                yield None, True
                 continue
             poses = self._trace(parent, best, start_pose)
             if validate is not None and not validate(poses):
-                continue                  # this path fails swept-volume validation, try next candidate
+                yield None, False         # fails swept-volume validation; try the next
+                continue
             trans = sum(math.hypot(b[0] - a[0], b[1] - a[1])
                         for a, b in zip(poses, poses[1:]))
             rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
             cost = trans + self.rot_weight * rot
-            # candidates come in cost order, so the first one through both
-            # filters is the cheapest pose the caller would actually accept
-            return SE2PlanResult(True, "", cost, trans, rot, goal_pose, poses), refused
-        return None, refused
+            yield SE2PlanResult(True, "", cost, trans, rot, goal_pose, poses), False
 
     def plan_path(self,
                   start_pose: Tuple[float, float, float],

@@ -180,6 +180,26 @@ def blocker_index(static_obstacles, others_polys):
 
 def plan_move_se2(
     obs: MovableObstacle,
+    must_clear_polys,
+    static_obstacles,
+    bounds: Tuple[float, float, float, float],
+    robot_pos: Tuple[float, float],
+    cfg: Config,
+    others_polys=None,
+    goal_accept=None,
+    goal_rank=None,
+    path_accept=None,
+) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
+    """The cheapest place to put *obs* by push cost, for callers wanting just one."""
+    for path, cost_, goal in move_se2_options(
+            obs, must_clear_polys, static_obstacles, bounds, robot_pos, cfg,
+            others_polys, goal_accept, goal_rank, path_accept):
+        return (True, path, cost_, goal)
+    return (False, None, math.inf, None)
+
+
+def move_se2_options(
+    obs: MovableObstacle,
     must_clear_polys,                   # corridor polygons that must be cleared
     static_obstacles,                   # list of StaticObstacle
     bounds: Tuple[float, float, float, float],
@@ -189,8 +209,14 @@ def plan_move_se2(
     goal_accept=None,                   # (goal_pose) -> bool, filters candidate drop poses
     goal_rank=None,                     # (goal_pose) -> float, extra metres of regret, for ordering
     path_accept=None,                   # (poses) -> bool, extra hard constraint on the whole path
-) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
-    """Plan where to put *obs* so it stops blocking, and how to get it there."""
+):
+    """Every place *obs* could be put so it stops blocking, cheapest push first.
+
+    Yields `(poses, push cost, drop pose)` for each one that clears the corridor,
+    survives swept-volume validation and can actually be escorted there. The
+    caller picks — push cost is not the whole bill, and the order here is only by
+    push cost, so the cheapest push is not always the cheapest move.
+    """
     try:
         # Same C-space the body's own routes are planned in, and for the same
         # reason: a cell whose centre is clear says nothing about the step into
@@ -214,23 +240,20 @@ def plan_move_se2(
             # robot can escort it the whole way while staying in contact
             return path_accept is None or path_accept(poses)
 
-        result = planner.plan_anywhere((obs.x, obs.y, obs.theta),
-                                       validate=_validate, goal_accept=goal_accept,
-                                       goal_rank=goal_rank,
-                                       n_candidates=cfg.se2_goal_candidates,
-                                       ref_pos=robot_pos,
-                                       widen=cfg.se2_goal_widen)
-        if not result.success:
-            cfg.log(f"[plan_move_se2] oid={obs.oid} {result.reason}")
-            return (False, None, math.inf, None)
-        end_poly = obs.polygon_at(*result.goal)
-        if any(end_poly.intersects(p) for p in (must_clear_polys or [])):
-            cfg.log(f"[plan_move_se2] oid={obs.oid} target pose does not actually clear the corridor – no solution")
-            return (False, None, math.inf, None)
-        return (True, result.path, result.cost, result.goal)
+        for result in planner.acceptable_goals(
+                (obs.x, obs.y, obs.theta),
+                validate=_validate, goal_accept=goal_accept, goal_rank=goal_rank,
+                n_candidates=cfg.se2_goal_candidates, ref_pos=robot_pos,
+                widen=cfg.se2_goal_widen):
+            end_poly = obs.polygon_at(*result.goal)
+            if any(end_poly.intersects(p) for p in (must_clear_polys or [])):
+                continue    # does not actually clear the corridor after all
+            yield (result.path, result.cost, result.goal)
+        reason = planner._last_refusal.reason
+        if reason:
+            cfg.log(f"[plan_move_se2] oid={obs.oid} {reason}")
     except Exception as e:
         cfg.log(f"[plan_move_se2] error: {e}")
-        return (False, None, math.inf, None)
 
 
 def _split_mixed_leg(obs: MovableObstacle, a, b, blockers) -> Optional[list]:

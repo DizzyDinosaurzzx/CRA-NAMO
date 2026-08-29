@@ -398,22 +398,39 @@ class Planner:
                 if not plan.feasible:
                     rejected.append(plan.reason)
                 return plan.feasible
-        se2_feasible, se2_path, se2_cost, se2_goal = manipulation.plan_move_se2(
-            obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
-            robot_pos, self.cfg, others_polys=others,
-            goal_accept=self._goal_filter(obs), goal_rank=self._goal_rank(obs),
-            path_accept=path_accept)
-        if se2_feasible and se2_path:
-            cplan = (_contact_for(se2_path) if self.cfg.contact_required
-                     else contact.idle_plan(mid, len(se2_path)))
-            if cplan.feasible:
+        # Every place the obstacle could go, cheapest *push* first — and then
+        # the cheapest *move*, which is not the same thing. What the search will
+        # be charged is the work of shoving it plus the robot's own walk to
+        # fetch, escort and leave it, and two poses a few centimetres apart can
+        # differ by metres in the second. So each option is priced whole, and
+        # the search stops looking once the work alone of the next one would
+        # already beat nothing: push cost only rises down this list, so once
+        # `lambda * push work` exceeds the best complete bill so far, no
+        # remaining option can win.
+        best = math.inf
+        for path, push_cost, goal in manipulation.move_se2_options(
+                obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
+                robot_pos, self.cfg, others_polys=others,
+                goal_accept=self._goal_filter(obs),
+                goal_rank=self._goal_rank(obs), path_accept=path_accept):
+            floor = cost.combine(
+                self.cfg, cost.manipulation_work(estimated_diff, push_cost), 0.0)
+            if floor >= best:
+                break
+            plan = (_contact_for(path) if self.cfg.contact_required
+                    else contact.idle_plan(mid, len(path)))
+            if not plan.feasible:
+                self.cfg.log(f"[contact] oid={oid} {plan.reason}")
+                continue
+            seconds = cost.manipulation_time(self.cfg, plan, len(path), push_cost)
+            total = cost.removal_cost(
+                self.cfg, cost.manipulation_work(estimated_diff, push_cost),
+                plan.travel, seconds, self._risk_to_charge(oid))
+            if total < best:
+                best = total
                 feasible = True
-                move_path = se2_path
-                drop = se2_goal
-                move_dist = se2_cost
-            else:
-                self.cfg.log(f"[contact] oid={oid} {cplan.reason}")
-        elif rejected:
+                move_path, drop, move_dist, cplan = path, goal, push_cost, plan
+        if not feasible and rejected:
             # the obstacle could go somewhere, the robot just could not
             # escort it there — say which half of the constraint bit
             counts = Counter(rejected).most_common(2)
