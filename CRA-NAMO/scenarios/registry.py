@@ -28,6 +28,43 @@ def names() -> tuple[str, ...]:
     ))
 
 
+# Keys of a decision point that name obstacles and nothing else. Anything under
+# one of these has to be an oid the scenario actually contains, or the authored
+# account of what the map is testing has drifted from the map. `avoid` is left
+# out on purpose: it holds an obstacle in some maps and the name of a route to
+# stay off in others, and there is no telling which from here.
+_OID_KEYS = ("risky", "partners", "safer_alternative",
+             "temporary_obstacles", "obstacles")
+
+
+def _checked_decisions(name: str, points, movable) -> list[dict]:
+    """Validate the authored decision points against the obstacles that exist.
+
+    These describe what a map is *for* — which choice it puts to the robot, and
+    which way out is the trap. Nothing enforced them, so they were free to go on
+    naming obstacles that had been renumbered or deleted, and to keep looking
+    authoritative while doing it.
+    """
+    oids = {obs.oid for obs in movable}
+    checked = []
+    for i, point in enumerate(points or ()):
+        if not isinstance(point, dict):
+            raise TypeError(f"Map {name!r}: decision point {i} must be a dict")
+        for key in _OID_KEYS:
+            if key not in point:
+                continue
+            value = point[key]
+            named = value if isinstance(value, (list, tuple, set)) else [value]
+            unknown = [o for o in named if o not in oids]
+            if unknown:
+                raise ValueError(
+                    f"Map {name!r}: decision point "
+                    f"{point.get('name', i)!r} names obstacle(s) "
+                    f"{unknown} under {key!r}, which the map does not contain")
+        checked.append(point)
+    return checked
+
+
 def load(name: str | None = None) -> dict[str, Any]:
     """Load and validate a scenario by name."""
     selected = name or DEFAULT_SCENARIO
@@ -57,6 +94,8 @@ def load(name: str | None = None) -> dict[str, Any]:
 
     # Optional: what the world does on its own. Absent means a static map.
     scenario["dynamics"] = list(scenario.get("dynamics") or ())
+    scenario["decision_points"] = _checked_decisions(
+        selected, scenario.get("decision_points"), scenario["movable"])
 
     scenario["name"] = selected
     return scenario

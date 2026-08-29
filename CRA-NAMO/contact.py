@@ -217,8 +217,19 @@ def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
     the obstacle instead of walking round it. Shifting the test out to the
     nearest place it could stand keeps the test.
 
-    Returns *p* unchanged when it already is such a place, and None when there is
-    nowhere to shift it to — the caller then genuinely has no line to test.
+    Returns *p* unchanged when it already is such a place, and None when there
+    is nowhere to shift it to. None is a refusal, not a pass: a reference point
+    with no standable spot anywhere near it is one the robot cannot drive to or
+    from, so there is no line to test *because there is no line*. Reading it the
+    other way — no test, therefore no objection — waves every grip point on the
+    obstacle through, which is exactly the check this function exists to keep.
+
+    Which makes it worth looking properly. The nearest point of the boundary is
+    often in the daylight gap beside a body plugging a doorway: a place the
+    robot could not stand, next to a body it could perfectly well walk round to
+    and push. So the nearest point is tried first because it is cheap, and if it
+    is not somewhere the robot fits, the search moves to the part of the
+    boundary that is.
     """
     if not shapely.intersects_xy(blockers, *p):
         return p
@@ -226,8 +237,12 @@ def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
     if boundary.is_empty:
         return None
     q = nearest_points(boundary, Point(p))[0]
-    if not shapely.contains_xy(free_geom, q.x, q.y):
+    if shapely.contains_xy(free_geom, q.x, q.y):
+        return (q.x, q.y)
+    standable = boundary.intersection(free_geom)
+    if standable.is_empty:
         return None
+    q = nearest_points(standable, Point(p))[0]
     return (q.x, q.y)
 
 
@@ -316,11 +331,13 @@ def plan_contact(obs,
     cost = np.full(k, _INF)
     for s in np.flatnonzero(feas[0]):
         p = (float(world[0, s, 0]), float(world[0, s, 1]))
-        if start_ref is None or _clear_line(start_ref, p, free_geom,
-                                            approach_blockers, r):
+        if start_ref is not None and _clear_line(start_ref, p, free_geom,
+                                                 approach_blockers, r):
             cost[s] = math.dist(robot_start, p)
     if not np.isfinite(cost).any():
-        return ContactPlan(False, "cannot reach any grip point on this obstacle")
+        return ContactPlan(
+            False, "the robot has nowhere to stand to reach this obstacle"
+            if start_ref is None else "cannot reach any grip point on this obstacle")
 
     parent = np.full((t_total, k), -1, dtype=np.int64)
     idx = np.arange(k)
@@ -367,7 +384,7 @@ def plan_contact(obs,
             break
         p = (float(world[-1, st, 0]), float(world[-1, st, 1]))
         ref = exit_refs[ex]
-        if ref is None or _clear_line(p, ref, free_geom, exit_blockers, r):
+        if ref is not None and _clear_line(p, ref, free_geom, exit_blockers, r):
             chosen, chosen_exit = st, ex
             break
     if chosen < 0:

@@ -43,6 +43,15 @@ class Config:
     lambda_distance: float = 350.0   # equivalent driving resistance [N]
 
     risk_weight: float = 1.0
+    # Disturbing something at this level or above is not a matter of price: no
+    # detour is worse than bringing a building down, so the search will not
+    # cost such a move at all. Empty disables the hard constraint and leaves
+    # only the surcharge.
+    risk_forbidden_level: str = "extreme"
+    # Measured push force this many times what the label predicts reads as "not
+    # the thing it says it is" and moves the risk up a rung. Only used when no
+    # model is answering; the prompt asks a model to reason this way itself.
+    risk_heavy_ratio: float = 3.0
 
     R_perc: float = 10.0             # perception radius [m]
     sight_width: float = 0.1         # line-of-sight width [m]
@@ -51,13 +60,40 @@ class Config:
     # Soft preference only; zero permits unbiased placement.
     manip_forward_penalty: float = 2.0
     manip_max_frames_per_action: int = 30
+    # What it is worth, in metres of obstacle travel, to leave the map one
+    # roadmap edge less open than it was. This used to be a veto — "no drop pose
+    # may block more edges than the obstacle blocks now" — which is close to
+    # unusable, because a body plugging a doorway sits half inside a wall where
+    # there are no edges to block, so every pose it could legally be pushed to
+    # blocks more than where it stands and the search would sooner call the door
+    # impassable than open it. Priced instead it is sound, but measured on
+    # strategy_demo no weight pays for itself: 0 gives J=40,961 in 54 s, where
+    # 0.002 / 0.005 / 0.05 give 43,054 / 44,152 / 42,147 in 664 / 669 / 305 s —
+    # reordering the shortlist means validating drop poses whose escort then
+    # turns out to be unwalkable. Hence 0.
+    manip_blocked_edge_penalty_m: float = 0.0
 
     contact_required: bool = True
     contact_station_spacing: float = 0.3   # perimeter sample spacing [m]
     contact_max_slide: float = 0.6         # maximum grip slide per step [m]
     contact_clearance: float = 0.01        # contact tolerance [m]
+    # How far the measured push force may differ from the figure the route was
+    # costed with before the route is worth working out again.
+    contact_replan_ratio: float = 1.25
     # Maximum applied force relative to friction; zero disables the limit.
     contact_max_force_ratio: float = 1.0
+    # What the robot physically cannot do, as opposed to what it would rather
+    # not. Both are off by default — a limit is a claim about a particular
+    # machine, and inventing one would quietly make maps unsolvable.
+    #   robot_max_push_force  the push it can produce [N]; anything needing more
+    #                         cannot be moved at all. 0 leaves it unmodelled.
+    #   robot_push_height     how high up the body it pushes [m]. A push at
+    #                         height y tips a body of width w instead of sliding
+    #                         it once y > w / (2*mu) — the mass cancels, so this
+    #                         is a statement about shape alone. 0 unmodelled.
+    robot_max_push_force: float = 0.0
+    robot_push_height: float = 0.0
+    push_friction_mu: float = 0.5
 
     se2_cell: float = 0.15
     se2_n_theta: int = 12
@@ -65,6 +101,12 @@ class Config:
     se2_containment: str = "centroid"
     se2_rot_weight: float | None = None
     se2_goal_candidates: int = 24
+    # When every one of those is a drop pose the search will not accept, ask
+    # once for a shortlist this many times longer. 1 disables it: on
+    # strategy_demo widening cuts refusals from 104 to 35 but costs 16% more J
+    # and 73% more planning, the extra poses being further away and the extra
+    # marginal moves making the plan change its mind between cycles.
+    se2_goal_widen: int = 1
 
     # World motion. Obstacles may travel under their own steam; speed is in the
     # rotation-folded units of cost.se2_path_length, so one number covers both

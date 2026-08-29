@@ -75,6 +75,12 @@ class Roadmap:
                             continue
                         self._try_edge(nid, mid)
 
+    # The ground an edge takes up is the disc the robot occupies swept along it,
+    # which is a round-ended sausage — `cap_style=1`. Flat caps used to cut that
+    # short by a robot radius at each node, so a body parked just off the end of
+    # an edge did not count as blocking it at planning time and then collided
+    # with the robot at execution time, where `Belief.check_robot_collision`
+    # has always buffered with round caps. The two now describe the same ground.
     def _try_edge(self, u: int, v: int):
         a, b = self.nodes[u], self.nodes[v]
         dist = math.hypot(a[0] - b[0], a[1] - b[1])
@@ -85,7 +91,7 @@ class Roadmap:
             return
         key = (u, v) if u < v else (v, u)
         self.edge_len[key] = round(dist, 4)
-        self.edge_corridor[key] = seg.buffer(self.cfg.robot_radius, cap_style=2)
+        self.edge_corridor[key] = seg.buffer(self.cfg.robot_radius, cap_style=1)
         self.adj[u].append(v)
         self.adj[v].append(u)
 
@@ -159,7 +165,7 @@ class Roadmap:
             if self.free_eroded_prep.contains(seg):
                 key = (nid, other) if nid < other else (other, nid)
                 self.edge_len[key] = round(dist, 4)
-                self.edge_corridor[key] = seg.buffer(cfg.robot_radius, cap_style=2)
+                self.edge_corridor[key] = seg.buffer(cfg.robot_radius, cap_style=1)
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
         self._corridor_tree = None      # new corridors, index is stale

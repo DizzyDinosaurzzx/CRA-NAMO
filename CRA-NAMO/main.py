@@ -95,7 +95,8 @@ def main():
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     sim = OnlineNAMO(s["workspace"], s["static"], s["movable"],
-                     s["start"], s["goal"], cfg, events=s.get("dynamics"))
+                     s["start"], s["goal"], cfg, events=s.get("dynamics"),
+                     decision_points=s.get("decision_points"))
     
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
@@ -130,6 +131,10 @@ def main():
     print(f"{'Risk assessments':<{W}} : {len(sim.risk.level):,} seen, "
           f"{len(sim.risk.on_contact):,} revised on contact"
           f"  ({sim.risk.calls:,} calls, mode={sim.risk.mode})")
+    if res.decisions:
+        print(f"{'Decision points':<{W}} : {len(res.decisions):,}")
+        for line in res.decisions:
+            print(f"{'':<{W}}   {line}")
     if res.world_events:
         print(f"{'World events':<{W}} : {len(res.world_events):,}")
         for line in res.world_events:

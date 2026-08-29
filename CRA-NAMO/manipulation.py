@@ -1,6 +1,7 @@
 """Connect world geometry to the obstacle SE(2) planner."""
 
 from __future__ import annotations
+import hashlib
 import math
 from typing import Dict, Optional, Tuple
 from shapely.geometry import Polygon
@@ -66,6 +67,21 @@ def _geometry_signature(geom) -> tuple:
         return ("none",)
     return ("wkb", geom.wkb)
 
+
+def _walls_signature(static_obstacles) -> bytes:
+    """What the walls are, for a cache key.
+
+    The C-space is built around the walls, so two scenarios sharing a bounds and
+    an obstacle size would otherwise share a planner built for the wrong
+    building — one run of a process would answer the next one's questions. The
+    digest is over the geometry itself rather than the identity of the list,
+    because a list is not a thing that stays put.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    for so in static_obstacles:
+        digest.update(so.polygon.wkb)
+    return digest.digest()
+
 def _resolve_cell(bounds: Tuple[float, float, float, float], cfg: Config) -> float:
     xmin, xmax, ymin, ymax = bounds
     bw, bh = xmax - xmin, ymax - ymin
@@ -104,6 +120,7 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
     key = (obs.l, obs.d, bounds, centre, round(work_radius, 6), cell,
            cfg.se2_n_theta, cfg.se2_connectivity, cfg.se2_rot_weight,
            cfg.se2_containment, forward_penalty, transition_safe,
+           _walls_signature(static_obstacles),
            _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
@@ -170,11 +187,19 @@ def plan_move_se2(
     cfg: Config,
     others_polys=None,                  # other movable obstacles to avoid
     goal_accept=None,                   # (goal_pose) -> bool, filters candidate drop poses
+    goal_rank=None,                     # (goal_pose) -> float, extra metres of regret, for ordering
     path_accept=None,                   # (poses) -> bool, extra hard constraint on the whole path
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
     """Plan where to put *obs* so it stops blocking, and how to get it there."""
     try:
-        planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys)
+        # Same C-space the body's own routes are planned in, and for the same
+        # reason: a cell whose centre is clear says nothing about the step into
+        # it, and `_validate` below tests the steps. Planning in cells that are
+        # only clear at their centres means generating routes for the validator
+        # to throw away — and when it throws away all of them, reporting that a
+        # body has nowhere to go when it has somewhere the robot could push it.
+        planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys,
+                               transition_safe=True)
         # reset corridor every time: the blocked edge differs per cycle
         corridor_verts = [geometry.polygon_exterior_coords(p)
                           for p in must_clear_polys] if must_clear_polys else []
@@ -191,8 +216,10 @@ def plan_move_se2(
 
         result = planner.plan_anywhere((obs.x, obs.y, obs.theta),
                                        validate=_validate, goal_accept=goal_accept,
+                                       goal_rank=goal_rank,
                                        n_candidates=cfg.se2_goal_candidates,
-                                       ref_pos=robot_pos)
+                                       ref_pos=robot_pos,
+                                       widen=cfg.se2_goal_widen)
         if not result.success:
             cfg.log(f"[plan_move_se2] oid={obs.oid} {result.reason}")
             return (False, None, math.inf, None)

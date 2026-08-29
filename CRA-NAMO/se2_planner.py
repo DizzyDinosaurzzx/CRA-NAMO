@@ -104,7 +104,13 @@ class SE2Planner:
 
         self._build_moves()
         self._build_cspace()
-        self._cache: Optional[Tuple[np.ndarray, np.ndarray, int]] = None
+        # (dist, parent, start state, how far the search was allowed to reach).
+        # The reach is part of it because a search stopped at a bucket has no
+        # opinion about anything beyond it — it did not find those states
+        # expensive, it never looked — and a later, longer question cannot be
+        # answered from it. None means it ran to exhaustion and answers anything.
+        self._cache: Optional[Tuple[np.ndarray, np.ndarray, int,
+                                    Optional[int]]] = None
 
         if verbose:
             self.logger(f"[se2] oid={self.oid} | "
@@ -484,12 +490,31 @@ class SE2Planner:
         idx = idx[np.argsort(score[idx])]
         return [int(v) for v in idx if np.isfinite(score[v])] or [int(np.argmin(score))]
 
+    def _cache_answers(self, start_flat: int,
+                       max_bucket: Optional[int]) -> bool:
+        """Can the search already in hand answer this question?
+
+        Only if it started in the same place and looked at least as far. A
+        search capped at one radius says nothing about what lies past it, so
+        reusing it for a question that reaches further would read "not looked
+        at" as "cannot be reached" — and the caller would be told an obstacle
+        has nowhere to go when it has somewhere just outside the old cap.
+        """
+        if self._cache is None or self._cache[2] != start_flat:
+            return False
+        reached = self._cache[3]
+        if reached is None:
+            return True                   # it ran out of world, not out of budget
+        return max_bucket is not None and max_bucket <= reached
+
     def plan_anywhere(self,
                       start_pose: Tuple[float, float, float],
                       validate=None,
                       n_candidates: int = 10,
                       goal_accept=None,
-                      ref_pos=None) -> SE2PlanResult:
+                      goal_rank=None,
+                      ref_pos=None,
+                      widen: int = 1) -> SE2PlanResult:
         start_idx = self._snap(*start_pose)
 
         if not self.in_disk[start_idx]:
@@ -515,30 +540,83 @@ class SE2Planner:
             max_bucket = int(max_reach / self.unit)
 
         start_flat = int(self._flat(*start_idx))
-        if self._cache is None or self._cache[2] != start_flat:
-            self._cache = self._search(start_idx, max_bucket=max_bucket) + (start_flat,)
-        dist, parent, _cached_start = self._cache
+        if not self._cache_answers(start_flat, max_bucket):
+            self._cache = (self._search(start_idx, max_bucket=max_bucket)
+                           + (start_flat, max_bucket))
+        dist, parent = self._cache[0], self._cache[1]
 
         one_shot = validate is None and goal_accept is None
-        candidates, reachable = self._select_goal(
-            dist, start_pose, n_best=1 if one_shot else n_candidates,
-            ref_pos=ref_pos)
-        if not reachable:
-            return SE2PlanResult(False, "no reachable pose can clear the path")
+        n_best = 1 if one_shot else n_candidates
+        for widened in (False, True):
+            candidates, reachable = self._select_goal(
+                dist, start_pose, n_best=n_best, ref_pos=ref_pos)
+            if not reachable:
+                return SE2PlanResult(False, "no reachable pose can clear the path")
+            result, refused = self._cheapest_acceptable(
+                candidates, parent, start_pose, validate, goal_accept,
+                self._reorder(candidates, dist, goal_rank))
+            if result is not None:
+                return result
+            # Every pose on the shortlist being one the caller will not have
+            # may be a statement about the length of the shortlist rather than
+            # about the map: an acceptable pose can sit just past the end of it.
+            # Asking for a longer one is what `widen` does — measured on
+            # strategy_demo it turns 104 refusals into 35, and costs 16% more J
+            # and 73% more planning, because the poses it turns up are further
+            # away and the extra marginally-feasible moves make the plan change
+            # its mind from cycle to cycle. Hence off by default.
+            if widened or widen <= 1 or goal_accept is None or refused < len(candidates):
+                break
+            n_best = max(n_candidates, 1) * int(widen)
 
+        if refused == len(candidates):
+            return SE2PlanResult(
+                False, f"every one of {refused:,} candidate drop poses was refused")
+        return SE2PlanResult(False, "all candidate routes failed swept-volume validation")
+
+    def _reorder(self, candidates, dist, goal_rank):
+        """Put the shortlist in the order the caller would rather have it.
+
+        The search ranks drop poses by what it costs to shove the body there.
+        The caller may care about something else as well — where the body ends
+        up leaving the map — and that belongs here, as a preference expressed in
+        the same currency, rather than as a veto. A veto on "leaves the map
+        worse than it found it" reads as "never move anything out of a doorway",
+        because a body in a doorway is half inside a wall and blocks almost
+        nothing, and any place it could legally stand instead is open floor.
+        """
+        if goal_rank is None:
+            return candidates
         nyT = self.ny * self.n_theta
-        fallback = None
-        for best in candidates:
+        scored = []
+        for b in candidates:
+            goal_idx = (b // nyT, (b % nyT) // self.n_theta, b % self.n_theta)
+            scored.append((float(dist[b]) * self.unit
+                           + goal_rank(self._pose(*goal_idx)), b))
+        scored.sort()
+        return [b for _score, b in scored]
+
+    def _cheapest_acceptable(self, candidates, parent, start_pose,
+                             validate, goal_accept, ordered=None):
+        """The best drop pose the caller would actually accept, and how many it would not.
+
+        `goal_accept` is a hard constraint on where the thing may be left, not a
+        preference. A pose it refuses is not a cheaper answer to fall back on,
+        it is not an answer at all: handing one back anyway is how a route that
+        shoves the obstacle back the way it came, or leaves it blocking more
+        than it started with, used to get executed after the search had already
+        ruled it out. It is also the cheap question — a couple of predicates
+        against `validate`, which plans the robot's whole escort — so it is
+        asked first.
+        """
+        nyT = self.ny * self.n_theta
+        refused = 0
+        for best in (candidates if ordered is None else ordered):
             goal_idx = (best // nyT, (best % nyT) // self.n_theta,
                         best % self.n_theta)
             goal_pose = self._pose(*goal_idx)
-            wanted = goal_accept is None or goal_accept(goal_pose)
-            # `validate` is the expensive one — for CA-NAMO it plans the robot's
-            # whole escort — and `goal_accept` is a couple of predicates, so ask
-            # the cheap question first. A drop pose the caller does not want is
-            # only ever validated to fill the one fallback slot; once that is
-            # taken the rest cost nothing but a trace.
-            if not wanted and fallback is not None:
+            if goal_accept is not None and not goal_accept(goal_pose):
+                refused += 1
                 continue
             poses = self._trace(parent, best, start_pose)
             if validate is not None and not validate(poses):
@@ -547,16 +625,10 @@ class SE2Planner:
                         for a, b in zip(poses, poses[1:]))
             rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
             cost = trans + self.rot_weight * rot
-            result = SE2PlanResult(True, "", cost, trans, rot, goal_pose, poses)
-            # candidates come in cost order, so the first accepted one is the
-            # cheapest acceptable drop pose; keep the cheapest overall as fallback
-            if wanted:
-                return result
-            fallback = result
-        if fallback is not None:
-            return fallback
-
-        return SE2PlanResult(False, "all candidate routes failed swept-volume validation")
+            # candidates come in cost order, so the first one through both
+            # filters is the cheapest pose the caller would actually accept
+            return SE2PlanResult(True, "", cost, trans, rot, goal_pose, poses), refused
+        return None, refused
 
     def plan_path(self,
                   start_pose: Tuple[float, float, float],
@@ -584,9 +656,9 @@ class SE2Planner:
             self._cache = None
 
         start_flat = int(self._flat(*start_idx))
-        if self._cache is None or self._cache[2] != start_flat:
-            self._cache = self._search(start_idx) + (start_flat,)
-        dist, parent, _cs = self._cache
+        if not self._cache_answers(start_flat, None):
+            self._cache = self._search(start_idx) + (start_flat, None)
+        dist, parent = self._cache[0], self._cache[1]
 
         goal_flat = int(self._flat(*goal_idx))
         INF = np.int64(1) << 62

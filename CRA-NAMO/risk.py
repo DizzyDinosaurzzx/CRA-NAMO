@@ -6,11 +6,12 @@ import json
 import os
 import re
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import requests
 
 from config import Config
+from llm_difficulty import friction_force, material_mu_rho
 
 LOW = "low"
 MEDIUM = "medium"
@@ -89,6 +90,13 @@ def _normalise(name) -> str:
     return _NON_WORD.sub("_", str(name).strip().lower()).strip("_")
 
 
+def step_up(level: Optional[str]) -> str:
+    """One rung further up the ladder, or the top if already there."""
+    if level is None:
+        return LEVELS[0]
+    return LEVELS[min(_ORDER[level] + 1, len(LEVELS) - 1)]
+
+
 def higher(a: Optional[str], b: Optional[str]) -> Optional[str]:
     """Whichever of two levels is the more dangerous. None counts as no opinion."""
     if a is None:
@@ -125,6 +133,18 @@ def detour_equivalent_m(level: Optional[str]) -> float:
     return RISK_DETOUR_EQUIV_M.get(level, 0.0)
 
 
+def label_of(o: dict, difficulty: Optional[float] = None) -> str:
+    """What the robot currently calls this thing.
+
+    Contact can resolve the label into something more specific — the scenario
+    supplies that as `contact_reveals`, and it is only ever visible once the
+    robot has touched the obstacle, which is what a non-None `difficulty` means.
+    """
+    if difficulty is not None and o.get("contact_reveals"):
+        return _normalise(o["contact_reveals"])
+    return _normalise(o.get("material", "unknown"))
+
+
 class RiskEstimator:
     """Risk per obstacle, assessed on sight and re-assessed on contact.
 
@@ -139,7 +159,9 @@ class RiskEstimator:
         self.level: Dict[int, str] = {}          # oid -> current level
         self.source: Dict[int, str] = {}         # oid -> how it was decided
         self.on_contact: set[int] = set()        # oids re-assessed after touching
-        self.label_cache: Dict[str, str] = {}    # label -> level, to spare repeat calls
+        # What was decided about each *kind* of question, to spare repeat calls.
+        # Keyed by everything the verdict turns on — see `_cache_key`.
+        self.verdict_cache: Dict[tuple, str] = {}
         self.calls = 0
         self.perception_calls = 0
         self._perception_started: Optional[float] = None
@@ -157,29 +179,29 @@ class RiskEstimator:
 
     def assess_many(self, observations: List[dict]) -> Dict[int, str]:
         """Assess newly visible obstacles in one request, within a stage budget."""
-        unresolved: Dict[str, List[dict]] = {}
+        unresolved: Dict[tuple, List[dict]] = {}
         for observation in observations:
             oid = observation["oid"]
             if oid in self.level:
                 continue
-            label = self._label(observation, difficulty=None)
-            cached = self.label_cache.get(label)
+            cached = self.verdict_cache.get(self._cache_key(observation, None))
             if cached is not None:
                 self.level[oid] = cached
                 self.source[oid] = "cache"
             else:
-                unresolved.setdefault(label, []).append(observation)
+                unresolved.setdefault(
+                    self._cache_key(observation, None), []).append(observation)
 
-        representatives = [(label, group[0])
-                           for label, group in unresolved.items()]
-        decided = self._deepseek_many(representatives) if self.api_key else {}
-        for label, group in unresolved.items():
-            level = decided.get(label)
+        groups = list(unresolved.items())
+        decided = (self._deepseek_many([(k[0], g[0]) for k, g in groups])
+                   if self.api_key else {})
+        for i, (key, group) in enumerate(groups):
+            level = decided.get(i)
             source = "deepseek-batch"
             if level is None:
-                level = keyword_level(label)
+                level = keyword_level(key[0])
                 source = "keyword"
-            self.label_cache[label] = level
+            self.verdict_cache[key] = level
             for observation in group:
                 oid = observation["oid"]
                 self.level[oid] = level
@@ -206,41 +228,87 @@ class RiskEstimator:
 
         Including the contact verdict: it was passed on an object with a
         different label or a different size, so touching it again is warranted.
-        The label cache stays — labels have not changed their meaning.
+        The verdict cache stays — it is keyed on the question, and the same
+        question still has the same answer; what changed is which question this
+        obstacle asks.
         """
         self.level.pop(oid, None)
         self.source.pop(oid, None)
         self.on_contact.discard(oid)
 
-    def level_of(self, oid: int) -> Optional[str]:
-        """Current verdict, or None for an obstacle never assessed."""
-        return self.level.get(oid)
+    def level_of(self, oid: int, partners: Sequence[int] = ()) -> Optional[str]:
+        """Current verdict, or None for an obstacle never assessed.
+
+        A body that is propped against others is judged by the company it
+        keeps: shifting it shifts them, so the verdict on the move is the worst
+        of the lot. A shelf that is only a shelf is still only a shelf — but a
+        shelf with a cracked pillar leaning on it is a cracked pillar.
+        """
+        level = self.level.get(oid)
+        for other in partners:
+            level = higher(level, self.level.get(other))
+        return level
+
+    def forbids(self, level: Optional[str]) -> bool:
+        """Is this level one the robot is not allowed to disturb at any price?"""
+        bar = _normalise(self.cfg.risk_forbidden_level)
+        if level is None or bar not in _ORDER:
+            return False
+        return _ORDER[level] >= _ORDER[bar]
 
     def _decide(self, o: dict, difficulty: Optional[float]):
         label = self._label(o, difficulty)
-        cached = self.label_cache.get(label)
+        key = self._cache_key(o, difficulty)
+        cached = self.verdict_cache.get(key)
         if cached is not None:
             return cached, "cache"
         if self.api_key:
             level = self._deepseek(o, label, difficulty)
             if level is not None:
-                self.label_cache[label] = level
+                self.verdict_cache[key] = level
                 return level, "deepseek"
-        level = keyword_level(label)
-        self.label_cache[label] = level
+        level = (keyword_level(label) if difficulty is None
+                 else self._weighed(o, label, difficulty))
+        self.verdict_cache[key] = level
         return level, "keyword"
+
+    def _cache_key(self, o: dict, difficulty: Optional[float]) -> tuple:
+        """Everything the verdict turns on, so that nothing else shares it.
+
+        The label alone used to be the key, and it cost two things. A crate the
+        size of a fist and one the size of a car got the same verdict. And — the
+        expensive one — the second look after touching found the first look
+        already sitting under the same key and handed it straight back, which is
+        the one thing a second look must never do: the whole reason to touch
+        something is that the answer might change. Anything that reaches the
+        prompt belongs here, which is the label, the size, and whether the robot
+        has had its hands on it and what it weighed.
+        """
+        return (label_of(o, difficulty),
+                round(float(o["l"]), 3), round(float(o["d"]), 3),
+                round(float(o.get("h", 1.0)), 3),
+                None if difficulty is None else round(float(difficulty), 3))
+
+    def _weighed(self, o: dict, label: str, difficulty: float) -> str:
+        """The keyword verdict, raised if the thing is heavier than it claims.
+
+        What the prompt asks the model to do, done arithmetically for runs with
+        no model behind them. A body several times harder to push than its own
+        label predicts is not the thing it says it is — a container that calls
+        itself empty and is not, or something with a load on it — and the risk of
+        shifting it is a rung higher than the label alone would say. Lighter than
+        advertised is not evidence of anything, so it never lowers the verdict.
+        """
+        level = keyword_level(label)
+        volume = float(o["l"]) * float(o["d"]) * float(o.get("h", 1.0))
+        expected = friction_force(material_mu_rho(label), volume)
+        if expected > 0.0 and difficulty >= expected * self.cfg.risk_heavy_ratio:
+            return step_up(level)
+        return level
 
     @staticmethod
     def _label(o: dict, difficulty: Optional[float]) -> str:
-        """What the robot currently calls this thing.
-
-        Contact can resolve the label into something more specific — the scenario
-        supplies that as `contact_reveals`, and it is only ever visible once the
-        robot has touched the obstacle.
-        """
-        if difficulty is not None and o.get("contact_reveals"):
-            return _normalise(o["contact_reveals"])
-        return _normalise(o.get("material", "unknown"))
+        return label_of(o, difficulty)
 
     def _build_prompt(self, o: dict, label: str,
                       difficulty: Optional[float]) -> str:
@@ -296,7 +364,7 @@ class RiskEstimator:
                 return name
         return None
 
-    def _deepseek_many(self, items) -> Dict[str, str]:
+    def _deepseek_many(self, items) -> Dict[int, str]:
         if not items or self.cfg.perception_llm_max_calls <= 0:
             return {}
         if self._perception_started is None:
@@ -355,10 +423,10 @@ class RiskEstimator:
                 match = re.search(r"\{.*\}", content, flags=re.DOTALL)
                 parsed = json.loads(match.group(0) if match else content)
                 result = {}
-                for i, (label, _) in enumerate(items):
+                for i, _item in enumerate(items):
                     level = self._parse(str(parsed.get(str(i), "")))
                     if level is not None:
-                        result[label] = level
+                        result[i] = level
                 return result
             except Exception as e:
                 self.cfg.log(f"[risk] batch call failed ({attempt}): {e}")

@@ -59,6 +59,13 @@ class MovableObstacle:
     difficulty: float = 1.0        # true sliding resistance f = mu*rho*V*g [N]; W = difficulty * distance moved [J]
     # Hidden label revealed only through physical contact.
     contact_reveals: str = ""
+    # Bodies this one is propped against, leaning on, or stacked with: shifting
+    # this one disturbs them too. Visible — you can see what is resting on what
+    # — so the belief carries it, and the risk of moving this is at least the
+    # risk of moving any of them. `interaction_risk` says what would happen, in
+    # the same register as `material`: something to be read, not a number.
+    interacts_with: Tuple[int, ...] = ()
+    interaction_risk: str = ""
     oid: int = -1
 
     removed: bool = False          # has been physically moved out of the way
@@ -87,6 +94,8 @@ class MovableObstacle:
         return MovableObstacle(
             x=self.x, y=self.y, l=self.l, d=self.d, h=self.h, theta=self.theta,
             material=self.material, difficulty=math.nan, oid=self.oid,
+            interacts_with=tuple(self.interacts_with),
+            interaction_risk=self.interaction_risk,
         )
 
     def polygon_at(self, x: float, y: float, theta: Optional[float] = None) -> Polygon:
@@ -95,7 +104,7 @@ class MovableObstacle:
 
     def observation(self) -> dict:
         """Return information available through visual perception."""
-        return {
+        o = {
             "oid": self.oid,
             "x": round(self.x, 2), "y": round(self.y, 2),
             "l": self.l, "d": self.d, "h": self.h, "theta": round(self.theta, 3),
@@ -103,6 +112,11 @@ class MovableObstacle:
             "volume": round(self.volume, 2),
             "material": self.material,
         }
+        if self.interacts_with:
+            o["interacts_with"] = tuple(self.interacts_with)
+        if self.interaction_risk:
+            o["interaction_risk"] = self.interaction_risk
+        return o
 
     def contact_observation(self) -> dict:
         """Return visual information plus contact-only properties."""

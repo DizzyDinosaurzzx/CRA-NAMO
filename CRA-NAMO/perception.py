@@ -27,7 +27,17 @@ class Belief:
         self.touched: Set[int] = set()
         self.touched_difficulty: Dict[int, float] = {}
         self.disturbed: Set[int] = set()   # moved by the robot since last seen to change
+        # Seen, with the robot's own eyes, to have gone somewhere by itself.
+        # The difference between "in the way" and "on its way through".
+        self.seen_moving: Set[int] = set()
         self.move_dir: Dict[int, Tuple[float, float]] = {}
+        # Bumped whenever anything a cached plan was built against changes. The
+        # planner puts it in its cache keys, so work costed against one state of
+        # knowledge is never served up against another.
+        self.version = 0
+
+    def _bump(self):
+        self.version += 1
 
     def perceive(self, world_obstacles: List[MovableObstacle],
                  robot_pos: Tuple[float, float]) -> List[int]:
@@ -56,6 +66,8 @@ class Belief:
         if self.risk is not None and new_observations:
             self.risk.assess_many(new_observations)
         self._forget_vacated(world_obstacles, robot_pos)
+        if self.changed:
+            self._bump()
         return self.newly_revealed
 
     def is_stale(self, world_obs: MovableObstacle) -> bool:
@@ -96,6 +108,7 @@ class Belief:
     def _sync(self, known: MovableObstacle, world_obs: MovableObstacle):
         """Update a remembered obstacle from what the robot can now see."""
         old_footprint = known.polygon
+        old_x, old_y, old_theta = known.x, known.y, known.theta
         reshaped = (known.l != world_obs.l or known.d != world_obs.d
                     or known.h != world_obs.h
                     or known.material != world_obs.material)
@@ -107,6 +120,11 @@ class Belief:
         self._update_edges_for(known)
         self._clear_contacts_overlapping(old_footprint)
         self.updated.append(known.oid)
+        if (abs(known.x - old_x) > 1e-9 or abs(known.y - old_y) > 1e-9
+                or abs(known.theta - old_theta) > 1e-9):
+            # It is not where the robot left it, and the robot did not move it —
+            # `relocate` keeps the belief in step when it does.
+            self.seen_moving.add(known.oid)
         if reshaped:
             self._reconsider(known)
 
@@ -123,6 +141,7 @@ class Belief:
         self.touched.discard(obs.oid)
         self.touched_difficulty.pop(obs.oid, None)
         self.disturbed.discard(obs.oid)
+        self._bump()
         if self.estimator is not None:
             self.estimator.forget(obs.oid)
         if self.risk is not None:
@@ -209,11 +228,15 @@ class Belief:
             (merged if c.intersects(region) else rest).append(c)
         rest.append(unary_union(merged) if len(merged) > 1 else region)
         self.contacts = rest
+        self._bump()
 
     def _clear_contacts_overlapping(self, poly: Polygon):
         if not self.contacts:
             return
-        self.contacts = [c for c in self.contacts if not c.intersects(poly)]
+        kept = [c for c in self.contacts if not c.intersects(poly)]
+        if len(kept) != len(self.contacts):
+            self._bump()
+        self.contacts = kept
 
     def force_reveal(self, world_obs: MovableObstacle) -> List[int]:  # reveal full obstacle properties on physical contact
         if world_obs.oid in self.perceived:
@@ -224,6 +247,7 @@ class Belief:
         self._assess_risk(obs)
         self._update_edges_for(obs)
         self._clear_contacts_overlapping(obs.polygon)
+        self._bump()
         return [obs.oid]
 
     def _forget_edges(self, oid: int):  # forget edge-blocking info for this obstacle
@@ -236,6 +260,7 @@ class Belief:
         n = math.hypot(dx, dy)
         if n > 1e-3:
             self.move_dir[oid] = (dx / n, dy / n)
+            self._bump()
 
     def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):  # update obstacle blocking info after relocation
         self._forget_edges(obs.oid)
@@ -243,6 +268,7 @@ class Belief:
         obs.removed = True
         self.disturbed.add(obs.oid)
         self._update_edges_for(obs)
+        self._bump()
 
     def invalidate_contact(self, oid: int):
         """The thing that was measured is not the thing that is standing there.
@@ -258,6 +284,7 @@ class Belief:
         """
         self.touched.discard(oid)
         self.disturbed.discard(oid)
+        self._bump()
 
     @staticmethod
     def _first_contact_t(from_pos, to_pos, poly: Polygon, radius: float,
@@ -325,6 +352,7 @@ class Belief:
                 self.touched_difficulty[w.oid] = w.difficulty
                 self._reassess_risk(w)
                 revealed.append(w.oid)
+                self._bump()
         return revealed
 
     def reveal_by_interaction(self, oid: int,
@@ -341,6 +369,7 @@ class Belief:
                 self.touched.add(oid)
                 self.touched_difficulty[oid] = w.difficulty
                 self._reassess_risk(w)
+                self._bump()
                 return True
         return False
 
@@ -349,21 +378,40 @@ class Belief:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
 
-    def others_union(self, oid: int):
+    def others_union(self, oid: int, relocated=None):
         """Everything known to be in the way apart from obstacle *oid*.
 
         The perceived obstacles plus the anonymous contact regions, minus
         whatever part of a contact region is *oid* itself — a bump recorded
         against the obstacle being moved is not a second thing to steer around.
         Returns None when nothing else is known.
+
+        `relocated` maps oids to poses they are about to be put in rather than
+        the ones they are in. It is how a second obstacle on the same edge gets
+        planned around where the first one is going, instead of around where it
+        was before the plan moved it.
         """
+        relocated = relocated or {}
         body = self.perceived[oid].polygon if oid in self.perceived else None
-        polys = [ob.polygon for other, ob in self.perceived.items() if other != oid]
+        polys = [(ob.polygon_at(*relocated[other]) if other in relocated
+                  else ob.polygon)
+                 for other, ob in self.perceived.items() if other != oid]
         for c in self.contacts:
             part = c if body is None else c.difference(body)
             if not part.is_empty and part.area > 1e-9:
                 polys.append(part)
         return unary_union(polys) if polys else None
+
+    def partners_of(self, oid: int) -> Tuple[int, ...]:
+        """The bodies the robot can see this one is propped against.
+
+        Only the ones it has actually seen: a coupling to something it has never
+        laid eyes on is not knowledge it has, however true it is.
+        """
+        known = self.perceived.get(oid)
+        if known is None:
+            return ()
+        return tuple(p for p in known.interacts_with if p in self.perceived)
 
     def blockers_of(self, key: EdgeKey) -> Set[int]:
         return self.edge_blockers.get(key, set())
