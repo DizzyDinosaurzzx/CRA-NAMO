@@ -141,11 +141,7 @@ def _draw_difficulty_key(fig, ax, colours, low, high):
 
 
 def _poly_path(poly) -> Path:
-    """One matplotlib path for a polygon, holes and all.
-
-    Shapely hands back closed rings — the last point repeats the first — which
-    is exactly what CLOSEPOLY expects to end a subpath with.
-    """
+    """Return a matplotlib path for a polygon and its holes."""
     verts, codes = [], []
     for ring in (poly.exterior, *poly.interiors):
         xy = list(ring.coords)
@@ -158,14 +154,7 @@ def _poly_path(poly) -> Path:
 
 
 def _plot_poly(ax, poly, **kw):  # draw a polygon, leaving its holes empty
-    """Fill a polygon without filling the ground it encloses.
-
-    Filling the exterior ring alone is the same picture for a rectangle and the
-    wrong one for anything with a hole in it. The robot's trail is the buffer of
-    the path it has walked, so the moment that path closes a loop the trail
-    becomes a ring — and painting its exterior floods the middle, which is the
-    one patch of floor the robot has demonstrably *not* driven over.
-    """
+    """Fill polygon shells while preserving holes."""
     kw.setdefault("edgecolor", "none")   # what ax.fill does when given only a face
     for part in getattr(poly, "geoms", (poly,)):
         if part.is_empty or part.geom_type != "Polygon":
@@ -208,30 +197,30 @@ def _draw_roadmap_bg(ax, sim: OnlineNAMO, cur_node: int | None = None):
     xs = [p[0] for p in rm.nodes]
     ys = [p[1] for p in rm.nodes]
     ax.scatter(xs, ys, color=_ROADMAP_NODE, s=0.5, zorder=0.4)
-    # highlight current node; reachable neighbours are not drawn separately
+    # Highlight the current roadmap node.
     if cur_node is not None and 0 <= cur_node < len(rm.nodes):
         hx, hy = rm.nodes[cur_node]
         ax.scatter([hx], [hy], color=_CURRENT_NODE, s=20, marker="s", zorder=4.7)
 
 
-def _draw_plan_paths(ax, frame):  # draw the planned paths being executed at this frame (blue)
+def _draw_plan_paths(ax, frame):  # Draw planned paths for the current frame.
     labeled = set()
     for path in frame.get("plan_paths") or []:
         xs = [p[0] for p in path["pts"]]
         ys = [p[1] for p in path["pts"]]
         if path["kind"] == "route":
-            # robot planned route: blue solid line + small dots at via-nodes
+            # Draw the planned roadmap route.
             label = None if "route" in labeled else "planned path"
             ax.plot(xs, ys, color=_ROUTE, lw=1.8, alpha=0.9, zorder=6,
                     solid_capstyle="round", label=label)
             ax.scatter(xs, ys, color=_ROUTE, s=6, zorder=6.1)
         elif path["kind"] == "contact":
-            # where the robot holds the obstacle while it moves — the contact path
+            # Draw the planned contact path.
             label = None if "contact" in labeled else "planned contact"
             ax.plot(xs, ys, color=_CONTACT, lw=1.2, ls=":", alpha=0.9, zorder=6,
                     label=label)
         else:
-            # obstacle's own SE2 route
+            # Draw the obstacle's planned SE(2) route.
             label = None if "obstacle" in labeled else "planned obstacle route"
             ax.plot(xs, ys, color=_OBSTACLE_ROUTE, lw=1.3, ls="--", alpha=0.85,
                     zorder=6, label=label)
@@ -239,16 +228,16 @@ def _draw_plan_paths(ax, frame):  # draw the planned paths being executed at thi
 
 
 def _draw_static(ax, sim: OnlineNAMO, original_poses):
-    # workspace background
+    # Draw the workspace background.
     _plot_poly(ax, sim.workspace, facecolor=_BACKGROUND, zorder=0)
     ax.plot(*sim.workspace.exterior.xy, color=_WALL_EDGE, lw=1)
-    # static obstacles (walls etc. that are never moved)
+    # Draw static obstacles.
     for so in sim.static_obstacles:
         _plot_poly(ax, so.polygon, facecolor=_WALL, edgecolor=_WALL_EDGE,
                    lw=0.5, zorder=1)
     _draw_flag(ax, sim, sim.start_point, _START, "start")
     _draw_flag(ax, sim, sim.goal_point, _GOAL, "goal")
-    # where each movable obstacle started, for comparison with where it ended up
+    # Draw initial obstacle outlines for comparison.
     for oid, poly in original_poses.items():
         ax.plot(*poly.exterior.xy, color=_GHOST, lw=1, ls="--", alpha=0.8, zorder=2)
 
@@ -339,7 +328,7 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     fig, ax = _new_canvas(sim, title_lines=title.count("\n") + 1)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim)
-    # fill shades true difficulty; the outline says whether the robot moved it
+    # Color fill encodes true difficulty; outline encodes movement.
     colours, low, high = difficulty_palette(sim.world)
     world_moved = set(sim.dynamics.moved_on_own)
     for w in sim.world:
@@ -357,12 +346,12 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     _draw_obstacle_key(ax, show_unperceived=False,
                        show_world_moved=bool(world_moved))
 
-    # draw robot motion trail corridor:
+    # Draw the robot motion trail.
     if len(res.robot_track) >= 2:
         corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
         _plot_poly(ax, corridor, facecolor=_TRAIL, alpha=0.45, zorder=_TRAIL_Z)
     elif res.robot_track:
-        # if only a single point (robot did not move), draw a circle
+        # Draw a circle when the robot did not move.
         p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
         _plot_poly(ax, p, facecolor=_TRAIL, alpha=0.45, zorder=_TRAIL_Z)
     _finish_ax(ax, sim, title)
@@ -375,18 +364,17 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     fig, ax = _new_canvas(sim)
     _draw_static(ax, sim, original_poses)
     _draw_roadmap_bg(ax, sim, cur_node=cur_node)
-    # draw obstacles classified by perception state
+    # Draw obstacles according to perception state.
     colours, low, high = difficulty_palette(sim.world)
     perceived = frame["perceived"]
     world_moved = frame.get("world_moved", ())
     for oid, poly, removed in frame["obstacles"]:
         if oid not in perceived:
-            # unperceived: grey dotted outline only (robot doesn't know where this obstacle is)
+            # Unperceived obstacles use a grey dotted outline.
             ax.plot(*poly.exterior.xy, color=_UNPERCEIVED, lw=1, ls=":",
                     alpha=0.6, zorder=3)
             continue
-        # the obstacle being moved sits above the robot, so a piece carried past
-        # the robot is not hidden by it; on collisions the robot stays on top
+        # Draw the held obstacle above the robot.
         z = 8.5 if oid == frame.get("move_oid") else 3
         edge, lw = _obstacle_edge(oid, removed, world_moved)
         fill = colours.get(oid, _OBSTACLE_EDGE)
@@ -402,16 +390,16 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
                 zorder=max(z + 1, _TRAIL_Z + 1), color=colour,
                 path_effects=_label_effects(colour))
 
-    # draw robot motion trail up to this frame (semi-transparent blue corridor)
+    # Draw the trail up to this frame.
     track = frame["track"]
     if len(track) >= 2:
         buf = LineString(track).buffer(sim.cfg.robot_radius, cap_style=1)
         _plot_poly(ax, buf, facecolor=_TRAIL, alpha=0.4, zorder=_TRAIL_Z)
 
-    # draw all paths given by the planner at this frame (blue lines)
+    # Draw paths supplied by the planner.
     _draw_plan_paths(ax, frame)
 
-    # draw current robot position (filled green circle + dark green centre dot)
+    # Draw the current robot position.
     rx, ry = frame["robot"]
     robot_circle = Point(rx, ry).buffer(sim.cfg.robot_radius)
     _plot_poly(ax, robot_circle, facecolor=_ROBOT, alpha=0.9, zorder=7)
@@ -420,7 +408,7 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
     _draw_obstacle_key(ax, show_unperceived=True,
                        show_world_moved=bool(world_moved))
 
-    # every frame reserves the same title height, or the GIF frames differ in size
+    # Reserve equal title height for every frame.
     title = _lay_out_title([
         ("", [f"step {idx}/{total - 1}", frame["label"]]),
         ("cost", [f"J={frame['J']:,}"]),
@@ -445,7 +433,7 @@ def _shared_palette(buffers, colors: int = 255):
 def _time_sampled(frames, step: float, max_frames: int):
     times = [float(f.get("t", i)) for i, f in enumerate(frames)]
     span = times[-1] - times[0]
-    if span <= 0.0:                       # no clock to speak of, show it as recorded
+    if span <= 0.0:                       # No clock elapsed; keep recorded frames.
         return list(range(len(frames))), step
     step = max(step, span / max(1, max_frames))
     picks = []
@@ -489,4 +477,3 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
     images[0].save(gif_path, save_all=True, append_images=images[1:],
                    duration=durations, loop=0, optimize=True)
     return len(images), step
-

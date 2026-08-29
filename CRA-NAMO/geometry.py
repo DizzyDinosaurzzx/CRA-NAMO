@@ -7,21 +7,13 @@ from typing import Tuple
 
 import numpy as np
 
-# How much overlap counts as "still clear". About 1 mm^2: purely there to absorb
-# convex-hull approximation and floating-point residue, not a licence for real
-# penetration. Planning and execution MUST share it — when planning is the more
-# permissive of the two, it hands the executor paths the executor then rejects,
-# and the manipulation gets blacklisted for a rounding error.
+# Shared overlap tolerance for planning and execution.
 CONTACT_AREA_EPS = 1e-6
 
 
 def rect_corners(cx: float, cy: float, w: float, h: float,
                  theta: float) -> np.ndarray:
-    """Corners of a w x h rectangle centred at (cx, cy), rotated by theta.
-
-    Counter-clockwise, which is what `inside_convex` and `convex_hull` assume.
-    Called with (0, 0, ...) it yields corner offsets in the body frame.
-    """
+    """Return counter-clockwise corners of a rotated rectangle."""
     dx, dy = w / 2.0, h / 2.0
     local = np.array([[-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]], dtype=float)
     c, s = math.cos(theta), math.sin(theta)
@@ -68,7 +60,7 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
     shape = np.broadcast(X, Y).shape
     if n == 0:
         return np.zeros(shape, dtype=bool)
-    if n < 3:  # degenerate case: point or line segment
+    if n < 3:
         a, b = poly[0], poly[-1]
         ab = b - a
         L2 = float(ab @ ab)
@@ -86,7 +78,7 @@ def inside_convex(poly: np.ndarray, X: np.ndarray, Y: np.ndarray,
         L = math.hypot(e[0], e[1])
         if L < 1e-12:
             continue
-        nx, ny = e[1] / L, -e[0] / L  # outward normal of counter-clockwise polygon
+        nx, ny = e[1] / L, -e[0] / L
         inside &= ((X - p[0]) * nx + (Y - p[1]) * ny) <= margin
     return inside
 
@@ -96,7 +88,7 @@ def offset_bbox(poly: np.ndarray, margin: float):
     n = len(poly)
     if n == 0:
         return None
-    if n < 3:      # degenerate point/segment: criterion is "distance <= margin", just expand bbox
+    if n < 3:
         return (poly[:, 0].min() - margin, poly[:, 0].max() + margin,
                 poly[:, 1].min() - margin, poly[:, 1].max() + margin)
 
@@ -119,7 +111,7 @@ def offset_bbox(poly: np.ndarray, margin: float):
         (ax, ay), ca = normals[i - 1], offsets[i - 1]
         (bx, by), cb = normals[i], offsets[i]
         det = ax * by - ay * bx
-        if abs(det) < 1e-12:      # adjacent edges collinear: vertex does not exist, skip
+        if abs(det) < 1e-12:
             continue
         xs.append((ca * by - cb * ay) / det)
         ys.append((ax * cb - bx * ca) / det)
@@ -129,11 +121,7 @@ def offset_bbox(poly: np.ndarray, margin: float):
 
 
 def mean_rotation_radius(w: float, h: float) -> float:
-    """Mean distance from the centroid to a point of a w x h rectangle.
-
-    Converts an angle into an equivalent translation distance, so rotating and
-    sliding can be summed into one path length.
-    """
+    """Return the mean centroid radius used to price rotation as distance."""
     if w <= 0.0 or h <= 0.0:
         return 0.0
     s = math.hypot(w, h)
@@ -143,14 +131,7 @@ def mean_rotation_radius(w: float, h: float) -> float:
 
 
 def wrap_dtheta(a: float, b: float) -> float:
-    """Shortest turn from a to b, modulo pi.
-
-    A rectangle at theta and theta+pi has the same footprint, so orientation is
-    only meaningful mod pi. Everything that follows a body's rotation — swept
-    volumes, rotation cost, contact grip points — must go through this, and
-    anything tracking a body-fixed point must *accumulate* it rather than read
-    the stored angle, or it will jump half a turn when the index wraps.
-    """
+    """Return the shortest rectangle rotation modulo pi."""
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
 
 
@@ -176,4 +157,3 @@ def polygon_exterior_coords(polygon) -> np.ndarray:
     if len(coords) >= 2 and coords[0] == coords[-1]:
         coords = coords[:-1]
     return np.array(coords, dtype=float)
-

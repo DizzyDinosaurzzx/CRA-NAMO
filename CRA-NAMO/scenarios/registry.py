@@ -28,23 +28,13 @@ def names() -> tuple[str, ...]:
     ))
 
 
-# Keys of a decision point that name obstacles and nothing else. Anything under
-# one of these has to be an oid the scenario actually contains, or the authored
-# account of what the map is testing has drifted from the map. `avoid` is left
-# out on purpose: it holds an obstacle in some maps and the name of a route to
-# stay off in others, and there is no telling which from here.
+# Decision-point keys whose values must reference existing obstacle IDs.
 _OID_KEYS = ("risky", "partners", "safer_alternative",
              "temporary_obstacles", "obstacles")
 
 
 def _checked_decisions(name: str, points, movable) -> list[dict]:
-    """Validate the authored decision points against the obstacles that exist.
-
-    These describe what a map is *for* — which choice it puts to the robot, and
-    which way out is the trap. Nothing enforced them, so they were free to go on
-    naming obstacles that had been renumbered or deleted, and to keep looking
-    authoritative while doing it.
-    """
+    """Validate decision-point obstacle references."""
     oids = {obs.oid for obs in movable}
     checked = []
     for i, point in enumerate(points or ()):
@@ -92,7 +82,7 @@ def load(name: str | None = None) -> dict[str, Any]:
             raise ValueError(f"Map {selected!r}: {field} must be a single (x, y) point")
         scenario[field] = (float(point[0]), float(point[1]))
 
-    # Optional: what the world does on its own. Absent means a static map.
+    # Missing dynamics means a static map.
     scenario["dynamics"] = list(scenario.get("dynamics") or ())
     scenario["decision_points"] = _checked_decisions(
         selected, scenario.get("decision_points"), scenario["movable"])

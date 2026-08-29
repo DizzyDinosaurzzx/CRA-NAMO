@@ -22,18 +22,14 @@ class Belief:
         self.perceived: Dict[int, MovableObstacle] = {}
         self.edge_blockers: Dict[EdgeKey, Set[int]] = {}
         self.newly_revealed: List[int] = []
-        self.updated: List[int] = []     # known obstacles seen to have changed
+        self.updated: List[int] = []
         self.contacts: List[Polygon] = []
         self.touched: Set[int] = set()
         self.touched_difficulty: Dict[int, float] = {}
-        self.disturbed: Set[int] = set()   # moved by the robot since last seen to change
-        # Seen, with the robot's own eyes, to have gone somewhere by itself.
-        # The difference between "in the way" and "on its way through".
+        self.disturbed: Set[int] = set()
         self.seen_moving: Set[int] = set()
         self.move_dir: Dict[int, Tuple[float, float]] = {}
-        # Bumped whenever anything a cached plan was built against changes. The
-        # planner puts it in its cache keys, so work costed against one state of
-        # knowledge is never served up against another.
+        # Planner caches include this version to prevent stale route reuse.
         self.version = 0
 
     def _bump(self):
@@ -71,13 +67,7 @@ class Belief:
         return self.newly_revealed
 
     def is_stale(self, world_obs: MovableObstacle) -> bool:
-        """Is this body no longer where — or no longer what — the robot last saw?
-
-        Only asked of the world, never of the belief: it is how the *simulator*
-        decides whether the robot could have known about something, not a way for
-        the robot to find out. A body it has never seen is not stale, it is
-        unknown, and being run into is how that gets discovered.
-        """
+        """Return whether a perceived body no longer matches reality."""
         known = self.perceived.get(world_obs.oid)
         return known is not None and not self._matches(known, world_obs)
 
@@ -122,22 +112,13 @@ class Belief:
         self.updated.append(known.oid)
         if (abs(known.x - old_x) > 1e-9 or abs(known.y - old_y) > 1e-9
                 or abs(known.theta - old_theta) > 1e-9):
-            # It is not where the robot left it, and the robot did not move it —
-            # `relocate` keeps the belief in step when it does.
+            # A moved obstacle invalidates the remembered pose unless relocated by the robot.
             self.seen_moving.add(known.oid)
         if reshaped:
             self._reconsider(known)
 
     def _reconsider(self, obs: MovableObstacle):
-        """It is not the thing it was, so judgements about the old one lapse.
-
-        Size and label are what the difficulty estimator and the risk model read,
-        so a change the robot can see invalidates both, and what it learned by
-        touching goes with them — that difficulty belonged to the old object. A
-        change it *cannot* see, a difficulty rewritten behind an unchanged label,
-        stays believed until it next takes hold of the thing. That is the price
-        of not being told in advance.
-        """
+        """Clear estimates whose visible shape or label no longer matches."""
         self.touched.discard(obs.oid)
         self.touched_difficulty.pop(obs.oid, None)
         self.disturbed.discard(obs.oid)
@@ -149,13 +130,7 @@ class Belief:
             self.risk.assess(obs.observation())
 
     def _forget_vacated(self, world_obstacles: List[MovableObstacle], robot_pos):
-        """Drop memories the robot can see are wrong.
-
-        A remembered footprint in plain view with nothing standing in it is a
-        memory contradicted by what the robot is looking at. Without this, the
-        ghost of anything that wandered off out of sight would go on blocking the
-        roadmap for the rest of the run.
-        """
+        """Remove visible memories whose stored footprint is gone."""
         real = {w.oid: w for w in world_obstacles}
         rp = Point(robot_pos)
         gone = [oid for oid, known in self.perceived.items()
@@ -168,7 +143,7 @@ class Belief:
             self.updated.append(oid)
         return gone
 
-    def _half_edge_samples(self, obs: MovableObstacle):  # line-of-sight samples from 8 obstacle points
+    def _half_edge_samples(self, obs: MovableObstacle):
         coords = list(obs.polygon.exterior.coords)[:-1]
         n = len(coords)
         halves = []
@@ -184,15 +159,13 @@ class Belief:
     def _point_visible(self, robot_pos, p,
                        target: MovableObstacle,
                        world_obstacles: List[MovableObstacle]) -> bool:
-        # line-of-sight check
         seg = LineString([robot_pos, p])
         width = self.cfg.sight_width
         sight = seg.buffer(width / 2.0, cap_style=2) if width > 0 else seg
-        # wall occlusion: a ray is blocked once it leaves the static free space (= workspace minus walls)
+        # Static free space handles wall occlusion.
         if not self.roadmap.static_free_prep.contains(sight):
             return False
-        # occlusion by other movable obstacles; a blocker no taller than half the
-        # target still leaves the target's upper half exposed, so it does not occlude
+        # A short blocker leaves the target's upper half visible.
         for w in world_obstacles:
             if w.oid == target.oid or w.h <= target.h / 2.0 + 1e-9:
                 continue
@@ -220,7 +193,7 @@ class Belief:
             region = region.difference(obs.polygon)
             if region.is_empty:
                 return
-        if region.area <= 1e-9:      # only floating-point fragments remain
+        if region.area <= 1e-9:
             return
         merged = [region]
         rest = []
@@ -238,7 +211,7 @@ class Belief:
             self._bump()
         self.contacts = kept
 
-    def force_reveal(self, world_obs: MovableObstacle) -> List[int]:  # reveal full obstacle properties on physical contact
+    def force_reveal(self, world_obs: MovableObstacle) -> List[int]:
         if world_obs.oid in self.perceived:
             return []
         obs = world_obs.perceived_copy()
@@ -250,19 +223,19 @@ class Belief:
         self._bump()
         return [obs.oid]
 
-    def _forget_edges(self, oid: int):  # forget edge-blocking info for this obstacle
+    def _forget_edges(self, oid: int):
         for blockers in self.edge_blockers.values():
             blockers.discard(oid)
 
     def record_move_direction(self, oid: int, from_xy, to_xy):
-        """Remember which way this obstacle was last moved (pure rotations keep the old direction)"""
+        """Store the latest non-zero movement direction."""
         dx, dy = to_xy[0] - from_xy[0], to_xy[1] - from_xy[1]
         n = math.hypot(dx, dy)
         if n > 1e-3:
             self.move_dir[oid] = (dx / n, dy / n)
             self._bump()
 
-    def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):  # update obstacle blocking info after relocation
+    def relocate(self, obs: MovableObstacle, x: float, y: float, theta: float):
         self._forget_edges(obs.oid)
         obs.x, obs.y, obs.theta = x, y, theta
         obs.removed = True
@@ -271,17 +244,7 @@ class Belief:
         self._bump()
 
     def invalidate_contact(self, oid: int):
-        """The thing that was measured is not the thing that is standing there.
-
-        Called when ground truth changed where the robot could not see it. What
-        it believes it measured stays believed — it has no way of knowing the
-        object was rewritten behind its back, and being quietly handed the new
-        figure is exactly the free lunch this module exists to prevent. What
-        lapses is the record of *having* measured it, so the next time the robot
-        takes hold of the thing it reads it again instead of trusting a number
-        that belonged to the old one. Having disturbed the old one lapses with
-        it: shifting what is there now is a fresh decision, at a fresh price.
-        """
+        """Forget contact measurements invalidated by hidden world changes."""
         self.touched.discard(oid)
         self.disturbed.discard(oid)
         self._bump()
@@ -316,7 +279,7 @@ class Belief:
         self, from_pos, to_pos,
         world_obstacles: List[MovableObstacle],
         cfg: Config,
-    ) -> Tuple[List[int], float]:  # check whether the robot hits any obstacle
+    ) -> Tuple[List[int], float]:
         corridor = LineString([from_pos, to_pos]).buffer(cfg.robot_radius, cap_style=1)
         candidates = [w for w in world_obstacles
                       if w.oid not in self.perceived
@@ -329,7 +292,7 @@ class Belief:
         t_hit = min(ts)
         revealed: List[int] = []
         for w, t in zip(candidates, ts):
-            if t <= t_hit + 1e-6:          # group simultaneous hits together
+            if t <= t_hit + 1e-6:
                 self.force_reveal(w)
                 revealed.append(w.oid)
         return revealed, t_hit
@@ -357,11 +320,7 @@ class Belief:
 
     def reveal_by_interaction(self, oid: int,
                               world_obstacles: List[MovableObstacle]) -> bool:
-        """Any physical interaction reveals the true difficulty, not only collisions.
-
-        Pushing requires contact by definition, so the robot cannot have moved an
-        obstacle while still being ignorant of how hard it was to move.
-        """
+        """Reveal true difficulty whenever the robot physically interacts."""
         if oid in self.touched:
             return False
         for w in world_obstacles:
@@ -373,24 +332,13 @@ class Belief:
                 return True
         return False
 
-    def get_difficulty(self, oid: int, estimator) -> float:  # return formal difficulty, preserving any previously known true value
+    def get_difficulty(self, oid: int, estimator) -> float:  # Return true contact difficulty when known.
         if oid in self.touched_difficulty:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
 
     def others_union(self, oid: int, relocated=None):
-        """Everything known to be in the way apart from obstacle *oid*.
-
-        The perceived obstacles plus the anonymous contact regions, minus
-        whatever part of a contact region is *oid* itself — a bump recorded
-        against the obstacle being moved is not a second thing to steer around.
-        Returns None when nothing else is known.
-
-        `relocated` maps oids to poses they are about to be put in rather than
-        the ones they are in. It is how a second obstacle on the same edge gets
-        planned around where the first one is going, instead of around where it
-        was before the plan moved it.
-        """
+        """Return known exclusions for an obstacle, including planned relocations."""
         relocated = relocated or {}
         body = self.perceived[oid].polygon if oid in self.perceived else None
         polys = [(ob.polygon_at(*relocated[other]) if other in relocated
@@ -403,11 +351,7 @@ class Belief:
         return unary_union(polys) if polys else None
 
     def partners_of(self, oid: int) -> Tuple[int, ...]:
-        """The bodies the robot can see this one is propped against.
-
-        Only the ones it has actually seen: a coupling to something it has never
-        laid eyes on is not knowledge it has, however true it is.
-        """
+        """Return visible obstacles coupled to this one."""
         known = self.perceived.get(oid)
         if known is None:
             return ()

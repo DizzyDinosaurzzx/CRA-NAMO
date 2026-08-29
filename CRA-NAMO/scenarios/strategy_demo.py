@@ -1,9 +1,4 @@
-"""Scenario exercising cost, risk, hidden state, and online replanning.
-
-The route tests five decisions: avoiding an occupied wheelchair, moving a light
-cart, discovering a hidden blocker, reassessing a sealed crate on contact, and
-detouring around heavy steel shelving.
-"""
+"""Scenario covering cost, risk, hidden state, and online replanning."""
 
 from __future__ import annotations
 
@@ -21,16 +16,16 @@ XY = Tuple[float, float]
 _SHELL_T = 0.5
 _WALL_T = 0.6
 
-# Total clearance around a doorway plug, split between both sides.
+# Total clearance around a doorway plug.
 _DOOR_DAYLIGHT = 0.6
 
-# Door tuples contain (fraction along the wall, opening width).
+# Door tuples contain (fraction along wall, opening width).
 _WEST_WALL = ((12.0, 0.3), (15.0, 23.7))
 _CABINET_DOOR = (0.12, 2.6)
 _WHEELCHAIR_DOOR = (0.45, 1.8)
 _CART_DOOR = (0.92, 2.6)
 
-# Keep the hidden block's wall gap narrower than the robot.
+# Keep the hidden block's gap narrower than the robot.
 _TRAP_GAP = 0.35
 
 _EAST_WALL = ((25.0, 0.3), (22.0, 23.7))
@@ -151,18 +146,18 @@ def create():
     ]
 
     movable = [
-        # Cheap to move physically, but avoided because of occupant risk.
+        # Cheap physically but avoided because of occupant risk.
         _plug(wheelchair_door, d=0.85, h=1.3, material="occupied_wheelchair",
               difficulty=28.0, oid=1),
-        # Cheap cart concealing an expensive blocker.
+        # Cheap cart conceals an expensive blocker.
         _plug(cart_door, d=0.9, h=1.0, material="empty_cart", oid=2),
         _behind(cart_door, d=0.9, h=1.0, material="concrete_block", oid=3),
         _plug(cabinet_door, d=0.9, h=1.8, material="filing_cabinet", oid=4),
-        # Contact reveals hazardous contents and triggers reassessment.
+        # Contact reveals hazardous contents.
         _plug(sealed_door, d=0.7, h=1.0, material="sealed_crate",
               contact_reveals="crate_of_gas_cylinders", difficulty=1200.0, oid=5),
         _plug(crate_door, d=0.9, h=1.0, material="wooden_crate", oid=6),
-        # Heavy shelving makes detouring cheaper than manipulation.
+        # Heavy shelving makes detouring cheaper.
         _shelf(_SHELF_ENDS, d=1.2, h=2.0, material="steel_shelf", oid=7),
     ]
 

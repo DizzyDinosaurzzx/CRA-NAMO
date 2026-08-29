@@ -17,16 +17,7 @@ _SWEPT_MAX_DTHETA = math.pi / 12.0  # baseline for a ~1 m² obstacle (half-diag 
 _SWEPT_REF_HALF_DIAG = 0.5
 
 def swept_between(obs: MovableObstacle, a, b) -> Polygon:
-    """Region swept as *obs* moves from pose *a* to pose *b*.
-
-    Interpolates the motion and unions the convex hull of each consecutive pair.
-    A hull approximates the arc of a rotation by its chord, so the bulge between
-    chord and arc is missed — a false negative, exactly the kind that makes a
-    path look safe at planning time and graze something at execution time. The
-    bulge is `R(1 - cos(dtheta/2))` and scales with body size, so the angular
-    step is scaled inversely: small parts keep a coarse 15 degrees, long ones get
-    subdivided until their missed bulge is comparable.
-    """
+    """Return an interpolated swept region between two obstacle poses."""
     ax, ay, ath = a
     bx, by, bth = b
     dtheta = geometry.wrap_dtheta(ath, bth)
@@ -69,14 +60,7 @@ def _geometry_signature(geom) -> tuple:
 
 
 def _walls_signature(static_obstacles) -> bytes:
-    """What the walls are, for a cache key.
-
-    The C-space is built around the walls, so two scenarios sharing a bounds and
-    an obstacle size would otherwise share a planner built for the wrong
-    building — one run of a process would answer the next one's questions. The
-    digest is over the geometry itself rather than the identity of the list,
-    because a list is not a thing that stays put.
-    """
+    """Return a geometry digest for caching C-space planners."""
     digest = hashlib.blake2b(digest_size=16)
     for so in static_obstacles:
         digest.update(so.polygon.wkb)
@@ -97,18 +81,7 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
                  work_radius: Optional[float] = None,
                  forward_penalty: Optional[float] = None,
                  transition_safe: bool = False) -> se2_planner.SE2Planner:
-    """Planner for one body in one arrangement of the world.
-
-    The reachable disc is centred on the body itself, which is what `R_manip`
-    has always been documented to mean — how far an obstacle may be relocated
-    from where it stands. Anchoring it there rather than to the robot is what
-    lets one planner serve every edge of a cycle and keep the Dijkstra result it
-    has already paid for; where the robot is standing enters only as the
-    drop-pose bias, which `plan_anywhere` takes per call.
-
-    An obstacle moving under its own steam overrides both: the whole map is in
-    reach and there is nobody to be nudged away from.
-    """
+    """Return a cached SE(2) planner for one obstacle and world arrangement."""
     forward_penalty = (cfg.manip_forward_penalty if forward_penalty is None
                        else forward_penalty)
     cell = _resolve_cell(bounds, cfg)
@@ -124,10 +97,10 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
            _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
-        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # mark as most recently used
+        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # Mark as most recently used.
         return planner
 
-    # static walls + other movable obstacles, together as impassable region
+    # Static and movable exclusions share one C-space.
     walls = [so.polygon for so in static_obstacles] + _polygon_parts(others_polys)
     planner = se2_planner.build_se2_planner(
         wall_polys=walls,
@@ -146,18 +119,13 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
     )
     _PLANNER_CACHE[key] = planner
     while len(_PLANNER_CACHE) > _PLANNER_CACHE_MAX:
-        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # evict least recently used
+        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # Evict the least-recently-used entry.
     return planner
 
 
 
 def path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
-    """Does the body clear every blocker along the whole path?
-
-    Uses the shared `geometry.CONTACT_AREA_EPS`, the same tolerance the executor
-    applies — a planner that is more permissive than the executor produces routes
-    the executor then refuses.
-    """
+    """Return whether the swept body path clears every blocker."""
     if not path or len(path) < 2 or not blockers:
         return True
     for a, b in zip(path, path[1:]):
@@ -210,23 +178,12 @@ def move_se2_options(
     goal_rank=None,                     # (goal_pose) -> float, extra metres of regret, for ordering
     path_accept=None,                   # (poses) -> bool, extra hard constraint on the whole path
 ):
-    """Every place *obs* could be put so it stops blocking, cheapest push first.
-
-    Yields `(poses, push cost, drop pose)` for each one that clears the corridor,
-    survives swept-volume validation and can actually be escorted there. The
-    caller picks — push cost is not the whole bill, and the order here is only by
-    push cost, so the cheapest push is not always the cheapest move.
-    """
+    """Yield candidate obstacle relocations ordered by push cost."""
     try:
-        # Same C-space the body's own routes are planned in, and for the same
-        # reason: a cell whose centre is clear says nothing about the step into
-        # it, and `_validate` below tests the steps. Planning in cells that are
-        # only clear at their centres means generating routes for the validator
-        # to throw away — and when it throws away all of them, reporting that a
-        # body has nowhere to go when it has somewhere the robot could push it.
+        # Use the same swept-volume-safe C-space as obstacle routing.
         planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys,
                                transition_safe=True)
-        # reset corridor every time: the blocked edge differs per cycle
+        # The blocked corridor may change between planning cycles.
         corridor_verts = [geometry.polygon_exterior_coords(p)
                           for p in must_clear_polys] if must_clear_polys else []
         planner.set_corridor([c for c in corridor_verts if len(c) >= 3])
@@ -236,8 +193,7 @@ def move_se2_options(
         def _validate(poses):
             if not path_is_clear_against(obs, poses, blockers):
                 return False
-            # the obstacle can go there, but only counts as a solution if the
-            # robot can escort it the whole way while staying in contact
+            # A candidate is valid only if the robot can escort it in contact.
             return path_accept is None or path_accept(poses)
 
         for result in planner.acceptable_goals(
@@ -247,7 +203,7 @@ def move_se2_options(
                 widen=cfg.se2_goal_widen):
             end_poly = obs.polygon_at(*result.goal)
             if any(end_poly.intersects(p) for p in (must_clear_polys or [])):
-                continue    # does not actually clear the corridor after all
+                continue
             yield (result.path, result.cost, result.goal)
         reason = planner._last_refusal.reason
         if reason:
@@ -257,15 +213,7 @@ def move_se2_options(
 
 
 def _split_mixed_leg(obs: MovableObstacle, a, b, blockers) -> Optional[list]:
-    """Turn one leg that both slides and turns into two that do one thing each.
-
-    The SE(2) move set never combines the two — every planned leg is a pure
-    slide or a pure pivot, which is what the C-space was built to answer for.
-    The one leg that mixes them is the one joining the body's true pose to the
-    grid pose the search started from, and it is the one that clips door jambs.
-    Doing the two halves in turn is a motion of the kind the planner validated;
-    which half goes first is whichever of the two is clear.
-    """
+    """Split a mixed translation-and-rotation leg into two validated legs."""
     for middle in ((b[0], b[1], a[2]), (a[0], a[1], b[2])):
         if path_is_clear_against(obs, [a, middle, b], blockers):
             return [a, middle, b]
@@ -273,15 +221,7 @@ def _split_mixed_leg(obs: MovableObstacle, a, b, blockers) -> Optional[list]:
 
 
 def _verified_prefix(obs: MovableObstacle, path, blockers, cfg: Config) -> list:
-    """The longest part of *path* the body can be shown to travel safely.
-
-    The search answers in cell centres, so what it hands back is a sequence of
-    poses that are each clear rather than a motion that is clear throughout: a
-    grid pose either side of a door jamb says nothing about the corner between
-    them. Every leg is therefore swept and tested against the walls and the
-    other bodies before the route is believed, and the route is cut at the first
-    leg that cannot be shown to be clear.
-    """
+    """Return the longest prefix whose swept legs pass collision validation."""
     if not path or len(path) < 2:
         return []
     out = [path[0]]
@@ -304,21 +244,7 @@ def plan_route_se2(obs: MovableObstacle,
                    bounds: Tuple[float, float, float, float],
                    cfg: Config,
                    others_polys=None) -> Optional[list]:
-    """Plan an obstacle's own route from where it stands to *goal_pose*.
-
-    The counterpart of `plan_move_se2` for a body that moves under its own
-    steam: no corridor to clear, no drop pose to choose, and no robot to stay
-    within reach of — only "get from here to there without hitting anything".
-    Returns the pose list, or None when there is no route.
-
-    The route comes back swept-volume verified, the same way `plan_move_se2`
-    verifies the robot's manipulations. Nothing downstream re-tests it against
-    the walls, so this is the only place a body under its own steam is stopped
-    from cutting a corner off a doorway. It is planned in a C-space that keeps
-    enough clearance for the step between two cells to be as clear as the cells
-    themselves, so the verification is a check on the answer rather than the
-    thing standing between the body and the wall.
-    """
+    """Plan and swept-validate a route for an independently moving obstacle."""
     try:
         planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys,
                                work_radius=float("inf"), forward_penalty=0.0,

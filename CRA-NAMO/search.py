@@ -20,11 +20,11 @@ import manipulation
 class Plan:
     cost: float
     node_path: List[int]
-    actions: List[dict]                  # ordered sequence of 'move' / 'remove' actions
+    actions: List[dict]                  # Ordered move and removal actions.
     expansions: int
 
 
-_MOVE_DIR_EPS = 1e-3    # below this displacement a drop pose carries no move direction
+_MOVE_DIR_EPS = 1e-3    # Smaller displacements do not define a direction.
 
 
 def move_signature(obs) -> tuple:
@@ -32,15 +32,7 @@ def move_signature(obs) -> tuple:
 
 
 class FailedMoves:
-    """Manipulations the executor tried and could not carry out.
-
-    Keeping them is what stops the planner proposing, cycle after cycle, the
-    move that has just failed. On a map that moves, though, a refusal is only
-    good for the arrangement of the world it was collected in: the escort that
-    could not be walked because something stood in the way is walkable once that
-    something drives off. Each entry therefore carries the world version it
-    failed under, and is dropped as soon as the world moves on from it.
-    """
+    """Track failed manipulations until the world state changes."""
 
     def __init__(self):
         self._at: Dict[tuple, int] = {}
@@ -76,10 +68,7 @@ class Planner:
         self.risk = risk_estimator
         self.cfg = cfg
         self.failed_moves = FailedMoves() if failed_moves is None else failed_moves
-        # How long the robot has already stood waiting for each set of bodies to
-        # get out of the way. Keyed by what it is waiting *for* and not by which
-        # edge it is standing at: a door is several parallel edges, and a tally
-        # per edge lets a robot wait out its patience on each of them in turn.
+        # Wait budgets are keyed by blocker sets rather than individual edges.
         self.wait_budget: Dict[tuple, float] = (
             {} if wait_budget is None else wait_budget)
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
@@ -90,13 +79,7 @@ class Planner:
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
 
-        # Whether which way the robot is facing is part of where it is. Turning
-        # costs time and no energy, so with the objective all energy it cannot
-        # change which route is best and carrying it would buy nothing but
-        # states. With time in the objective it can: a route of two long
-        # straights beats one of ten short zigzags of the same length, and a
-        # search that cannot tell them apart is not minimising what the executor
-        # will be billed for.
+        # Track heading only when the objective prices time.
         track = cfg.time_importance > 0.0
         profile = cfg.free_profile()
 
@@ -106,9 +89,7 @@ class Planner:
             return cost.combine(cfg, 0.0, profile.rotate_time(
                 kinematics.turn_between(heading, course)))
 
-        # Clear persistent cache if new obstacles were revealed since the last
-        # plan call — that changes the others_polys geometry for every removal
-        # and would invalidate previously cached move plans.
+        # New observations invalidate cached removal plans.
         if self.belief.changed:
             self.forget_removals()
 
@@ -129,7 +110,7 @@ class Planner:
             f, bias, _, state = heapq.heappop(open_heap)
             node = state[0] if track else state
             g = g_best.get(state, math.inf)
-            if f > incumbent + 1e-9:            # branch-and-bound pruning
+            if f > incumbent + 1e-9:
                 continue
             if node == goal_node:
                 incumbent = g
@@ -186,15 +167,7 @@ class Planner:
         self._persistent_removal_cache.clear()
 
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
-        """Cost of traversing one edge, and what has to happen first.
-
-        Returns C, not J: how energy and time are weighed against each other
-        lives in `cost.combine`. This function only decides *what* has to be
-        done — which is not always moving something. A body the robot has
-        watched drive itself somewhere is a body that may drive itself away
-        again, and standing still until it does is an option with a price, so it
-        goes up against the price of shifting it and the price of going round.
-        """
+        """Return edge objective cost and any required preparatory actions."""
         base = cost.edge_cost(self.cfg, self.roadmap.edge_len[key])
         blockers = self.belief.blockers_of(key)
         if not blockers:
@@ -203,10 +176,7 @@ class Planner:
         wait = self._wait_option(key, blockers)
         removals = []
         extra = 0.0
-        # Sorted, because the order two obstacles come off an edge is a decision
-        # and not something to be left to how a set happens to iterate; and
-        # sequential, because the second one has to be planned around where the
-        # first one is going rather than around where it is standing now.
+        # Sort and plan removals sequentially for deterministic dependencies.
         moved_ahead: Dict[int, tuple] = {}
         for oid in sorted(blockers):
             feasible, work, drop, move_dist, move_path, cplan = self._removal(
@@ -234,15 +204,7 @@ class Planner:
             for (oid, drop, move_dist, work, move_path, cplan) in removals]
 
     def _wait_option(self, key: EdgeKey, blockers) -> Optional[float]:
-        """What standing still in front of this edge would cost, if it is an option.
-
-        Only for edges blocked by things the robot has actually watched move on
-        their own. Anything else is furniture, and waiting for furniture to walk
-        away is not a plan. The wait is priced as what one step of standing
-        still costs — no distance, no work, just the clock — and it is withdrawn
-        once the robot has spent its patience on this edge, so a way that never
-        opens cannot be waited on for ever.
-        """
+        """Return the cost of one allowed wait step, or None."""
         moving = getattr(self.belief, "seen_moving", ())
         if not moving or self.cfg.dynamic_wait_step <= 0.0:
             return None
@@ -254,31 +216,13 @@ class Planner:
         return cost.combine(self.cfg, 0.0, self.cfg.dynamic_wait_step)
 
     def _risk_to_charge(self, oid: int):
-        """This obstacle's risk level, or None if it would be a second charge.
-
-        The surcharge buys the decision to disturb something at all, so it is paid
-        once. An obstacle already shifted has paid; shifting it again is only the
-        work of shifting it. What the world rewrites while nobody is looking is
-        not the thing that was paid for, so `Belief.invalidate_contact` takes the
-        receipt back and the next decision to disturb it is priced afresh.
-        """
+        """Return the risk surcharge level unless it was already paid."""
         if self.risk is None or oid in self.belief.disturbed:
             return None
         return self.risk.level_of(oid, self.belief.partners_of(oid))
 
     def _off_limits(self, oid: int, obs) -> str:
-        """Why this body may not be moved at all, if it may not.
-
-        Three ways a thing can be beyond the reach of a price. It is dangerous
-        enough that no detour is worse than disturbing it — the surcharge alone
-        left the search willing to bring a building down for want of another
-        route, because a finite number is always worth paying when the
-        alternative is failure. It needs more push than the robot has. Or it is
-        narrow enough that pushing it at the height the robot pushes would put
-        it on its side instead of moving it along: mass drops out of that
-        comparison, so it is a question about shape, and the answer does not
-        depend on what the thing is made of.
-        """
+        """Return a reason this obstacle is physically or semantically forbidden."""
         cfg = self.cfg
         if self.risk is not None:
             level = self.risk.level_of(oid, self.belief.partners_of(oid))
@@ -296,37 +240,22 @@ class Planner:
         return ""
 
     def _removal(self, oid: int, key: EdgeKey, moved_ahead=None):
-        """Compute work and drop pose needed to move an obstacle aside, also plan its SE(2) route
-
-        `moved_ahead` is what the plan has already decided to do with the other
-        obstacles on this edge — where they will be by the time this one is
-        moved, which is not where they are now.
-        """
+        """Compute the work, route and drop pose for one obstacle removal."""
         obs = self.belief.obstacle(oid)
         moved_ahead = moved_ahead or {}
         estimated_diff = self.belief.get_difficulty(oid, self.est)
-        # What the executor refuses is a move of this body from this pose along
-        # this edge, regardless of what it is believed to weigh.
+        # Failed moves are keyed by pose and edge, independent of cost belief.
         fail_key = (move_signature(obs), key)
-        # What may be *reused*, though, is only work costed against the same
-        # knowledge: the same arrangement of everything else (`belief.version`),
-        # the same idea of how hard this thing is to shift, and the same risk
-        # verdict. Touching an obstacle changes the second without moving
-        # anything, which is exactly the case the pose-only key used to miss —
-        # the search went on believing the estimate it had already been shown
-        # was wrong.
+        # Reuse only results tied to the current belief, difficulty and risk.
         cache_key = (fail_key, self.belief.version,
                      round(estimated_diff, 6), self._risk_to_charge(oid),
                      tuple(sorted(moved_ahead.items())))
-        # A move the executor has since given up on comes first: what is cached
-        # is what looked possible before it was tried, and re-serving that would
-        # have the planner keep proposing the move that just failed.
+        # Do not resurrect a move the executor already rejected.
         if fail_key in self.failed_moves:
             res = (False, math.inf, None, 0.0, None, None)
             self._persistent_removal_cache[cache_key] = res
             return res
-        # Some things are not moved for any price. Asked before the route is
-        # planned, because there is no route worth planning.
+        # Reject forbidden obstacles before planning a route.
         off_limits = self._off_limits(oid, obs)
         if off_limits:
             self.cfg.log(f"[refuse] oid={oid} {off_limits}")
@@ -335,13 +264,7 @@ class Planner:
             return res
         if cache_key in self._persistent_removal_cache:
             return self._persistent_removal_cache[cache_key]
-        # Just this edge. Asking a move to clear the whole local cluster of
-        # edges the obstacle lies across — so that one shove deals with the next
-        # edge along too, instead of the robot walking back to shove it again —
-        # sounds like the fix for that walking back, and measured on
-        # strategy_demo it is not: J 40,961 -> 41,975 and 54 s -> 346 s, because
-        # a corridor union that large leaves the body almost nowhere to go and
-        # the search spends its time discovering that.
+        # Plan only the edge being evaluated; clearing adjacent edges is a separate decision.
         clear_polys = [self.roadmap.edge_corridor[key]]
         others = self.belief.others_union(oid, moved_ahead)
 
@@ -354,22 +277,7 @@ class Planner:
         bounds = self.roadmap.workspace.bounds
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
-        # The robot performs the manipulation as an excursion from the edge it is
-        # about to traverse. The edge midpoint stands in for whichever of its two
-        # endpoints the robot is actually on — they are at most conn_radius apart —
-        # which keeps this result cacheable per edge instead of per (edge,
-        # direction). It lets go at whichever endpoint is cheaper to reach from
-        # where the obstacle ends up: both are places the robot has to be to use
-        # the edge, so neither choice hides any travel from the cost. Which one it
-        # picks is the search's guess; the executor plans the same excursion again
-        # from the endpoint the robot is really standing on.
-        # The midpoint stands in for the robot everywhere in this function, not
-        # only in the escort: the manipulation is reachable from it, and drop
-        # poses are biased away from it. Feeding the robot's actual position in
-        # instead would make the answer depend on which end of the edge it
-        # happened to be standing on — which is exactly what the cache below
-        # asserts it does not, and what had the robot stepping back and forth
-        # between two nodes, each one preferring the plan of the other.
+        # Use the edge midpoint so cached costs do not depend on traversal direction.
         u, v = key
         mid = tuple((a + b) / 2.0 for a, b in
                     zip(self.roadmap.nodes[u], self.roadmap.nodes[v]))
@@ -378,8 +286,7 @@ class Planner:
         contact_memo: Dict[int, tuple] = {}
 
         def _contact_for(poses):
-            # plan_anywhere hands the same list object to the validator and back
-            # out in the result; hold on to it so the id stays unique
+            # Memoize validation for the exact pose-list object.
             hit = contact_memo.get(id(poses))
             if hit is not None:
                 return hit[1]
@@ -398,15 +305,7 @@ class Planner:
                 if not plan.feasible:
                     rejected.append(plan.reason)
                 return plan.feasible
-        # Every place the obstacle could go, cheapest *push* first — and then
-        # the cheapest *move*, which is not the same thing. What the search will
-        # be charged is the work of shoving it plus the robot's own walk to
-        # fetch, escort and leave it, and two poses a few centimetres apart can
-        # differ by metres in the second. So each option is priced whole, and
-        # the search stops looking once the work alone of the next one would
-        # already beat nothing: push cost only rises down this list, so once
-        # `lambda * push work` exceeds the best complete bill so far, no
-        # remaining option can win.
+        # Evaluate candidates by full manipulation cost, not push distance alone.
         best = math.inf
         for path, push_cost, goal in manipulation.move_se2_options(
                 obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
@@ -431,8 +330,7 @@ class Planner:
                 feasible = True
                 move_path, drop, move_dist, cplan = path, goal, push_cost, plan
         if not feasible and rejected:
-            # the obstacle could go somewhere, the robot just could not
-            # escort it there — say which half of the constraint bit
+            # Summarize why otherwise valid obstacle paths were rejected.
             counts = Counter(rejected).most_common(2)
             self.cfg.log(f"[contact] oid={oid} rejected {len(rejected):,} path(s): "
                          + "; ".join(f"{why} x{n:,}" for why, n in counts))
@@ -447,39 +345,21 @@ class Planner:
         return res
 
     def _goal_filter(self, obs):
-        """Reject drop poses that undo the last move of this obstacle.
-
-        The one thing that has to be a veto rather than a price. Without it the
-        cheapest way to clear the edge in front of the robot is to shove the
-        obstacle back across the edge behind it, and the cheapest way to clear
-        *that* is to shove it back again: two moves that each look like progress
-        and together are a robot pushing a crate up and down a corridor.
-        """
+        """Return a filter that prevents immediately reversing a relocation."""
         last_dir = self.belief.move_dir.get(obs.oid)
 
         def accept(goal):
             if last_dir is None:
                 return True
             dx, dy = goal[0] - obs.x, goal[1] - obs.y
-            if math.hypot(dx, dy) <= _MOVE_DIR_EPS:     # pure rotation has no direction
+            if math.hypot(dx, dy) <= _MOVE_DIR_EPS:
                 return True
             return dx * last_dir[0] + dy * last_dir[1] >= 0.0
 
         return accept
 
     def _goal_rank(self, obs):
-        """How much worse each drop pose leaves the rest of the map.
-
-        Blocking edges the obstacle does not block now is a real cost — the next
-        route has to go round them — but it is a cost, not a prohibition, and it
-        used to be written as one. As a veto it is close to unusable: a body
-        plugging a doorway sits half inside a wall, where there are no roadmap
-        edges to block, so *every* pose it could legally be pushed to blocks more
-        than where it stands, and the search would sooner report the door
-        impassable than open it. Priced instead, in metres of obstacle travel per
-        extra edge, it does what it was meant to do: among the poses that clear
-        the way, prefer the one that leaves the map most open.
-        """
+        """Return a soft penalty for drop poses that block extra roadmap edges."""
         per_edge = self.cfg.manip_blocked_edge_penalty_m
         if per_edge <= 0.0:
             return None

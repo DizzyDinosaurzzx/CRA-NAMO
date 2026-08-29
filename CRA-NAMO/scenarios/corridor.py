@@ -1,9 +1,4 @@
-"""Corridor scenario requiring a wedged crate to rotate in SE(2).
-
-The crate nearly spans the hall, while staggered wall stubs prevent a pure
-translation. The scenario exercises rotational planning, leverage-constrained
-contact, and grip movement around the obstacle perimeter.
-"""
+"""Corridor scenario requiring rotational and contact-constrained crate motion."""
 
 from __future__ import annotations
 
@@ -24,7 +19,6 @@ _CRATE_X = 7.0
 _CRATE_L = 6.7
 _CRATE_D = 0.7
 
-# Staggered stubs block pure translation in either direction.
 _STUB_DEPTH = 0.6
 _STUB_WEST = (5.2, 6.4)
 _STUB_EAST = (7.6, 8.8)

@@ -19,11 +19,8 @@ class Roadmap:
         self.cfg = cfg
         self.workspace = workspace
         polys = [so.polygon for so in static_obstacles]
-        self.static_obstacles = static_obstacles  # for use by the SE(2) planner
-        # Nested free-space sets use progressively stricter robot clearance:
-        #   static_free      — anywhere inside the workspace that is not a wall
-        #   free_eroded      — where the robot's *centre* may sit (eroded by r)
-        #   free_eroded_tol  — same, minus a contact_clearance hair of slack
+        self.static_obstacles = static_obstacles  # Obstacles passed to the SE(2) planner.
+        # Nested free-space sets apply progressively stricter robot clearance.
         self.static_free = workspace.difference(unary_union(polys)) if polys else workspace
         self.static_free_prep = prep(self.static_free)
         self.free_eroded = self.static_free.buffer(-cfg.robot_radius, quad_segs=16)
@@ -75,12 +72,7 @@ class Roadmap:
                             continue
                         self._try_edge(nid, mid)
 
-    # The ground an edge takes up is the disc the robot occupies swept along it,
-    # which is a round-ended sausage — `cap_style=1`. Flat caps used to cut that
-    # short by a robot radius at each node, so a body parked just off the end of
-    # an edge did not count as blocking it at planning time and then collided
-    # with the robot at execution time, where `Belief.check_robot_collision`
-    # has always buffered with round caps. The two now describe the same ground.
+    # Edge corridors use round caps so planning and execution share the same footprint.
     def _try_edge(self, u: int, v: int):
         a, b = self.nodes[u], self.nodes[v]
         dist = math.hypot(a[0] - b[0], a[1] - b[1])
@@ -127,8 +119,7 @@ class Roadmap:
     def can_drive(self, a: Tuple[float, float], b: Tuple[float, float],
                   blocked=None) -> bool:
         if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9:
-            # degenerate segment: shapely predicates on a zero-length LineString
-            # are unreliable, and standing still is trivially possible anyway
+            # A zero-length segment is valid when the point lies in free space.
             return shapely.contains(self.free_eroded_tol, Point(a))
         seg = LineString([a, b])
         if not shapely.contains(self.free_eroded_tol, seg):
@@ -137,11 +128,7 @@ class Roadmap:
 
     def nearest_reachable_node(self, p: Tuple[float, float], blocked=None,
                                k: int = 24) -> int | None:
-        """Nearest node the robot can drive to from *p* in a straight line.
-
-        Used to put the robot back on the roadmap after a manipulation ended
-        somewhere off-graph.
-        """
+        """Return the nearest node reachable from a point by a straight segment."""
         if self._kdtree is None:
             return None
         k = min(k, len(self.nodes))
@@ -168,7 +155,7 @@ class Roadmap:
                 self.edge_corridor[key] = seg.buffer(cfg.robot_radius, cap_style=1)
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
-        self._corridor_tree = None      # new corridors, index is stale
+        self._corridor_tree = None      # New corridors invalidate the index.
         self._corridor_keys = []
         self._rebuild_kdtree()
         return nid

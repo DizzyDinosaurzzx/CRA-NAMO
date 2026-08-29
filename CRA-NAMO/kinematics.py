@@ -10,29 +10,18 @@ XY = Tuple[float, float]
 
 
 def _trapezoid_time(distance: float, v_max: float, a_max: float) -> float:
-    """Rest-to-rest time over `distance` under a velocity and acceleration cap.
-
-    Either the profile reaches `v_max` and cruises (trapezoid), or it runs out of
-    distance first and turns round at its peak (triangle). The two agree exactly
-    at the crossover, so time is continuous in distance — a search that compares
-    routes across it will not see a step.
-    """
+    """Return rest-to-rest time for a trapezoidal or triangular profile."""
     distance = abs(float(distance))
     if distance <= 0.0:
         return 0.0
-    if distance * a_max >= v_max * v_max:      # long enough to reach the cap
+    if distance * a_max >= v_max * v_max:
         return distance / v_max + v_max / a_max
     return 2.0 * math.sqrt(distance / a_max)   # triangular profile
 
 
 @dataclass(frozen=True)
 class MotionProfile:
-    """What the robot can do, unloaded or loaded.
-
-    Two of these exist per run: one for driving free, a slower one for while an
-    obstacle is being held. Which applies is decided by the caller — nothing here
-    knows what the robot is doing.
-    """
+    """Velocity and acceleration limits for one robot motion state."""
     v_max: float          # [m/s]
     a_max: float          # [m/s^2]
     w_max: float          # [rad/s]
@@ -53,24 +42,13 @@ class MotionProfile:
 
 
 def turn_between(heading: float, target: float) -> float:
-    """Smallest rotation from `heading` to `target`, as a magnitude.
-
-    Full circle, not modulo pi: unlike a rectangle's orientation, a heading of
-    theta and theta+pi are opposite ways to face, and the robot drives forwards.
-    """
+    """Return the smallest full-circle heading change."""
     return abs((target - heading + math.pi) % (2.0 * math.pi) - math.pi)
 
 
 def segment_legs(profile: MotionProfile, a: XY, b: XY,
                  heading: float) -> Tuple[float, float, float]:
-    """The two halves of getting from `a` to `b`, kept apart.
-
-    Returns (seconds turning on the spot, seconds driving, heading on arrival).
-    The robot turns to face where it is going and then drives, so the split is
-    what says where it is at a given moment of the journey — it has not left `a`
-    until the turn is done. A zero-length segment is no journey at all and
-    leaves the heading alone: there is no direction to turn towards.
-    """
+    """Return turn time, drive time and arrival heading for one segment."""
     dx, dy = b[0] - a[0], b[1] - a[1]
     distance = math.hypot(dx, dy)
     if distance <= 1e-12:
@@ -82,22 +60,14 @@ def segment_legs(profile: MotionProfile, a: XY, b: XY,
 
 def segment_time(profile: MotionProfile, a: XY, b: XY,
                  heading: float) -> Tuple[float, float]:
-    """Time to get from `a` to `b` starting out facing `heading`.
-
-    Returns (seconds, heading on arrival).
-    """
+    """Return travel time and arrival heading for one segment."""
     turn, drive, target = segment_legs(profile, a, b, heading)
     return turn + drive, target
 
 
 def path_time(profile: MotionProfile, points: Sequence[XY],
               heading: float = None) -> float:
-    """Time to walk a polyline, turning at every vertex.
-
-    `heading` is where the robot faces to begin with. Left out, the first turn is
-    free — which is what a planner wants when it is costing a path it has not
-    decided how to approach yet, and would otherwise have to guess at.
-    """
+    """Return time to traverse a polyline with turns at its vertices."""
     if points is None or len(points) < 2:
         return 0.0
     total = 0.0

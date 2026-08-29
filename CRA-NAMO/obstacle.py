@@ -18,10 +18,10 @@ class StaticObstacle:
     """Convex geometry that the robot cannot move."""
     polygon: Polygon
     name: str = "wall"
-    theta: Optional[float] = None   # heading of the long axis; None if built from a raw polygon
+    theta: Optional[float] = None   # Long-axis heading, or None for raw polygons.
 
     def __post_init__(self):
-        # The SE(2) collision model assumes every static polygon is convex.
+        # SE(2) collision checks require convex static polygons.
         hull_area = self.polygon.convex_hull.area
         if hull_area - self.polygon.area > 1e-9 * max(1.0, hull_area):
             raise ValueError(
@@ -53,22 +53,18 @@ class MovableObstacle:
     y: float
     l: float
     d: float
-    h: float = 1.0                 # height, used for volume and occlusion reasoning
+    h: float = 1.0                 # Height used for volume and occlusion.
     theta: float = 0.0
-    material: str = "unknown"      # semantic label for LLM reasoning
-    difficulty: float = 1.0        # true sliding resistance f = mu*rho*V*g [N]; W = difficulty * distance moved [J]
-    # Hidden label revealed only through physical contact.
+    material: str = "unknown"      # Semantic label used by estimators.
+    difficulty: float = 1.0        # True sliding resistance in newtons.
+    # Optional label revealed by contact.
     contact_reveals: str = ""
-    # Bodies this one is propped against, leaning on, or stacked with: shifting
-    # this one disturbs them too. Visible — you can see what is resting on what
-    # — so the belief carries it, and the risk of moving this is at least the
-    # risk of moving any of them. `interaction_risk` says what would happen, in
-    # the same register as `material`: something to be read, not a number.
+    # Coupled bodies whose risk must be considered when this one moves.
     interacts_with: Tuple[int, ...] = ()
     interaction_risk: str = ""
     oid: int = -1
 
-    removed: bool = False          # has been physically moved out of the way
+    removed: bool = False          # Whether the obstacle has been moved.
 
     def __post_init__(self):
         if self.difficulty < 0:

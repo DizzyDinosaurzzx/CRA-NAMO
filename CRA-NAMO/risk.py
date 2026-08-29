@@ -22,7 +22,7 @@ EXTREME = "extreme"
 LEVELS = (LOW, MEDIUM, MEDIUM_HIGH, HIGH, EXTREME)
 _ORDER = {name: i for i, name in enumerate(LEVELS)}
 
-# What each level costs, as the detour in metres that would be worth taking to avoid it
+# Detour-equivalent surcharge for each risk level.
 RISK_DETOUR_EQUIV_M: Dict[str, float] = {
     LOW: 0.0,
     MEDIUM: 20.0,
@@ -31,53 +31,41 @@ RISK_DETOUR_EQUIV_M: Dict[str, float] = {
     EXTREME: 5000.0,
 }
 
-# Whole labels, for objects whose name settles the question outright.
+# Exact labels with known risk levels.
 RISK_LABELS: Dict[str, str] = {
-    # low: everyday furniture, empty containers, nothing depending on it
     "chair": LOW, "plastic_chair": LOW, "stool": LOW, "wooden_table": LOW,
     "desk": LOW, "cardboard_box": LOW, "styrofoam_box": LOW, "foam_mat": LOW,
     "empty_cart": LOW, "empty_shelf": LOW, "trash_bin": LOW, "pallet": LOW,
     "wooden_crate": LOW, "sofa": LOW, "cabinet": LOW, "concrete_block": LOW,
     "steel_shelf": LOW, "filing_cabinet": LOW, "loaded_pallet": LOW,
     "shelf": LOW, "cart": LOW, "steel_safe": LOW,
-    # medium: contents that spill, break, or are worth something
     "water_cup": MEDIUM, "full_cup": MEDIUM, "aquarium": MEDIUM,
     "paint_bucket": MEDIUM, "glassware_crate": MEDIUM, "server_rack": MEDIUM,
     "lab_bench": MEDIUM, "medicine_cabinet": MEDIUM,
-    # medium_high: hazardous contents, or a structure already under stress
     "gas_cylinder": MEDIUM_HIGH, "fuel_drum": MEDIUM_HIGH,
     "cracked_pillar": MEDIUM_HIGH, "earthquake_pillar": MEDIUM_HIGH,
     "debris_pile": MEDIUM_HIGH, "chemical_drum": MEDIUM_HIGH,
     "electrical_cabinet": MEDIUM_HIGH,
-    # high: a person is involved, or a life-critical machine
     "occupied_wheelchair": HIGH, "wheelchair_with_person": HIGH,
     "occupied_bed": HIGH, "hospital_bed": HIGH, "stretcher": HIGH,
     "incubator": HIGH, "ventilator": HIGH, "person": HIGH,
-    # extreme: something is holding the building up
     "load_bearing_column": EXTREME, "support_pillar": EXTREME,
     "structural_column": EXTREME, "shoring_prop": EXTREME,
     "collapsed_beam": EXTREME,
 }
 
-# Keywords, for labels the table has never seen. A token raises the risk to at
-# least its level and never lowers it, so "occupied_wheelchair_broken" still
-# reads as high even though no entry matches it whole. Order within a level does
-# not matter; the maximum wins.
+# Keyword fallback for labels absent from the exact table.
 RISK_KEYWORDS: Dict[str, str] = {
-    # medium
     "water": MEDIUM, "liquid": MEDIUM, "full": MEDIUM, "glass": MEDIUM,
     "fragile": MEDIUM, "cup": MEDIUM, "bottle": MEDIUM, "tank": MEDIUM,
     "server": MEDIUM, "lab": MEDIUM, "specimen": MEDIUM,
-    # medium_high
     "gas": MEDIUM_HIGH, "fuel": MEDIUM_HIGH, "chemical": MEDIUM_HIGH,
     "explosive": MEDIUM_HIGH, "cracked": MEDIUM_HIGH, "earthquake": MEDIUM_HIGH,
     "damaged": MEDIUM_HIGH, "unstable": MEDIUM_HIGH, "debris": MEDIUM_HIGH,
     "electrical": MEDIUM_HIGH, "hazard": MEDIUM_HIGH,
-    # high
     "person": HIGH, "people": HIGH, "occupied": HIGH, "patient": HIGH,
     "child": HIGH, "wheelchair": HIGH, "stretcher": HIGH, "casualty": HIGH,
     "victim": HIGH, "medical": HIGH, "ventilator": HIGH,
-    # extreme
     "load_bearing": EXTREME, "loadbearing": EXTREME, "structural": EXTREME,
     "support_column": EXTREME, "shoring": EXTREME, "pillar": EXTREME,
     "column": EXTREME, "beam": EXTREME, "strut": EXTREME,
@@ -107,13 +95,7 @@ def higher(a: Optional[str], b: Optional[str]) -> Optional[str]:
 
 
 def keyword_level(label) -> str:
-    """Risk from the label alone: whole-table first, then the worst keyword hit.
-
-    Keywords only ever raise the level. A label that names something safe but
-    contains one alarming word is treated as alarming — the failure that matters
-    here is moving something that should not have been moved, not detouring
-    around something that turned out to be fine.
-    """
+    """Return the highest risk implied by an exact label or keyword."""
     key = _normalise(label)
     if key in RISK_LABELS:
         return RISK_LABELS[key]
@@ -134,33 +116,22 @@ def detour_equivalent_m(level: Optional[str]) -> float:
 
 
 def label_of(o: dict, difficulty: Optional[float] = None) -> str:
-    """What the robot currently calls this thing.
-
-    Contact can resolve the label into something more specific — the scenario
-    supplies that as `contact_reveals`, and it is only ever visible once the
-    robot has touched the obstacle, which is what a non-None `difficulty` means.
-    """
+    """Return the currently observable label, including contact revelations."""
     if difficulty is not None and o.get("contact_reveals"):
         return _normalise(o["contact_reveals"])
     return _normalise(o.get("material", "unknown"))
 
 
 class RiskEstimator:
-    """Risk per obstacle, assessed on sight and re-assessed on contact.
-
-    Holds one level per oid. `assess` fills it in the first time and is a no-op
-    afterwards; `reassess` overwrites it with the better-informed verdict once
-    the robot has actually touched the thing.
-    """
+    """Estimate one risk level per obstacle and revise it after contact."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.api_key = cfg.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
-        self.level: Dict[int, str] = {}          # oid -> current level
-        self.source: Dict[int, str] = {}         # oid -> how it was decided
-        self.on_contact: set[int] = set()        # oids re-assessed after touching
-        # What was decided about each *kind* of question, to spare repeat calls.
-        # Keyed by everything the verdict turns on — see `_cache_key`.
+        self.level: Dict[int, str] = {}
+        self.source: Dict[int, str] = {}
+        self.on_contact: set[int] = set()
+        # Cache keys include every prompt input.
         self.verdict_cache: Dict[tuple, str] = {}
         self.calls = 0
         self.perception_calls = 0
@@ -209,11 +180,7 @@ class RiskEstimator:
         return {o["oid"]: self.level[o["oid"]] for o in observations}
 
     def reassess(self, observation: dict, difficulty: float) -> str:
-        """Second look, once the robot has touched it and knows what it weighs.
-
-        Replaces the first verdict — that is the point of touching. Runs once per
-        obstacle; a second collision tells us nothing the first did not.
-        """
+        """Reassess an obstacle once after contact reveals its difficulty."""
         oid = observation["oid"]
         if oid in self.on_contact:
             return self.level[oid]
@@ -224,26 +191,13 @@ class RiskEstimator:
         return level
 
     def forget(self, oid: int):
-        """Drop the verdict on an obstacle that is no longer what it was.
-
-        Including the contact verdict: it was passed on an object with a
-        different label or a different size, so touching it again is warranted.
-        The verdict cache stays — it is keyed on the question, and the same
-        question still has the same answer; what changed is which question this
-        obstacle asks.
-        """
+        """Drop per-obstacle verdicts while retaining reusable question results."""
         self.level.pop(oid, None)
         self.source.pop(oid, None)
         self.on_contact.discard(oid)
 
     def level_of(self, oid: int, partners: Sequence[int] = ()) -> Optional[str]:
-        """Current verdict, or None for an obstacle never assessed.
-
-        A body that is propped against others is judged by the company it
-        keeps: shifting it shifts them, so the verdict on the move is the worst
-        of the lot. A shelf that is only a shelf is still only a shelf — but a
-        shelf with a cracked pillar leaning on it is a cracked pillar.
-        """
+        """Return the obstacle's verdict, raised by any coupled partners."""
         level = self.level.get(oid)
         for other in partners:
             level = higher(level, self.level.get(other))
@@ -273,32 +227,14 @@ class RiskEstimator:
         return level, "keyword"
 
     def _cache_key(self, o: dict, difficulty: Optional[float]) -> tuple:
-        """Everything the verdict turns on, so that nothing else shares it.
-
-        The label alone used to be the key, and it cost two things. A crate the
-        size of a fist and one the size of a car got the same verdict. And — the
-        expensive one — the second look after touching found the first look
-        already sitting under the same key and handed it straight back, which is
-        the one thing a second look must never do: the whole reason to touch
-        something is that the answer might change. Anything that reaches the
-        prompt belongs here, which is the label, the size, and whether the robot
-        has had its hands on it and what it weighed.
-        """
+        """Build a cache key from every value that reaches the risk prompt."""
         return (label_of(o, difficulty),
                 round(float(o["l"]), 3), round(float(o["d"]), 3),
                 round(float(o.get("h", 1.0)), 3),
                 None if difficulty is None else round(float(difficulty), 3))
 
     def _weighed(self, o: dict, label: str, difficulty: float) -> str:
-        """The keyword verdict, raised if the thing is heavier than it claims.
-
-        What the prompt asks the model to do, done arithmetically for runs with
-        no model behind them. A body several times harder to push than its own
-        label predicts is not the thing it says it is — a container that calls
-        itself empty and is not, or something with a load on it — and the risk of
-        shifting it is a rung higher than the label alone would say. Lighter than
-        advertised is not evidence of anything, so it never lowers the verdict.
-        """
+        """Raise the keyword verdict when measured force exceeds expectation."""
         level = keyword_level(label)
         volume = float(o["l"]) * float(o["d"]) * float(o.get("h", 1.0))
         expected = friction_force(material_mu_rho(label), volume)

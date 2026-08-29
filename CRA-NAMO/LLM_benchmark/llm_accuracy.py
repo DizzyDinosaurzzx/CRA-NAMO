@@ -1,44 +1,8 @@
-"""Benchmark the LLM estimators against a reference dataset.
-
-Two things are estimated per obstacle and both are measured here: `mu*rho`,
-how hard it is to push, and `risk`, what breaks if you push it. They are
-separate questions with separate failure modes — an acrow prop is trivial to
-push and holding up a ceiling — so they get separate stages and separate charts.
-
-Stages, run independently or with `all`:
-
-  accuracy   Ask the live model for mu*rho on every item in `llm_dataset`,
-             several times each, and compare against the reference values.
-             Also records the no-LLM heuristic (`material_mu_rho`) on the same
-             items, so every accuracy number has a floor to beat.
-
-  risk       The same items put to `RiskEstimator`, scored against each item's
-             reference risk level. Two arms: on sight (label and size only, what
-             the robot has before it touches anything) and after contact (the
-             measured push force supplied as well, which is what `reassess`
-             gets). The floor here is `risk.keyword_level`, the table lookup that
-             runs when there is no API key.
-
-  size       mu*rho is defined size-independent, but the prompt states the
-             object's dimensions. Re-asks a subset at 0.5x / 1x / 2x linear
-             scale; any movement is prompt leakage, not physics.
-
-  doors      What a simulated estimator gap costs a route. Runs `ten_doors`
-             across a fixed Gap ladder. A seeded random draw changes each cost
-             within a multiplicative band and each risk within a level band.
-             Cost-only, risk-only and joint arms isolate the source of changed
-             decisions. No API calls. Also saves exact and maximum-Gap route
-             screenshots.
-
-  report     Turns the saved JSON into report.md plus three charts: cost
-             accuracy, risk accuracy, and route impact versus Gap. No API calls.
-
-
-"""
+"""Benchmark difficulty and risk estimators with a synthetic ten-door gap study."""
 
 from __future__ import annotations
 
-# Run from anywhere: the library lives one directory up.
+# Add the project root when imported from the benchmark directory.
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
@@ -88,18 +52,13 @@ REPO_DIR = os.path.dirname(PROJECT_DIR)
 
 SIZE_SCALES = (0.5, 1.0, 2.0)
 
-# One colour per dataset group. Three, not four: a scatter is an all-pairs form
-# and dataviz slots 1/2/3 are the largest set that clears the all-pairs gates on
-# the light surface (worst CVD dE 9.2, worst normal-vision dE 24.0). The
-# anchor/off-table split inside `object` lives in the report table instead, and
-# the marker shape carries identity a second time for the aqua slot, which sits
-# below 3:1 against the surface.
+# One accessible color and marker pair per dataset group.
 GROUP_STYLE = {
     "object": ("#2a78d6", "o"),
     "state":  ("#eb6834", "^"),
     "brand":  ("#1baf7a", "D"),
 }
-# Sequential blue, dataviz steps 100 -> 700: magnitude, one hue, light to dark.
+# Sequential blue palette for charts.
 SEQ_BLUE = ("#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
             "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281",
             "#0d366b")
@@ -107,8 +66,7 @@ INK, MUTED, GRID, SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#fcfcfb"
 
 
 def log(msg: str) -> None:
-    """Heartbeat. Every long stage prints through here so a stalled run is
-    visible in the output file rather than looking like a hang."""
+    """Print a timestamped progress message."""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
@@ -186,23 +144,11 @@ def _load(name: str):
 
 
 def _preflight(cfg: Config) -> None:
-    """One call before the hundreds, so a dead key fails in a second.
-
-    `Config.log` is silent unless `cfg.verbose`, and these stages run with it
-    off, so an HTTP error raised inside a worker thread leaves no trace at all:
-    every call returns `None`, the stage writes a file full of nulls, reports a
-    plausible-looking wall time, and the failure only surfaces much later as a
-    `KeyError` in the report. This asks the endpoint one cheap question first
-    and quotes back exactly what the server said — the run that taught us this
-    burned 330 calls against an account reading `Insufficient Balance`.
-    """
+    """Validate API connectivity before launching parallel requests."""
     import requests
     log(f"model {cfg.deepseek_model} at {cfg.deepseek_base_url}")
     try:
-        # Deliberately the cheapest possible shape — no reasoning, one token,
-        # not streamed. Everything this is here to catch (a bad key, no
-        # balance, an unknown model, an unreachable host) fails the same way
-        # whatever the body asks for, and the real calls are expensive.
+        # Use a minimal non-streaming request to catch configuration errors.
         r = requests.post(
             cfg.deepseek_base_url, timeout=cfg.llm_timeout,
             headers={"Content-Type": "application/json",
@@ -223,12 +169,7 @@ def _preflight(cfg: Config) -> None:
 
 
 def _require_answers(kind: str, n_ok: int, n_total: int) -> None:
-    """Refuse to save a stage that learned nothing.
-
-    A file of nulls is worse than no file: every later stage reads it as
-    measured data. `doors` in particular would take an all-null risk stage as
-    'the estimator never misreads risk' and report a clean bill of health.
-    """
+    """Refuse to save a stage with no usable model responses."""
     if n_ok:
         return
     raise SystemExit(
@@ -237,7 +178,7 @@ def _require_answers(kind: str, n_ok: int, n_total: int) -> None:
         f"name in Config, then run this stage again.")
 
 
-# Stage 1 - estimator accuracy
+# Difficulty estimator accuracy.
 
 def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
     validate()
@@ -275,8 +216,7 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
             **{k: v for k, v in asdict(item).items()},
             "mu_rho_true": item.mu_rho,
             "preds": by_label[item.label],
-            # median over repeats is the number to quote for a material:
-            # robust to a single malformed reply
+            # Median reduces the effect of malformed repeat responses.
             "pred": statistics.median(preds) if preds else None,
             "n_ok": len(preds),
             "heuristic": material_mu_rho(item.label),
@@ -288,15 +228,7 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
     return payload
 
 
-# Stage 1b - risk-level accuracy
-
-# The robot asks about risk twice, so the benchmark does too:
-#   on sight     label and size only, before it has touched anything
-#   after contact the same object with the measured push force supplied
-# The reference level is identical in both arms — touching an obstacle does not
-# make it less dangerous — so the contact arm answers one narrow question: does
-# knowing the force help, or does a heavy reading just frighten the model? One
-# pass is enough for that, hence its own repeat count.
+# Risk estimator accuracy for sight and contact observations.
 RISK_CONTACT_REPEATS = 1
 
 
@@ -307,7 +239,7 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
         raise SystemExit("no DeepSeek API key in Config.deepseek_api_key / $DEEPSEEK_API_KEY")
     _preflight(cfg)
 
-    # (item, difficulty): None is the sight arm, a number is the contact arm.
+    # None denotes sight-only; a number denotes the contact arm.
     jobs = [(it, None) for it in DATASET for _ in range(repeats)]
     jobs += [(it, it.difficulty) for it in DATASET for _ in range(RISK_CONTACT_REPEATS)]
     log(f"risk: {len(DATASET)} items x {repeats} on sight + {RISK_CONTACT_REPEATS} "
@@ -317,8 +249,7 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
 
     def ask(job):
         item, difficulty = job
-        # Production normalises the label before it reaches the prompt; asking a
-        # prettier question here would measure a prompt the robot never sends.
+        # Use the same label normalization as production.
         level = est._deepseek(item.observation(), _risk_normalise(item.label),
                               difficulty)
         done[0] += 1
@@ -346,7 +277,7 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
             "sight": _modal_level(sight.get(it.label, [])),
             "contact_levels": contact.get(it.label, []),
             "contact": _modal_level(contact.get(it.label, [])),
-            # the no-API fallback, scored on exactly the same labels
+            # Score the no-API fallback on the same labels.
             "keyword": keyword_level(it.label),
             "risk_note": it.risk_note,
         })
@@ -358,14 +289,10 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
     return payload
 
 
-# Stage 2 - size independence
+# Size-independence probe.
 
 def stage_size(cfg: Config, workers: int) -> dict:
-    """The prompt hands the model l x d x h and then forbids it from mattering.
-
-    Anything that moves with scale is the model reading size as a mass cue,
-    which double-counts volume: the caller multiplies by volume again.
-    """
+    """Check that estimated mu*rho does not vary with object scale."""
     _preflight(cfg)
     est = DifficultyEstimator(cfg)
     subset = [it for it in DATASET
@@ -402,17 +329,10 @@ def stage_size(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# Stage 2b - request-setting ablation
-
-# `_deepseek` hardcodes its request settings, so a bad number could be the
-# model's judgement or just the way it is being asked. These variants separate
-# the two. The first row is exactly what `llm_difficulty.py` ships today.
+# Request-setting ablation.
 ABLATIONS = (
     ("shipped: v4-flash, no thinking, 32 tok", "deepseek-v4-flash", "disabled", 32),
-    # 32k, not 4k: reasoning runs to several thousand tokens on this prompt and
-    # the harder objects think the longest. A budget that truncates them drops
-    # exactly the items the model finds difficult, and the survivors would score
-    # far better than the setting deserves.
+    # A large budget avoids truncating difficult reasoning responses.
     ("v4-flash, thinking on, 32k tok",         "deepseek-v4-flash", "enabled", 32000),
     ("deepseek-chat, no thinking, 32 tok",     "deepseek-chat",     "disabled", 32),
 )
@@ -420,17 +340,7 @@ ABLATIONS = (
 
 def _ask_raw(cfg: Config, model: str, thinking: str, max_tokens: int,
              prompt: str) -> tuple:
-    """One call with explicit request settings, mirroring `_deepseek`'s parsing.
-
-    Returns `(value, finish_reason)`. The reason is kept because an unparsed
-    reply is ambiguous on its own: `length` means the token budget was too small
-    and the item should not be scored, while `stop` with no number is a genuine
-    refusal to answer.
-
-    Takes the *last* number in the reply rather than the first: a reasoning
-    model's visible answer may be preceded by a restatement, and the final
-    number is the one it is committing to.
-    """
+    """Call an estimator with explicit settings and parse its final number."""
     import re
     import requests
     body = {"model": model, "messages": [{"role": "user", "content": prompt}],
@@ -487,19 +397,13 @@ def stage_ablate(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# Stage 2c - is the collapse target the table's last row, or its largest value?
+# Anchor-ordering probe.
 
 _ANCHOR_LINE = re.compile(r"^\s{2}(\S+)\s+mu=\S+\s+rho=\S+\s+mu\*rho=(\S+)\s*$")
 
 
 def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
-    """Rewrite only the anchor table's row order, leaving the prompt otherwise
-    byte-identical to what production sends.
-
-    The shipped table is sorted ascending, which puts `concrete_block` (1440) on
-    both the last line *and* the largest value — the two candidate explanations
-    for the collapse are perfectly confounded. Reordering separates them.
-    """
+    """Rewrite only the anchor table row order in a production prompt."""
     lines = prompt.split("\n")
     idx = [i for i, ln in enumerate(lines) if _ANCHOR_LINE.match(ln)]
     if not idx:
@@ -512,7 +416,7 @@ def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
         pairs.sort(key=lambda p: p[1])
     elif order == "descending":
         pairs.sort(key=lambda p: -p[1])
-    else:                                   # shuffled
+    else:                                   # Shuffle the anchor rows.
         random.Random(seed).shuffle(pairs)
 
     for slot, (line, _) in zip(idx, pairs):
@@ -524,8 +428,7 @@ def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
 def stage_order(cfg: Config, workers: int) -> dict:
     _preflight(cfg)
     est = DifficultyEstimator(cfg)
-    # Only the off-table objects: the paraphrase items have an anchor as their
-    # correct answer, so they cannot show whether a hit is copying or reasoning.
+    # Off-table objects distinguish copying from estimation.
     items = [it for it in DATASET if it.anchor is None]
     orders = [("ascending", 0), ("descending", 0), ("shuffled", 1), ("shuffled", 2)]
 
@@ -581,22 +484,14 @@ def stage_order(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# Stage 3 - what a simulated estimator gap costs a route
+# Synthetic estimator-gap route study.
 
 DOORS_MAP = "ten_doors"
 
-# Each pair is one point on the Gap ladder:
-#   cost_factor  every estimated/true cost ratio is sampled log-uniformly from
-#                [1 / cost_factor, cost_factor]
-#   risk_levels  every risk estimate is shifted by a random integer in
-#                [-risk_levels, risk_levels], then clipped to risk.LEVELS
-# The first point is exact. The last is deliberately extreme so the route-level
-# effect is visible even if ten_doors is insensitive around one break-even.
+# Each gap point bounds a seeded multiplicative cost error and risk-level shift.
 DOORS_GAPS = ((1.0, 0), (1.5, 1), (2.0, 2), (4.0, 3), (10.0, 4))
 
-# One seed means 1 exact + 4 Gap points x 3 arms = 13 full scenario runs.
-# Increase this for uncertainty bars; each seed preserves paired draws between
-# cost-only / risk-only / both, so arm differences are not random-sample noise.
+# Each seed preserves paired draws across the cost-only, risk-only, and joint arms.
 DOORS_SEEDS = 1
 
 
@@ -636,23 +531,8 @@ def _gate_choices(gates: List[dict], removed) -> Dict[int, str]:
 
 def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
                level: Dict[int, str], summary_path: Optional[str] = None) -> dict:
-    """One crossing of the map under one set of beliefs.
-
-    The network is cut out and both estimators are pre-seeded per obstacle, so
-    the run is deterministic and free. What is *not* frozen is the correction
-    the robot earns by touching something: `Belief.get_difficulty` swaps in the
-    true force on contact and `RiskEstimator.reassess` re-rates the label, both
-    exactly as they do in a live run. A wrong belief therefore costs what it
-    costs in practice — a decision taken before the robot knew better — and not
-    an imaginary error that survives being disproved.
-
-    The bill to read is `C`, not `J`. `J` is walking plus work; the risk
-    surcharge is charged outside it. An arm that pushes a `medium` obstacle it
-    should have walked around therefore books a *lower* J than the arm that
-    detoured — it saved the walk — and only `C = J + risk_cost` (at the shipped
-    `time_importance = 0`) notices what was disturbed to get it. Both are kept.
-    """
-    scenario = scenarios.load(DOORS_MAP)             # fresh objects every call
+    """Run one ten-door crossing with seeded estimator beliefs."""
+    scenario = scenarios.load(DOORS_MAP)             # Load fresh objects for each run.
     cfg: Config = scenario["cfg"]
     cfg.save_frames = False
     cfg.verbose = False
@@ -688,8 +568,7 @@ def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
         "walk_cost": res.walk_cost, "work_cost": res.work_cost,
         "risk_cost": res.risk_cost, "pushes": len(res.removed),
         "removed": sorted(res.removed),
-        # obstacles moved that were not `low` risk in the first place: the
-        # failure that a cheaper route does not make up for
+        # Count moved obstacles whose true risk was above low.
         "risky_pushes": sorted(oid for oid in res.removed
                                if true_risk.get(oid, LOW) != LOW),
         "choices": {str(g): c for g, c in sorted(choices.items())},
@@ -764,9 +643,7 @@ def stage_doors(seeds: int) -> dict:
     return payload
 
 
-# Risk metrics
-
-# Which key in a risk row each reported arm reads from.
+# Risk metrics.
 RISK_ARMS = (("keyword fallback", "keyword"),
              ("LLM on sight", "sight"),
              ("LLM after contact", "contact"))
@@ -778,13 +655,7 @@ def _risk_measured(risk_payload: Optional[dict], key: str = "sight") -> bool:
 
 
 def _modal_level(levels) -> Optional[str]:
-    """The verdict to ship for one object: the most common reply, and on a tie
-    the more dangerous of them.
-
-    An estimator that cannot decide between `medium` and `high` should be
-    believed at `high` — that is the same rule `risk.higher` applies everywhere
-    else, and it keeps the tie-break from quietly flattering the model.
-    """
+    """Return the modal level, breaking ties toward greater risk."""
     got = [lvl for lvl in levels if lvl]
     if not got:
         return None
@@ -796,17 +667,7 @@ def _modal_level(levels) -> Optional[str]:
 
 
 def _risk_stats(rows, key: str) -> dict:
-    """Agreement with the reference level, and what disagreeing costs.
-
-    `under` is the number the safety case turns on: the estimator called
-    something safer than it is, so the planner is willing to push an obstacle it
-    should have routed around. `over` only ever costs distance.
-
-    The two `_m` figures price both directions in the planner's own units.
-    `RISK_DETOUR_EQUIV_M` says what each level is worth as a detour, so the
-    shortfall is the protection the estimator dropped and the excess is the
-    detour it invented — both averaged over every item, not just the wrong ones.
-    """
+    """Summarize risk agreement and detour-equivalent error."""
     pairs = [(r["risk_true"], r[key]) for r in rows if r.get(key)]
     if not pairs:
         return {"n": 0}
@@ -844,7 +705,7 @@ def _risk_under_calls(rows, key: str) -> List[dict]:
     return sorted(out, key=lambda r: order[r[key]] - order[r["risk_true"]])
 
 
-# Metrics
+# Difficulty metrics.
 
 def _log_errors(rows, key="pred"):
     out = []
@@ -876,13 +737,7 @@ def _accuracy_stats(rows, key="pred") -> dict:
 
 
 def _anchor_snapping(rows, key="pred") -> dict:
-    """How often the reply is a verbatim row of the anchor table.
-
-    The prompt asks the model to *interpolate between* anchors, so an exact
-    anchor value is a copy, not an estimate. Concentration on the largest anchor
-    is worse than a wrong number: it is the table's last line, and it makes
-    every unknown object look like solid concrete.
-    """
+    """Measure responses that exactly match an anchor-table value."""
     anchor_values = {round(v, 4) for k, v in MATERIAL_MU_RHO.items() if k != "unknown"}
     top = max(anchor_values)
     preds = [r[key] for r in rows if r.get(key)]
@@ -907,11 +762,7 @@ def _spearman(rows, key="pred") -> Optional[float]:
 
 
 def _repeatability(rows) -> dict:
-    """Spread across repeats of the *same* question at temperature 0.
-
-    Non-zero spread means the ordering the planner sees is not stable between
-    identical runs, which matters more than the absolute value.
-    """
+    """Measure spread across repeated deterministic requests."""
     spreads = []
     for r in rows:
         preds = [p for p in r["preds"] if p and p > 0]
@@ -925,7 +776,7 @@ def _repeatability(rows) -> dict:
             "max_spread": round(max(spreads), 3)}
 
 
-# Charts
+# Charts.
 
 def _chart_accuracy(rows, path: str):
     import matplotlib
@@ -933,9 +784,7 @@ def _chart_accuracy(rows, path: str):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7.2, 6.4))
-    # Bound the axes by the data, not by a constant: the dataset spans an
-    # exercise ball to a slab of granite, and a clipped point is a silently
-    # dropped result.
+    # Bound axes by observed data to avoid clipping points.
     seen = [v for r in rows for v in (r["mu_rho_true"], r.get("pred")) if v]
     lo, hi = min(0.2, min(seen) / 1.6), max(3000.0, max(seen) * 1.6)
     ax.plot([lo, hi], [lo, hi], color=INK, lw=1.2, zorder=2)
@@ -943,8 +792,7 @@ def _chart_accuracy(rows, path: str):
         ax.fill_between([lo, hi], [lo / band, hi / band], [lo * band, hi * band],
                         color=MUTED, alpha=alpha, lw=0, zorder=1)
 
-    # The horizontal stripes are the finding, so name them on the plot rather
-    # than leaving the reader to decode why so many points share a y value.
+    # Label repeated anchor-valued responses directly on the chart.
     counts: Dict[float, int] = {}
     for r in rows:
         if r.get("pred"):
@@ -973,7 +821,7 @@ def _chart_accuracy(rows, path: str):
     ax.set_ylabel("LLM estimate  [kg/m$^3$]", color=INK)
     ax.set_title("LLM mu*rho vs reference — shaded bands are 1.5x and 2x",
                  color=INK, fontsize=11, loc="left")
-    # major decades only: a log grid with its minors on is a wall of lines
+    # Major decades keep the log grid readable.
     ax.grid(True, which="major", color=GRID, lw=0.6, zorder=0)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
@@ -986,13 +834,7 @@ def _chart_accuracy(rows, path: str):
 
 
 def _chart_risk(risk: dict, path: str):
-    """One panel per arm: reference level down, estimated level across.
-
-    A confusion grid rather than a bar of accuracies, because the *direction* of
-    the mistake is the whole finding — and it is read off the geometry, with no
-    colour needed to carry it. Cells left of the outlined diagonal are objects
-    called safer than they are.
-    """
+    """Plot one confusion matrix per risk-estimation arm."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1026,12 +868,11 @@ def _chart_risk(risk: dict, path: str):
                     ax.text(j, i, str(count), ha="center", va="center",
                             fontsize=9, zorder=3,
                             color=SURFACE if shade > 0.55 else INK)
-            # the diagonal is "got it right"; outline it rather than colour it,
-            # so the sequential ramp keeps meaning count and nothing else
+            # Outline the diagonal so the ramp continues to encode counts.
             ax.add_patch(Rectangle((i - 0.5, i - 0.5), 1, 1, fill=False,
                                    edgecolor=INK, lw=1.1, zorder=2))
 
-        # 2 px of surface between cells instead of a border around each one
+        # Leave a small surface gap between cells.
         ax.set_xticks([k - 0.5 for k in range(n + 1)], minor=True)
         ax.set_yticks([k - 0.5 for k in range(n + 1)], minor=True)
         ax.grid(which="minor", color=SURFACE, lw=2)
@@ -1120,7 +961,7 @@ def _chart_doors_gap(doors: dict, path: str):
     log(f"wrote {path}")
 
 
-# Report
+# Report generation.
 
 def _table(header: List[str], body: List[List[str]]) -> str:
     lines = ["| " + " | ".join(header) + " |",
@@ -1133,8 +974,7 @@ def stage_report() -> str:
     acc = _load("accuracy.json")
     risk = _load("risk.json")
     doors = _load("doors.json")
-    # A risk file whose calls all failed is not risk data; treat it as absent
-    # and say why, rather than rendering a section of blanks.
+    # Treat an all-failed risk stage as unavailable data.
     risk_failed = bool(risk) and not _risk_measured(risk)
     if risk_failed:
         risk = None
@@ -1148,7 +988,7 @@ def stage_report() -> str:
              f"Model `{acc['model']}`, {acc['repeats']} repeats per item, "
              f"{len(rows)} items, {acc['seconds']}s of API time.\n"]
 
-    # -- headline -----------------------------------------------------------
+    # Headline.
     overall = _accuracy_stats(rows)
     snapshot = _anchor_snapping(rows)
     head = [
@@ -1158,10 +998,7 @@ def stage_report() -> str:
         f"reference, and it over-estimates "
         f"({overall['median_ratio']:.1f}x median bias).",
     ]
-    # Whether the model collapses onto the anchor table is the finding this
-    # benchmark was built for — but it is a measurement, not a given. Reciting
-    # the collapse when the numbers no longer show one would be reporting a
-    # conclusion the run disproved.
+    # Report anchor concentration only when observed.
     if snapshot.get("n"):
         if snapshot["on_max_anchor"] >= 0.15:
             head.append(
@@ -1227,8 +1064,7 @@ def stage_report() -> str:
             f"model's {overall['median_abs_factor']:.1f}x. In the shipped "
             f"configuration, calling the API makes the estimate worse.")
     if abl:
-        # Only variants that answered nearly every item can be ranked: a
-        # truncated run has silently dropped its hardest cases.
+        # Rank only variants that answered nearly every item.
         rankable = [v for v in abl["variants"]
                     if _accuracy_stats(v["rows"]).get("n", 0) >= 0.9 * len(v["rows"])]
         best = min(rankable, key=lambda v: _accuracy_stats(v["rows"])["median_abs_factor"],
@@ -1248,7 +1084,7 @@ def stage_report() -> str:
                         f"score fairly): {', '.join(dropped)}.")
     parts.append("\n## Headline\n\n" + "\n".join(head) + "\n")
 
-    # -- accuracy -----------------------------------------------------------
+    # Accuracy section.
     parts.append("\n## 1. Estimator accuracy\n")
     parts.append("`median_abs_factor` is the typical multiplicative miss: 1.0 is "
                  "exact, 2.0 means the usual answer is off by a factor of two in "
@@ -1310,7 +1146,7 @@ def stage_report() -> str:
           f"{r['pred']:.1f}",
           f"{r['pred'] / r['mu_rho_true']:.2f}x", r["note"]] for r in worst]))
 
-    # -- risk ---------------------------------------------------------------
+    # Risk section.
     if risk:
         rk = risk["rows"]
         parts.append("\n## 1b. Risk assessment\n")
@@ -1363,7 +1199,7 @@ def stage_report() -> str:
                 [[r["label"], r["risk_true"], r["sight"], r["keyword"],
                   r["risk_note"]] for r in under]))
 
-    # -- size independence --------------------------------------------------
+    # Size-independence section.
     if size:
         parts.append("\n## 2. Size independence\n")
         parts.append("mu*rho must not depend on the object's size — the caller "
@@ -1383,7 +1219,7 @@ def stage_report() -> str:
               r["by_scale"].get("2.0"), f"{s:.2f}x"]
              for s, r in sorted(moved, key=lambda t: -t[0])]))
 
-    # -- anchor ordering ----------------------------------------------------
+    # Anchor-ordering section.
     order = _load("order.json")
     if order:
         parts.append("\n## 3. Proof that it is copying, not estimating\n")
@@ -1413,7 +1249,7 @@ def stage_report() -> str:
             "rather than removing it. Only giving the model room to reason "
             "does that.\n")
 
-    # -- request-setting ablation -------------------------------------------
+    # Request-setting section.
     if abl:
         parts.append("\n## 4. Is it the model or the way it is asked?\n")
         parts.append("Same prompt, same items, different request settings. "
@@ -1436,7 +1272,7 @@ def stage_report() -> str:
             ["setting", "parsed", "cut", "typ. factor", "bias", "<=2x", "<=3x",
              "Spearman", "wall time"], body))
 
-    # -- what it costs a route ----------------------------------------------
+    # Route-impact section.
     if doors:
         runs = doors["runs"]
         base = runs[0]
@@ -1510,7 +1346,7 @@ def stage_report() -> str:
             f"that is the planner disturbing something it should have walked "
             f"around.\n")
 
-        # Per-gate detail: which gates are actually load-bearing for the result.
+        # Per-gate detail shows which decisions changed.
         parts.append("\n### Where the decisions moved\n")
         gates_by_i: Dict[str, dict] = {}
         for r in doors["gates"]:

@@ -8,18 +8,10 @@ from typing import Dict
 import requests
 from config import Config
 
-# Difficulty is the sliding friction force that resists pushing the obstacle:
-#
-#     difficulty = f = mu * m * g = (mu * rho) * V * g        [N]
-#
-# with V = l * d * h the bounding-box volume. Because V is the bounding box and
-# not the solid volume, rho is a *bulk* density (total mass / bounding volume),
-# so a mostly-empty shelf is much lighter per cubic metre than solid concrete.
-# Wheeled objects use an effective rolling-resistance coefficient for mu, which
-# is why a cart is far easier to move than its mass alone suggests.
+# Difficulty is calculated as `(mu * rho) * volume * g`, using bulk density.
 G = 9.81                       # gravitational acceleration [m/s^2]
 
-# Sliding friction coefficient against the floor (rolling resistance if wheeled).
+# Floor friction coefficient or rolling resistance for wheeled objects.
 MATERIAL_MU: Dict[str, float] = {
     "styrofoam_box": 0.35,
     "foam_mat": 0.50,
@@ -45,7 +37,7 @@ MATERIAL_MU: Dict[str, float] = {
     "industrial_machine": 0.50,
     "unknown": 0.40,
 }
-# Bulk density [kg/m^3] = total mass / bounding-box volume (l * d * h).
+# Bulk density is total mass divided by bounding-box volume.
 MATERIAL_RHO: Dict[str, float] = {
     "styrofoam_box": 15.0,     # EPS foam
     "plastic_chair": 22.0,
@@ -71,12 +63,12 @@ MATERIAL_RHO: Dict[str, float] = {
     "concrete_block": 2400.0,  # solid concrete
     "unknown": 100.0,
 }
-# mu * rho [kg/m^3] -- the per-material coefficient the estimator works with.
+# Per-material coefficient returned by the estimator.
 MATERIAL_MU_RHO: Dict[str, float] = {
     name: round(MATERIAL_MU[name] * MATERIAL_RHO[name], 4)
     for name in MATERIAL_RHO
 }
-# Typical height per material, used as the ground-truth h in the scenarios.
+# Typical object height used by scenarios.
 MATERIAL_HEIGHT: Dict[str, float] = {
     "styrofoam_box": 1.0,
     "foam_mat": 0.1,
@@ -102,7 +94,7 @@ MATERIAL_HEIGHT: Dict[str, float] = {
     "industrial_machine": 1.6,
     "unknown": 1.0,
 }
-# Synonym table
+# Normalized material synonyms.
 MATERIAL_ALIASES: Dict[str, str] = {
     "box": "cardboard_box",
     "carton": "cardboard_box",
@@ -223,11 +215,7 @@ class DifficultyEstimator:
         return difficulty
 
     def forget(self, oid: int):
-        """Drop the estimate for an obstacle that is no longer what it was.
-
-        Only the per-object entries: what a *material* costs has not changed, so
-        the material caches (and the API calls behind them) stay.
-        """
+        """Drop per-object estimates while retaining material-level caches."""
         self.cache.pop(oid, None)
         self.mu_rho_cache.pop(oid, None)
         self.source_cache.pop(oid, None)
@@ -314,10 +302,7 @@ class DifficultyEstimator:
             "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
                          else "disabled"},
         }
-        # Omitted entirely when unset: a cap below the reasoning length does not
-        # truncate the answer, it returns an empty content with
-        # finish_reason='length', which reads here as "no number" and silently
-        # degrades to the heuristic.
+        # Omit the token cap when unset so reasoning is not truncated.
         if self.cfg.llm_max_tokens:
             body["max_tokens"] = int(self.cfg.llm_max_tokens)
         for attempt in range(self.cfg.llm_max_retries + 1):
@@ -342,9 +327,7 @@ class DifficultyEstimator:
                     continue
                 choice = data["choices"][0]
                 text = choice.get("message", {}).get("content") or ""
-                # Last number, not the first: a reasoning reply may restate mu
-                # and rho before committing to their product, and it is the
-                # final figure that answers the question.
+                # Use the final number because reasoning may restate intermediate values.
                 nums = re.findall(
                     r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?",
                     text,

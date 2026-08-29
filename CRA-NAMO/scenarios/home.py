@@ -1,27 +1,85 @@
-"""Large maze scenario with movable doorway blockers."""
+"""House scenario with heterogeneous furniture blocking interior doorways."""
 
 from __future__ import annotations
 from shapely.geometry import box
 from config import Config
-from llm_difficulty import friction_force, material_height, material_mu_rho
 from obstacle import MovableObstacle, StaticObstacle
+from scenarios import _realism
+from scenarios._realism import (
+    MU_FELT_PADS, MU_STEEL, MU_UPHOLSTERY, MU_WOOD, push_force,
+)
 
 DOOR_OID_BASE = 900
 
-DEFAULT_DOOR_MATERIAL = "wooden_crate"
+_WALL_T = 0.45
+# Trim the long side so blockers fit between wall stubs.
 DOOR_CLEARANCE = 0.2
 
+# Doorway furniture: material, height, packed density [kg/m^3], floor grip.
+# Density rather than mass, so the same piece is heavier in a 2.0 m opening
+# than in a 1.5 m one. Depth is the doorway's, so these are the slim cases:
+# a flat-pack wardrobe carcass, a table on its side, a 0.45 m bookcase.
+_DOOR_KINDS = {
+    "drawers":   ("chest_of_drawers",     0.82,   121.0, MU_FELT_PADS),
+    "wardrobe":  ("flat_packed_wardrobe", 2.02,    56.0, MU_WOOD),
+    "cartons":   ("cardboard_box",        1.20,    43.0, MU_WOOD),
+    "bookcase":  ("loaded_bookcase",      1.85,    97.0, MU_WOOD),
+    "mattress":  ("rolled_mattress",      0.62,    94.0, MU_UPHOLSTERY),
+    "sideboard": ("sideboard",            0.86,   147.0, MU_FELT_PADS),
+    "table":     ("dining_table",         0.76,    75.0, MU_WOOD),
+    "files":     ("filing_cabinet",       1.32,   124.0, MU_STEEL),
+    "shelving":  ("steel_shelf",          1.95,   111.0, MU_STEEL),
+    "safe":      ("steel_safe",           1.45,   731.0, MU_STEEL),
+}
+
+# Doorway rows contain label, centre, opening dimensions, and furniture kind.
+_DOORWAYS = (
+    ("d1",  5.5 + _WALL_T / 2, 27.75, _WALL_T, 1.5, "mattress"),
+    ("d2",  20 + _WALL_T / 2,  27.5,  _WALL_T, 2.0, "wardrobe"),
+    ("d3",  3.0,  25.5 + _WALL_T / 2, 2.0, _WALL_T, "drawers"),
+    ("d4",  13.25, 25.5 + _WALL_T / 2, 1.5, _WALL_T, "bookcase"),
+    ("d5",  20 + _WALL_T / 2, 23.25, _WALL_T, 1.5, "cartons"),
+
+    ("d6",  3.75, 20.8 + _WALL_T / 2, 1.5, _WALL_T, "drawers"),
+    ("d7",  8.0,  20.8 + _WALL_T / 2, 2.0, _WALL_T, "sideboard"),
+    ("d8",  12.0, 20.8 + _WALL_T / 2, 2.0, _WALL_T, "table"),
+    ("d9",  17.75, 20.8 + _WALL_T / 2, 1.5, _WALL_T, "mattress"),
+    ("d10", 23.75, 20.8 + _WALL_T / 2, 1.5, _WALL_T, "cartons"),
+    ("d11", 27.75, 20.8 + _WALL_T / 2, 1.5, _WALL_T, "bookcase"),
+
+    ("d12", 25 + _WALL_T / 2, 16.0, _WALL_T, 2.0, "wardrobe"),
+    ("d13", 7.75, 12.0 + _WALL_T / 2, 1.5, _WALL_T, "files"),
+    ("d14", 27.75, 12.0 + _WALL_T / 2, 1.5, _WALL_T, "cartons"),
+    ("d15", 25 + _WALL_T / 2, 10.25, _WALL_T, 1.5, "drawers"),
+    ("d16", 10.025, 8.75, 0.45, 1.5, "bookcase"),
+    ("d17", 27.75, 8.0 + _WALL_T / 2, 1.5, _WALL_T, "cartons"),
+    ("d18", 7.75, 5.0 + _WALL_T / 2, 1.5, _WALL_T, "sideboard"),
+
+    ("d19", 20 + _WALL_T / 2, 3.75, _WALL_T, 1.5, "drawers"),
+    ("d20", 5.0 + _WALL_T / 2, 2.75, _WALL_T, 1.5, "mattress"),
+    ("d21", 10.025, 2.75, 0.45, 1.5, "cartons"),
+    # The floor safe is intentionally impractical to move.
+    ("d22", 25 + _WALL_T / 2, 2.75, _WALL_T, 1.5, "safe"),
+
+    ("d23", 2.5,  12.0 + _WALL_T / 2, 2.0, _WALL_T, "bookcase"),
+    ("d24", 15.5, 16.25 + _WALL_T / 2, 2.0, _WALL_T, "table"),
+    ("d25", 23.0, 8.0 + _WALL_T / 2, 2.0, _WALL_T, "shelving"),
+    ("d26", 2.5,  5.0 + _WALL_T / 2, 2.0, _WALL_T, "sideboard"),
+
+    ("d27", 17.5, 25.5 + _WALL_T / 2, 2.0, _WALL_T, "wardrobe"),
+    ("d28", 14.8 + _WALL_T / 2, 23.5, _WALL_T, 2.0, "cartons"),
+)
+
+
 def _door_blocker(label: str, x: float, y: float, l: float, d: float,
-                  material: str = DEFAULT_DOOR_MATERIAL,
-                  difficulty: float | None = None) -> MovableObstacle:
-    """Create a movable obstacle that fits within a doorway."""
+                  kind: str) -> MovableObstacle:
+    """Stand one piece of furniture in a doorway, trimmed to fit the frame."""
+    material, h, density, mu = _DOOR_KINDS[kind]
     if l > d:
         l -= DOOR_CLEARANCE
     else:
         d -= DOOR_CLEARANCE
-    h = material_height(material)
-    if difficulty is None:
-        difficulty = round(friction_force(material_mu_rho(material), l * d * h), 3)
+    mass = density * l * d * h
     return MovableObstacle(
         x=x,
         y=y,
@@ -30,9 +88,20 @@ def _door_blocker(label: str, x: float, y: float, l: float, d: float,
         h=h,
         theta=0.0,
         material=material,
-        difficulty=difficulty,
+        difficulty=push_force(mass, mu),
         oid=f"door{DOOR_OID_BASE + int(label[1:])}",
     )
+
+
+def _furniture(oid: str, x: float, y: float, l: float, d: float, h: float,
+               theta: float, material: str, *, mass: float,
+               mu: float) -> MovableObstacle:
+    """Place one piece of furniture from its real size, mass and floor grip."""
+    return MovableObstacle(
+        x=x, y=y, l=l, d=d, h=h, theta=theta, material=material,
+        difficulty=push_force(mass, mu), oid=oid,
+    )
+
 
 def create():
     """Create the complex maze scenario."""
@@ -101,204 +170,112 @@ def create():
 
     ]
 
-    door_blockers = [
-        _door_blocker("d1", 5.5 + t / 2, 27.75, t, 1.5),
-        _door_blocker("d2", 20 + t / 2, 27.5, t, 2.0),
-        _door_blocker("d3", 3.0, 25.5 + t / 2, 2.0, t),
-        _door_blocker("d4", 13.25, 25.5 + t / 2, 1.5, t),
-        _door_blocker("d5", 20 + t / 2, 23.25, t, 1.5),
-
-        _door_blocker("d6", 3.75, 20.8 + t / 2, 1.5, t),
-        _door_blocker("d7", 8.0, 20.8 + t / 2, 2.0, t),
-        _door_blocker("d8", 12.0, 20.8 + t / 2, 2.0, t),
-        _door_blocker("d9", 17.75, 20.8 + t / 2, 1.5, t),
-        _door_blocker("d10", 23.75, 20.8 + t / 2, 1.5, t),
-        _door_blocker("d11", 27.75, 20.8 + t / 2, 1.5, t),
-
-        _door_blocker("d12", 25 + t / 2, 16.0, t, 2.0),
-        _door_blocker("d13", 7.75, 12.0 + t / 2, 1.5, t),
-        _door_blocker("d14", 27.75, 12.0 + t / 2, 1.5, t),
-        _door_blocker("d15", 25 + t / 2, 10.25, t, 1.5),
-        _door_blocker("d16", 10.025, 8.75, 0.45, 1.5),
-        _door_blocker("d17", 27.75, 8.0 + t / 2, 1.5, t),
-        _door_blocker("d18", 7.75, 5.0 + t / 2, 1.5, t),
-
-        _door_blocker("d19", 20 + t / 2, 3.75, t, 1.5),
-        _door_blocker("d20", 5.0 + t / 2, 2.75, t, 1.5),
-        _door_blocker("d21", 10.025, 2.75, 0.45, 1.5),
-        _door_blocker(
-            "d22", 25 + t / 2, 2.75, t, 1.5,
-            material="concrete_block",
-        ),
-
-        _door_blocker("d23", 2.5, 12.0 + t / 2, 2.0, t),
-        _door_blocker("d24", 15.5, 16.25 + t / 2, 2.0, t),
-        _door_blocker("d25", 23.0, 8.0 + t / 2, 2.0, t),
-        _door_blocker("d26", 2.5, 5.0 + t / 2, 2.0, t),
-
-        _door_blocker("d27", 17.5, 25.5 + t / 2, 2.0, t),
-        _door_blocker("d28", 14.8 + t / 2, 23.5, t, 2.0),
-    ]
+    door_blockers = [_door_blocker(*spec) for spec in _DOORWAYS]
 
     start = (28, 2)
     goal = (2,27)
 
+    # Furniture is grouped by room; mass and friction determine difficulty.
     manual_obstacles = [
-        MovableObstacle(
-            x=1.5,
-            y=13.5,
-            l=2.0,
-            d=2.0,
-            h=1,
-            theta=0.0,
-            material="concrete_block",
-            difficulty=56505.6,
-            oid="homeOffice1",
-        ),
-        MovableObstacle(
-            x=12.8, y=11, l=4.6, d=6.6, h=1.6, theta=0.0,
-            material="industrial_machine", difficulty=166785.696, oid="livingRoom1",
-        ),
-        MovableObstacle(
-            x=17.7, y=11.5, l=2.0, d=3.8, h=1, theta=0.0,
-            material="wooden_crate", difficulty=2013.012, oid="livingRoom2",
-        ),
-        MovableObstacle(
-            x=12.0, y=6.65, l=1.6, d=1.2, h=1, theta=0.0,
-            material="wooden_crate", difficulty=508.55, oid="kitchen1",
-        ),
-        MovableObstacle(
-            x=12.0, y=3.25, l=1.5, d=2.0, h=1, theta=0.0,
-            material="wooden_crate", difficulty=794.61, oid="kitchen2",
-        ),
-        MovableObstacle(
-            x=13.8, y=5.2, l=0.8, d=1.0, h=1, theta=0.0,
-            material="wooden_crate", difficulty=211.896, oid="kitchen3",
-        ),
-        MovableObstacle(
-            x=18.9, y=4.7, l=1.2, d=1.3, h=1, theta=0.0,
-            material="wooden_crate", difficulty=413.197, oid="kitchen4",
-        ),
-        MovableObstacle(
-            x=18.9, y=3.4, l=1.2, d=1.3, h=1, theta=0.0,
-            material="wooden_crate", difficulty=413.197, oid="kitchen5",
-        ),
-        MovableObstacle(
-            x=27.75, y=6.7, l=1.4, d=1.2, h=0.8, theta=0.0,
-            material="cardboard_box", difficulty=184.585, oid="entryway1",
-        ),
-        MovableObstacle(
-            x=13.05, y=27.7, l=1.2, d=1.2, h=1, theta=0.0,
-            material="wooden_crate", difficulty=381.413, oid="guestBedroom1",
-        ),
-        MovableObstacle(
-            x=23.75, y=27.75, l=4.5, d=3.5, h=1, theta=0.0,
-            material="wooden_crate", difficulty=4171.703, oid="kidsBedroom1",
-        ),
-        MovableObstacle(
-            x=10.25, y=24.3, l=4.5, d=2.1, h=1, theta=0.0,
-            material="wooden_crate", difficulty=2503.022, oid="masterBedroom1",
-        ),
-        MovableObstacle(
-            x=23.0, y=23.05, l=1.1, d=3.0, h=1, theta=0.0,
-            material="wooden_crate", difficulty=874.071, oid="kidsBedroom2",
-        ),
+        # Home office: loaded steel shelving.
+        _furniture("homeOffice1", 1.5, 13.5, 2.0, 1.9, 2.0, 0.0,
+                   "steel_shelf", mass=640.0, mu=MU_STEEL),
+        _furniture("homeOffice2", 3.8, 13.5, 1.8, 0.9, 0.75, 0.0,
+                   "desk", mass=65.0, mu=MU_WOOD),
+        # Angled loaded shelving unit.
+        _furniture("homeOffice3", 7.5, 14.6, 2.0, 0.42, 1.95, -0.91,
+                   "loaded_bookcase", mass=130.0, mu=MU_WOOD),
 
-        MovableObstacle(
-            x=14.0, y=18.7, l=2.5, d=2.3, h=1, theta=0.0,
-            material="wooden_crate", difficulty=1523.003, oid="familyRoom1",
-        ),
-        MovableObstacle(
-            x=28.0, y=16.75, l=1.8, d=2.8, h=1, theta=0.0,
-            material="wooden_crate", difficulty=1334.945, oid="bathroom1",
-        ),
-        MovableObstacle(
-            x=3.8, y=13.5, l=1.8, d=1.6, h=1, theta=0.0,
-            material="wooden_crate", difficulty=762.826, oid="homeOffice2",
-        ),
-        MovableObstacle(
-            x=6.6, y=7.4, l=5.0, d=1.4, h=1, theta=0.53,
-            material="wooden_crate", difficulty=1854.09, oid="diningRoom1",
-        ),
-        MovableObstacle(
-            x=2.6, y=3.1, l=1.6, d=1.5, h=1, theta=0.0,
-            material="wooden_crate", difficulty=635.688, oid="powderRoom1",
-        ),
-        MovableObstacle(
-            x=6.9, y=1.5, l=2.2, d=1.8, h=1, theta=0.0,
-            material="wooden_crate", difficulty=1048.885, oid="laundryRoom1",
-        ),
-        MovableObstacle(
-            x=17.1, y=27.5, l=3.0, d=0.75, h=1, theta=0.92,
-            material="wooden_crate", difficulty=595.957, oid="guestBedroom2",
-        ),
-        MovableObstacle(
-            x=6.4, y=23.7, l=4.4, d=0.75, h=1, theta=-0.65,
-            material="wooden_crate", difficulty=874.071, oid="masterBedroom2",
-        ),
-        MovableObstacle(
-            x=17.2, y=22.8, l=2.7, d=0.85, h=1, theta=-0.82,
-            material="wooden_crate", difficulty=607.877, oid="ensuiteBathroom1",
-        ),
-        MovableObstacle(
-            x=7.5, y=14.6, l=3.8, d=0.8, h=1, theta=-0.91,
-            material="wooden_crate", difficulty=805.205, oid="homeOffice3",
-        ),
-        MovableObstacle(
-            x=22.5, y=12.3, l=8.25, d=0.7, h=1, theta=1.07,
-            material="wooden_crate", difficulty=1529.624, oid="hallway1",
-        ),
-        MovableObstacle(
-            x=3.8, y=9.5, l=4.3, d=0.75, h=1, theta=-1.05,
-            material="wooden_crate", difficulty=854.206, oid="diningRoom2",
-        ),
-        MovableObstacle(
-            x=23.0, y=4.0, l=3.8, d=0.9, h=1, theta=-0.7,
-            material="wooden_crate", difficulty=905.855, oid="storageRoom1",
-        ),
-        MovableObstacle(
-            x=15, y=2.0, l=4.6, d=0.75, h=1, theta=-0.45,
-            material="wooden_crate", difficulty=913.801, oid="kitchen6",
-        ),
-        MovableObstacle(
-            x=28.1, y=23.2, l=0.5, d=0.5, h=1, theta=0.00,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom3",
-        ),
-        MovableObstacle(
-            x=26.2, y=23.2, l=0.5, d=0.5, h=1, theta=0.17,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom4",
-        ),
-        MovableObstacle(
-            x=27, y=23.2, l=0.5, d=0.5, h=1, theta=0.35,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom5",
-        ),
-        MovableObstacle(
-            x=26.5, y=22, l=0.5, d=0.5, h=1, theta=0.52,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom6",
-        ),
-        MovableObstacle(
-            x=27.3, y=22.2, l=0.5, d=0.5, h=1, theta=0.70,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom7",
-        ),
-        MovableObstacle(
-            x=27.9, y=22, l=0.5, d=0.5, h=1, theta=0.87,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom8",
-        ),
-        MovableObstacle(
-            x=27, y=24, l=0.5, d=0.5, h=1, theta=1.05,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom9",
-        ),
-        MovableObstacle(
-            x=28, y=24, l=0.5, d=0.5, h=1, theta=1.22,
-            material="wooden_crate", difficulty=66.218, oid="kidsBedroom10",
-        ),
+        # Living room: sectional sofa.
+        _furniture("livingRoom1", 12.8, 11.0, 3.3, 2.6, 0.85, 0.0,
+                   "sofa", mass=155.0, mu=MU_UPHOLSTERY),
+        _furniture("livingRoom2", 17.7, 11.5, 2.4, 0.55, 2.0, 0.0,
+                   "media_wall_unit", mass=120.0, mu=MU_WOOD),
 
+        # Kitchen: island on locked castors.
+        _furniture("kitchen1", 12.0, 6.65, 1.6, 0.9, 0.92, 0.0,
+                   "kitchen_island", mass=110.0, mu=MU_FELT_PADS),
+        _furniture("kitchen2", 12.0, 3.25, 0.92, 0.75, 1.78, 0.0,
+                   "fridge_freezer", mass=130.0, mu=MU_WOOD),
+        _furniture("kitchen3", 13.8, 5.2, 0.6, 0.6, 0.85, 0.0,
+                   "dishwasher", mass=48.0, mu=MU_WOOD),
+        _furniture("kitchen4", 18.9, 4.7, 0.9, 0.65, 0.9, 0.0,
+                   "range_cooker", mass=85.0, mu=MU_STEEL),
+        _furniture("kitchen5", 18.9, 3.4, 1.1, 0.65, 0.85, 0.0,
+                   "chest_freezer", mass=95.0, mu=MU_WOOD),
+        # Unbolted worktop run.
+        _furniture("kitchen6", 15.0, 2.0, 2.6, 0.65, 0.9, -0.45,
+                   "counter_run", mass=90.0, mu=MU_WOOD),
+
+        # Dining room.
+        _furniture("diningRoom1", 6.6, 7.4, 2.4, 1.1, 0.76, 0.53,
+                   "dining_table", mass=75.0, mu=MU_FELT_PADS),
+        _furniture("diningRoom2", 3.8, 9.5, 1.8, 0.5, 0.9, -1.05,
+                   "sideboard", mass=70.0, mu=MU_FELT_PADS),
+
+        # Utility rooms.
+        _furniture("powderRoom1", 2.6, 3.1, 1.0, 0.55, 0.85, 0.0,
+                   "vanity_unit", mass=48.0, mu=MU_FELT_PADS),
+        # Plumbed washer and dryer.
+        _furniture("laundryRoom1", 6.9, 1.5, 1.24, 0.65, 0.9, 0.0,
+                   "washing_machine", mass=145.0, mu=MU_STEEL),
+
+        # Entry and storage.
+        _furniture("entryway1", 27.75, 6.7, 1.2, 0.8, 1.1, 0.0,
+                   "cardboard_box", mass=42.0, mu=MU_WOOD),
+        _furniture("storageRoom1", 23.0, 4.0, 1.8, 0.5, 1.95, -0.7,
+                   "steel_shelf", mass=180.0, mu=MU_STEEL),
+        # Rolled hall carpet.
+        _furniture("hallway1", 22.5, 12.3, 3.2, 0.45, 0.45, 1.07,
+                   "rolled_carpet", mass=45.0, mu=MU_UPHOLSTERY),
+
+        # Family room and bathrooms.
+        _furniture("familyRoom1", 14.0, 18.7, 2.2, 0.95, 0.85, 0.0,
+                   "sofa", mass=85.0, mu=MU_UPHOLSTERY),
+        # Empty cast-iron bathtub.
+        _furniture("bathroom1", 28.0, 16.75, 1.75, 0.8, 0.6, 0.0,
+                   "cast_iron_bathtub", mass=130.0, mu=MU_STEEL),
+        _furniture("ensuiteBathroom1", 17.2, 22.8, 1.2, 0.6, 0.85, -0.82,
+                   "vanity_unit", mass=58.0, mu=MU_FELT_PADS),
+
+        # Bedrooms.
+        _furniture("masterBedroom1", 10.25, 24.3, 2.15, 2.0, 0.6, 0.0,
+                   "king_bed", mass=145.0, mu=MU_WOOD),
+        # Empty bookcase tipped onto its back.
+        _furniture("masterBedroom2", 6.4, 23.7, 2.4, 1.0, 0.6, -0.65,
+                   "flat_packed_wardrobe", mass=95.0, mu=MU_WOOD),
+        _furniture("guestBedroom1", 13.05, 27.7, 1.2, 0.55, 1.1, 0.0,
+                   "chest_of_drawers", mass=62.0, mu=MU_FELT_PADS),
+        _furniture("guestBedroom2", 17.1, 27.5, 2.0, 0.95, 0.55, 0.92,
+                   "single_bed", mass=68.0, mu=MU_WOOD),
+        _furniture("kidsBedroom1", 23.75, 27.75, 2.05, 1.45, 1.7, 0.0,
+                   "bunk_bed", mass=110.0, mu=MU_WOOD),
+        _furniture("kidsBedroom2", 23.0, 23.05, 1.1, 0.6, 2.05, 0.0,
+                   "flat_packed_wardrobe", mass=88.0, mu=MU_WOOD),
     ]
+
+    # Children's room contains a dense cluster of light cartons.
+    toy_cartons = (
+        (28.1, 23.2, 0.00), (26.2, 23.2, 0.17), (27.0, 23.2, 0.35),
+        (26.5, 22.0, 0.52), (27.3, 22.2, 0.70), (27.9, 22.0, 0.87),
+        (27.0, 24.0, 1.05), (28.0, 24.0, 1.22),
+    )
+    manual_obstacles.extend(
+        _furniture(f"kidsBedroom{3 + index}", x, y, 0.5, 0.5, 0.45, theta,
+                   "cardboard_box", mass=9.0, mu=MU_WOOD)
+        for index, (x, y, theta) in enumerate(toy_cartons)
+    )
 
     movable = [
         *manual_obstacles,
         *door_blockers,
     ]
+
+    cfg = Config()
+    _realism.check_layout(
+        "home", workspace=workspace, static=walls, movable=movable,
+        start=start, goal=goal, cfg=cfg,
+    )
 
     return {
         "workspace": workspace,
@@ -306,5 +283,5 @@ def create():
         "movable": movable,
         "start": start,
         "goal": goal,
-        "cfg": Config(),
+        "cfg": cfg,
     }

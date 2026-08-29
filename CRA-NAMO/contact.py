@@ -24,16 +24,11 @@ _INFLATED_CACHE: Dict[Tuple[bytes, float], object] = {}
 
 
 def inflate_others(others, cfg):
-    """Robot-centre positions ruled out by the obstacles that are *not* being moved.
-
-    Content-addressed by WKB: the union is rebuilt from scratch for every removal
-    candidate, but the same set of obstacles recurs constantly across edges and
-    cycles, and inflating it is the expensive half.
-    """
+    """Return cached robot-centre exclusions for stationary obstacles."""
     if others is None or others.is_empty:
         return None
     pad = max(cfg.robot_radius - cfg.contact_clearance, 1e-6)
-    key = (others.wkb, round(pad, 9))     # a different robot inflates it differently
+    key = (others.wkb, round(pad, 9))
     cached = _INFLATED_CACHE.get(key)
     if cached is not None:
         return cached
@@ -47,20 +42,7 @@ def inflate_others(others, cfg):
 
 @dataclass
 class ContactPlan:
-    """Where the robot is at every step of a manipulation.
-
-    ``robot_path`` is one continuous polyline:
-        [start] + [grip point per extended pose] + [end]
-    ``move_offset`` maps move-path indices onto it: the robot is at
-    ``robot_path[move_offset + i]`` while the obstacle is at ``poses[i]``.
-    The entries before ``move_offset`` are the approach plus any walk around the
-    stationary obstacle to reach the chosen grip side; the entries after the
-    push are the walk out to wherever it lets go.
-
-    ``exit_index`` says which of the caller's candidate release points that was,
-    so the caller can tell where the robot now stands — -1 when it never left
-    the roadmap position it set out from.
-    """
+    """Store the robot path, alignment and travel for one manipulation."""
     feasible: bool
     reason: str = ""
     robot_path: List[XY] = field(default_factory=list)
@@ -78,23 +60,15 @@ class ContactPlan:
 
 
 def idle_plan(robot_pos: XY, n_poses: int) -> ContactPlan:
-    """Degenerate plan used when contact is not required: the obstacle moves on
-    its own and the robot stays put. Shaped like a real plan — start, one entry
-    per pose, end — so the executor needs no special case, but every entry is the
-    same point, so it accrues no travel."""
+    """Return a zero-travel plan for an obstacle that moves without contact."""
     return ContactPlan(True, "", [tuple(robot_pos)] * (max(1, n_poses) + 2), 1, 0.0)
 
 
 def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
-    """Robot centre positions in contact with an ``l`` x ``d`` rectangle.
-
-    Returns a (K, 2) array of points in the obstacle's local frame, ordered
-    counter-clockwise and equally spaced by arc length, each exactly ``r`` away
-    from the rectangle's boundary.
-    """
+    """Return equally spaced contact centres around a rectangle."""
     hl, hd = l / 2.0, d / 2.0
     quarter = 0.5 * math.pi * r
-    # counter-clockwise: right edge, corner, top edge, corner, ...
+    # Segments follow the rectangle boundary counter-clockwise.
     segments = [
         ("line", (hl + r, -hd), (0.0, 1.0), d),
         ("arc", (hl, hd), 0.0, quarter),
@@ -111,10 +85,10 @@ def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray
 
     pts = np.empty((k, 2), dtype=float)
     step = perimeter / k
-    seg_i, seg_s = 0, 0.0          # current segment and how far into it we are
+    seg_i, seg_s = 0, 0.0
     for n in range(k):
         target = n * step
-        # advance to the segment containing `target`
+        # Locate the segment containing this perimeter distance.
         acc = 0.0
         for si, seg in enumerate(segments):
             length = seg[3]
@@ -134,23 +108,14 @@ def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray
 
 
 def lever_arms(stations: np.ndarray, l: float, d: float) -> np.ndarray:
-    """Distance from the body centre to the contact point behind each station.
-
-    The force acts where the robot touches the rectangle, not at its own centre,
-    so the station is walked back onto the surface first — for a rectangle that
-    is just a clamp of the local coordinates to the faces.
-    """
+    """Return the lever arm from the body centre to each contact station."""
     cx = np.clip(stations[:, 0], -l / 2.0, l / 2.0)
     cy = np.clip(stations[:, 1], -d / 2.0, d / 2.0)
     return np.hypot(cx, cy)
 
 
 def min_lever_arm(l: float, d: float, cfg) -> float:
-    """Shortest lever arm that can still turn an ``l`` x ``d`` body.
-
-    ``f * rho / a <= ratio * f``, so ``a >= rho / ratio``. A ratio of 0 (or less)
-    switches the rule off and every grip may turn anything.
-    """
+    """Return the minimum lever arm allowed by the configured force ratio."""
     ratio = float(getattr(cfg, "contact_max_force_ratio", 0.0))
     if ratio <= 0.0:
         return 0.0
@@ -158,15 +123,7 @@ def min_lever_arm(l: float, d: float, cfg) -> float:
 
 
 def _unwrapped_angles(poses: Sequence[Pose]) -> np.ndarray:
-    """Continuous heading along the path.
-
-    The SE(2) planner stores orientation modulo pi, because a rectangle at theta
-    and at theta+pi has the same footprint. A grip point does not: the body
-    really did turn, and tracking the stored angle would slide the robot to the
-    opposite face the moment the index wraps from pi back to 0. Accumulating the
-    short-way delta — the same `wrap_dtheta` the swept volume and the rotation
-    cost use — keeps the grip on the face it is actually holding.
-    """
+    """Unwrap headings so a tracked grip stays on the same rectangle face."""
     th = [float(poses[0][2])]
     for a, b in zip(poses, poses[1:]):
         th.append(th[-1] + geometry.wrap_dtheta(a[2], b[2]))
@@ -185,14 +142,7 @@ def _world_positions(stations: np.ndarray, poses: Sequence[Pose]) -> np.ndarray:
 
 
 def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
-    """Can the robot drive straight from *a* to *b*?
-
-    Walls are checked over the whole segment (``free_geom`` is the static free
-    space already eroded by the robot radius).  Movable obstacles are checked
-    over the segment trimmed by one robot radius at each end: both endpoints are
-    positions the robot is known to be able to occupy, and the last radius of an
-    approach is the docking move that ends flush against the obstacle.
-    """
+    """Check a straight robot segment against static and movable exclusions."""
     seg = LineString([a, b])
     if not shapely.contains(free_geom, seg):
         return False
@@ -206,31 +156,7 @@ def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
 
 
 def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
-    """The nearest spot to *p* the robot could actually be standing on.
-
-    The reference point a manipulation is measured from is a roadmap position,
-    and roadmap positions ignore movable obstacles — so it routinely lies within
-    a robot radius of the very obstacle being moved, which is nowhere the robot
-    could be. Testing a drive-in from there is meaningless, but *skipping* the
-    test makes every grip point on the obstacle look directly reachable,
-    including the ones on the far face: that is how the robot ends up crossing
-    the obstacle instead of walking round it. Shifting the test out to the
-    nearest place it could stand keeps the test.
-
-    Returns *p* unchanged when it already is such a place, and None when there
-    is nowhere to shift it to. None is a refusal, not a pass: a reference point
-    with no standable spot anywhere near it is one the robot cannot drive to or
-    from, so there is no line to test *because there is no line*. Reading it the
-    other way — no test, therefore no objection — waves every grip point on the
-    obstacle through, which is exactly the check this function exists to keep.
-
-    Which makes it worth looking properly. The nearest point of the boundary is
-    often in the daylight gap beside a body plugging a doorway: a place the
-    robot could not stand, next to a body it could perfectly well walk round to
-    and push. So the nearest point is tried first because it is cheap, and if it
-    is not somewhere the robot fits, the search moves to the part of the
-    boundary that is.
-    """
+    """Return the nearest feasible robot position to a roadmap reference point."""
     if not shapely.intersects_xy(blockers, *p):
         return p
     boundary = blockers.boundary
@@ -253,20 +179,7 @@ def plan_contact(obs,
                  free_geom,
                  others_inflated,
                  cfg) -> ContactPlan:
-    """Plan the robot's trajectory for one manipulation.
-
-    ``exits``           candidate release points as ``(point, detour)`` pairs, at
-                        least one. ``detour`` is what it would still cost the
-                        robot to be *there* rather than on its route — 0 for the
-                        far end of the edge it is clearing, the edge's length for
-                        the end it set out from. It steers the choice only; the
-                        travel reported is the travel actually driven.
-    ``free_geom``       prepared polygon of robot-centre positions that clear the
-                        static walls (static free space eroded by the robot radius).
-    ``others_inflated`` prepared polygon of robot-centre positions forbidden by the
-                        *other* movable obstacles (their union inflated by the robot
-                        radius), or None.
-    """
+    """Plan a collision-free robot trajectory for one obstacle manipulation."""
     if not poses:
         return ContactPlan(False, "empty move path")
     if not exits:
@@ -276,25 +189,19 @@ def plan_contact(obs,
     tol = float(cfg.contact_clearance)
     stations = contact_stations(obs.l, obs.d, r, cfg.contact_station_spacing)
     k = len(stations)
-    # a grip may only be on the body while it turns if it can supply the moment
+    # Turning requires a contact station with enough lever arm.
     has_lever = (lever_arms(stations, obs.l, obs.d)
                  >= min_lever_arm(obs.l, obs.d, cfg) - 1e-9)
 
-    # how far the grip may slide along the surface within one manipulation sub-step
+    # Limit contact-index movement to the configured slide distance.
     step_arc = (2.0 * (obs.l + obs.d) + 2.0 * math.pi * r) / k
-    # floor, not round: rounding up would let the grip slide further per sub-step
-    # than contact_max_slide allows. One station is always permitted, otherwise a
-    # coarsely sampled perimeter would freeze the grip in place entirely.
     max_shift = max(1, int(cfg.contact_max_slide / max(step_arc, 1e-6)))
-    # room to walk around the stationary obstacle before and after the move, so
-    # the far side stays reachable even when the direct line to it is blocked
+    # Padding gives the robot room to walk around the stationary obstacle.
     pad = int(math.ceil(k / (2.0 * max_shift)))
 
     ext: List[Pose] = ([poses[0]] * pad) + list(poses) + ([poses[-1]] * pad)
     world = _world_positions(stations, ext)
     t_total = len(ext)
-    # the padding poses are the obstacle standing still, so only the real
-    # sub-steps in the middle can ever be turns
     turns = [abs(geometry.wrap_dtheta(a[2], b[2])) > 1e-9
              for a, b in zip(ext, ext[1:])]
 
@@ -307,8 +214,7 @@ def plan_contact(obs,
     if not feas.any():
         return ContactPlan(False, "no reachable grip point on this obstacle")
 
-    # the obstacle itself blocks the approach and the exit walk, but not
-    # the grip points (those are flush against it by construction)
+    # The body blocks approach and exit paths, but not its contact stations.
     def _with_body(pose: Pose):
         body = obs.polygon_at(pose[0], pose[1], pose[2]).buffer(max(r - tol, 0.0))
         merged = body if others_inflated is None else others_inflated.union(body)
@@ -318,10 +224,7 @@ def plan_contact(obs,
     approach_blockers = _with_body(poses[0])
     exit_blockers = approach_blockers if len(poses) == 1 else _with_body(poses[-1])
 
-    # Where the drive-in and drive-out get tested from. Every reference point is a
-    # roadmap position, so any of them may lie under the obstacle itself; the test
-    # then runs from the nearest spot the robot could stand on instead. Distances
-    # are still charged from the original points — only the line test moves.
+    # Roadmap references may lie inside the body, so line tests use standable points.
     start_ref = _standable(robot_start, approach_blockers, free_geom)
     exit_pts = np.asarray([e[0] for e in exits], dtype=float)
     exit_detour = np.asarray([e[1] for e in exits], dtype=float)
@@ -344,15 +247,13 @@ def plan_contact(obs,
     shifts = range(-max_shift, max_shift + 1)
     for t in range(t_total - 1):
         feas_next = feas[t + 1]
-        # On a sub-step that turns the body, both ends of the slide have to be
-        # grips that could have turned it. The stations passed over in between
-        # are transient and are only asked to be clear.
+        # A turning step requires both endpoint grips to supply the needed moment.
         turning = turns[t]
         src_cost = np.where(has_lever, cost, _INF) if turning else cost
         best = np.full(k, _INF)
         best_src = np.full(k, -1, dtype=np.int64)
         for shift in shifts:
-            # every station the grip slides across must be free at the next pose
+            # Every station crossed during a slide must be free at the next pose.
             slide_ok = np.ones(k, dtype=bool)
             span = range(0, shift + 1) if shift >= 0 else range(shift, 1)
             for e in span:
@@ -371,10 +272,7 @@ def plan_contact(obs,
             return ContactPlan(
                 False, "robot cannot stay in contact for the whole manipulation")
 
-    # every (grip, release point) pair in ascending total cost, `detour` included
-    # so that letting go on the far side of a cleared edge beats letting go on the
-    # near side by exactly the length of the edge it saves. The first pair with a
-    # clear drive-out wins.
+    # Evaluate release points by total travel plus the caller's detour estimate.
     exit_dist = np.linalg.norm(world[-1][:, None, :] - exit_pts[None, :, :], axis=2)
     total = cost[:, None] + exit_dist + exit_detour[None, :]
     chosen, chosen_exit = -1, -1
@@ -400,4 +298,3 @@ def plan_contact(obs,
     path = [tuple(robot_start)] + grip + [end]
     travel = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
     return ContactPlan(True, "", path, 1 + pad, travel, chosen_exit)
-

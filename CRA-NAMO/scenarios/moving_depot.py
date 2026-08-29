@@ -1,34 +1,4 @@
-"""A depot that will not hold still: the map changes while the robot crosses it.
-
-Two rooms joined by one door, and beyond the door a neck plugged by a crate.
-None of what follows is in the map the robot is handed — it is in the world, and
-the robot finds it out the way it finds out everything else, by looking.
-
-    the trolley     Waits in the first room until the robot is halfway to the
-                    door, then crosses through it. 1.6 m of trolley in a 2.0 m
-                    door leaves nothing to squeeze past, and at 6 cm/s it is in
-                    the way for the best part of a minute. The robot can wait for
-                    the door to clear, follow it through, or take hold of it and
-                    set it aside — and if it does that, the trolley carries on to
-                    where it was going from wherever it was put down.
-
-    the crate       1.5 m of crate in the 2.0 m neck beyond the door. Nothing
-                    dynamic about it: it is there to be moved, and moving it is
-                    what sets the pallet off.
-
-    the pallet      Parked in the far room, where the robot sees it early and
-                    prices it as an empty pallet. Partway through the run the
-                    load settles: it becomes a bigger, far heavier concrete
-                    block. The robot goes on believing the old figure until it
-                    next looks at it, and only learns the new weight by taking
-                    hold of it, because weight is not a thing you can see. Then,
-                    once the crate has been moved, the pallet rolls into the last
-                    aisle and the robot has to deal with it at its new weight —
-                    which is most of what the run ends up costing.
-
-One trigger of each kind the dynamics support: a place the robot reaches, a
-moment on the clock, an obstacle the robot moves.
-"""
+"""Dynamic depot scenario with moving, triggered, and mutated obstacles."""
 
 from __future__ import annotations
 
@@ -45,9 +15,9 @@ _WIDTH = 20.0
 _HEIGHT = 10.0
 _SHELL = 0.5
 
-_DIVIDER_X = (9.8, 10.2)         # the wall between the two rooms
-_DOOR = (4.0, 6.0)               # the one gap in it
-_NECK_X = (13.0, 13.4)           # the thin neck beyond it
+_DIVIDER_X = (9.8, 10.2)         # Wall separating the two rooms.
+_DOOR = (4.0, 6.0)               # Door opening in the divider.
+_NECK_X = (13.0, 13.4)           # Narrow neck beyond the divider.
 _NECK = (4.0, 6.0)
 
 _START = (2.5, 5.0)
@@ -75,21 +45,21 @@ def create():
     ]
 
     movable = [
-        # Waiting in the first room with its own errand to run.
+        # Trolley waits in the first room.
         MovableObstacle(
             x=9.0, y=6.6, l=1.6, d=0.6, h=0.9, theta=math.pi / 2.0,
             material="service_trolley",
             difficulty=_difficulty("service_trolley", 1.6, 0.6, 0.9),
             oid=1,
         ),
-        # Plugs the neck: 1.5 m of crate across a 2.0 m gap.
+        # Crate plugs the narrow neck.
         MovableObstacle(
             x=13.2, y=5.0, l=1.5, d=1.1, h=1.0, theta=math.pi / 2.0,
             material="wooden_crate",
             difficulty=_difficulty("wooden_crate", 1.5, 1.1, 1.0),
             oid=2,
         ),
-        # Parked out of the way in the far room, for now.
+        # Pallet starts parked in the far room.
         MovableObstacle(
             x=16.5, y=8.4, l=1.2, d=1.0, h=0.9, theta=0.0,
             material="empty_pallet",

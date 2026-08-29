@@ -111,7 +111,7 @@ python CRA-NAMO/main.py --scenario strategy_demo
 python CRA-NAMO/main.py --scenario moving_depot
 
 # 大型迷宫场景
-python CRA-NAMO/main.py --scenario maze_doors_complex
+python CRA-NAMO/main.py --scenario maze
 ```
 
 常用参数：
@@ -136,10 +136,23 @@ python CRA-NAMO/main.py --scenario corridor --frames
 | `corridor` | 展示大型障碍物的平移、旋转和接触搬移 |
 | `strategy_demo` | 展示绕行/搬移权衡、风险评估和隐藏信息 |
 | `moving_depot` | 展示自主移动障碍物和事件触发 |
-| `maze_doors_complex` | 展示大规模地图和多障碍物搜索 |
+| `maze` | 自助仓储迷宫：外观相同的纸箱内容物差别极大，只有接触后测到的力才能区分 |
 | `ten_doors` | 十道门，每道给出「搬 A / 搬 B / 绕行」三选一；用于量化 LLM 估计误差对决策的影响 |
+| `earthquake` | 震后救援：三组耦合危险物，看似无害的推车实际支撑着开裂的梁 |
+| `home` | 搬家中的大型住宅：门口堵着衣柜、书架、床垫和纸箱，推动难度相差一个数量级 |
+| `hospital` | 医院：可推的病床与推车、上了刹车的移动 X 光机，配合定时发生的运送事件 |
+| `warehouse` | 仓库：托盘、笼车、叉车和 AGV 送货，验证大场地和动态障碍物 |
 
-新场景放在 `CRA-NAMO/scenarios/` 中，并提供无参数的 `create()` 函数。场景模块会被自动发现，文件名就是 `--scenario` 使用的名称。
+新场景放在 `CRA-NAMO/scenarios/` 中，并提供无参数的 `create()` 函数。场景模块会被自动发现，文件名就是 `--scenario` 使用的名称；以下划线开头的模块不会被当作场景。
+
+### 障碍物数据约定
+
+`scenarios/_realism.py` 提供两个工具：
+
+- `push_force(mass_kg, mu)`：真实搬移阻力按 `mu * m * g` 计算。场景写的是物体的**真实质量**和**地面摩擦系数**，不是直接写一个牛顿数——这样每个障碍物的数据都可以按“这台冰箱真有 130 kg 吗”来核对。
+- `check_layout(...)`：加载场景时检查障碍物是否与墙体或彼此重叠、是否超出边界、起点终点是否被占用，以及是否窄到机器人一推就会把它推倒。
+
+难度估计器只能看到标签和包围盒，需要自己从体积和堆密度反推阻力。真实值与估计值之间的差距正是本项目要测量的估计误差，所以场景不应该用启发式公式反算 `difficulty`。
 
 ## LLM 配置
 

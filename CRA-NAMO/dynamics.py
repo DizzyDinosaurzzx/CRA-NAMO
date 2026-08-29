@@ -1,22 +1,4 @@
-"""Drive the world's own motion: obstacles that move and change on their own.
-
-A scenario may hand the simulator a list of `Event`s. Each pairs a *trigger* —
-a moment on the clock, the robot moving some obstacle, the robot arriving
-somewhere — with an *effect*: send an obstacle off towards a pose of its own, or
-change what it is made of, how big it is, how hard it is to shift.
-
-Everything in here reads and writes ground truth only. The robot is told
-nothing: it finds out that something has moved or changed the same way it finds
-out anything else, by looking at it or by running into it. Keeping that
-separation is the point of the module boundary — `Belief` never imports this.
-
-An obstacle under way follows an SE(2) route planned for it in real time. If
-something gets in the way it stops and re-plans on the next tick, so a route is
-never trusted for longer than one step. Being picked up by the robot suspends
-it: for as long as the robot has hold of it, it is an ordinary movable obstacle
-sitting wherever the robot has put it. On release it sets off again from there,
-along a route worked out from the pose it was dropped at.
-"""
+"""Simulate obstacle motion and state changes driven by scenario events."""
 
 from __future__ import annotations
 
@@ -38,7 +20,6 @@ XY = Tuple[float, float]
 _ARRIVED_EPS = 1e-6
 
 
-# --- triggers ---
 @dataclass
 class AtTime:
     """Fire once the simulated clock passes `t` seconds."""
@@ -67,15 +48,9 @@ class NearPoint:
         return math.dist(robot_xy, self.at) <= self.radius
 
 
-# --- effects ---
 @dataclass
 class MoveTo:
-    """Send an obstacle off towards a pose of its own choosing.
-
-    `speed` is measured in the same units `cost.se2_path_length` uses, so an
-    angle counts as the distance its mean radius sweeps and one number covers
-    both halves of the motion. None takes `cfg.dynamic_speed`.
-    """
+    """Send an obstacle toward a target pose."""
     oid: int
     goal: Pose
     speed: Optional[float] = None
@@ -98,12 +73,7 @@ class Halt:
 
 @dataclass
 class Mutate:
-    """Change what an obstacle is, in place.
-
-    Anything left None is left alone. `l`, `d`, `h` and `material` are there to
-    be seen and the robot picks them up the moment it looks; `difficulty` and
-    `contact_reveals` are not, and cost it a fresh touch to learn.
-    """
+    """Change selected obstacle properties in place."""
     oid: int
     material: Optional[str] = None
     l: Optional[float] = None
@@ -121,15 +91,7 @@ class Mutate:
             raise ValueError("Mutate difficulty must be non-negative")
 
     def apply(self, dyn: "WorldDynamics") -> str:
-        """Apply what can be applied; refuse to grow the body into something else.
-
-        A change of size is the one effect that can put matter where matter
-        already is. Growing into a wall, into another body or into the robot is
-        not a change of state the world can make, so the size is left alone and
-        the rest of the change — what it is made of, how hard it is to shift —
-        goes through regardless: the load settling is still the load settling
-        even if the crate cannot get any wider where it stands.
-        """
+        """Apply the mutation, rejecting size growth into occupied space."""
         obs = dyn.obstacle(self.oid)
         if obs is None:
             return f"obstacle {self.oid} is not in the world"
@@ -164,7 +126,6 @@ class Event:
     fired: bool = False
 
 
-# --- an obstacle under way ---
 @dataclass
 class Actor:
     oid: int
@@ -194,24 +155,17 @@ class WorldDynamics:
         self.actors: Dict[int, Actor] = {}
         self.moved_by_robot: set = set()
         self.moved_on_own: set = set()
-        self.log: List[Tuple[float, str]] = []      # (clock, what happened)
-        self.version = 0            # bumped whenever ground truth changes
-        self.clock = 0.0            # simulated time the world has been advanced to
-        self.robot_xy: XY = (0.0, 0.0)   # where the robot was last seen standing
-        # Obstacles whose ground truth changed where nobody was looking. The
-        # executor drains this to expire what the robot measured off the old
-        # object — not to tell it the new figure, which still costs a touch.
+        self.log: List[Tuple[float, str]] = []
+        self.version = 0
+        self.clock = 0.0
+        self.robot_xy: XY = (0.0, 0.0)
         self.stale: set = set()
         bounds = workspace.bounds
         self._bounds = (bounds[0], bounds[2], bounds[1], bounds[3])
 
     @property
     def active(self) -> bool:
-        """Does this scenario have any world motion at all?
-
-        A scenario without events is left bit-for-bit as it was before the world
-        could move: nothing is stepped, nothing is re-planned, no extra frames.
-        """
+        """Return whether events or moving actors need simulation."""
         return bool(self.events) or bool(self.actors)
 
     @property
@@ -241,12 +195,7 @@ class WorldDynamics:
         return changed
 
     def room_to_grow(self, obs: MovableObstacle, l: float, d: float) -> str:
-        """What an ``l`` x ``d`` version of this body would grow into, if anything.
-
-        Only the part that is new has to be free: a body is allowed to keep the
-        space it already occupies, so shrinking never fails and growing is judged
-        on the ground it would take, not on the ground it stands on.
-        """
+        """Return the first object that would block a proposed size increase."""
         grown = (Polygon(geometry.rect_corners(obs.x, obs.y, l, d, obs.theta))
                  .difference(obs.polygon))
         if grown.is_empty or grown.area <= geometry.CONTACT_AREA_EPS:
@@ -267,7 +216,6 @@ class WorldDynamics:
             return "the robot"
         return ""
 
-    # --- what the executor tells it ---
     def send(self, oid: int, goal: Pose, speed: Optional[float] = None):
         """Give an obstacle somewhere to be."""
         if self.obstacle(oid) is None:
@@ -295,25 +243,13 @@ class WorldDynamics:
         if actor is None:
             return
         actor.suspended = False
-        actor.replan = True          # the route it was on started somewhere else
+        actor.replan = True
         actor.blocked_for = 0.0
-        actor.retry_at = -math.inf   # it is somewhere else now, so ask again at once
+        actor.retry_at = -math.inf
 
-    # --- the clock ---
     def advance(self, seconds: float, clock: float,
                 robot_xy: XY) -> List[Tuple[float, str]]:
-        """Let `seconds` pass in the world, beginning at `clock`.
-
-        Time is spent in sub-steps, and each one is a moment at which the world
-        may do something: an event fires when the clock reaches it rather than
-        when the caller happens to hand back control, and the bodies it sets off
-        then move for the time that is actually left, not for the whole interval.
-        A step is cut short at a scheduled moment so a timed event lands exactly
-        on its second.
-
-        Returns (when, what happened) for the log — timed at the instant it
-        happened, which is not in general the end of the interval.
-        """
+        """Advance world time in bounded steps and return event log entries."""
         if not self.active or seconds <= 0.0:
             return []
         self.robot_xy = robot_xy
@@ -347,20 +283,13 @@ class WorldDynamics:
         return notes
 
     def _until_next_time_trigger(self, clock: float) -> float:
-        """How long until the next event that goes off on the clock alone.
-
-        Everything already due has just fired, so what is left is strictly in the
-        future and the gap is a real one. Triggers that read the world rather
-        than the clock cannot be anticipated this way — they are tested at every
-        sub-step boundary, which is as often as their answer can change.
-        """
+        """Return the time until the next unfired timed event."""
         gap = math.inf
         for ev in self.events:
             if not ev.fired and isinstance(ev.trigger, AtTime):
                 gap = min(gap, ev.trigger.t - clock)
         return gap
 
-    # --- motion ---
     def _step(self, dt: float, clock: float, robot_xy: XY) -> bool:
         moved = False
         for actor in list(self.actors.values()):
@@ -371,28 +300,13 @@ class WorldDynamics:
         return moved
 
     def _blockers(self, oid: int, robot_xy: XY):
-        """What the route could not have accounted for.
-
-        Only the robot and the other movable bodies. The walls are deliberately
-        left out: `manipulation.plan_route_se2` has already put the whole route
-        through this very test against them, and what is driven here is always a
-        sub-segment of a leg it passed — a subset of a swept region already found
-        clear. Testing it again could only disagree with itself, and a body that
-        refuses its own validated route a few centimetres in stands in the door
-        for the rest of the run arguing with the planner that put it there.
-        """
+        """Return dynamic blockers for an actor's next route segment."""
         polys = [w.polygon for w in self.world if w.oid != oid]
         polys.append(Point(robot_xy).buffer(self.cfg.robot_radius))
         return [(p, p.bounds) for p in polys]
 
     def _others_union(self, oid: int, robot_xy: Optional[XY] = None):
-        """What a route for this obstacle has to steer around.
-
-        The robot is left out normally: it is about to move on, and putting it in
-        would give every step of its journey a C-space of its own. It goes in
-        only for a body that has waited for it and given up, which is the one
-        case where a route that ignores it is no use.
-        """
+        """Return the union of obstacles that an actor must avoid."""
         polys = [w.polygon for w in self.world if w.oid != oid]
         if robot_xy is not None:
             polys.append(Point(robot_xy).buffer(self.cfg.robot_radius))
@@ -418,9 +332,7 @@ class WorldDynamics:
             actor.replan = False
             actor.avoid_robot = False
             if not actor.path:
-                # Nowhere to go from here. Asking again this instant would get
-                # the same answer for the same money — a whole SE(2) search —
-                # so wait for the world to change or for the back-off to run out.
+                # Retry after the world changes or the back-off interval expires.
                 actor.retry_at = clock + max(self.cfg.dynamic_replan_backoff, 0.0)
                 actor.tried_version = self.version
                 actor.blocked_for += dt
@@ -447,9 +359,7 @@ class WorldDynamics:
                 candidate, done_leg = self._lerp(pose, nxt, budget / span), False
             if not manipulation.path_is_clear_against(obs, [pose, candidate],
                                                      blockers):
-                # Something is in the way. Wait where it is — the robot it is
-                # most often waiting for will move on — and only go looking for
-                # another route once the wait has gone on long enough.
+                # Wait before replanning around the blocker.
                 actor.blocked_for += dt
                 actor.waited += dt
                 if actor.blocked_for >= self.cfg.dynamic_block_patience:
@@ -473,24 +383,13 @@ class WorldDynamics:
         return moved
 
     def _may_replan(self, actor: Actor, clock: float) -> bool:
-        """Is there any point looking for a route again yet?
-
-        A search that failed against one arrangement of the world fails again
-        against the same one, and an SE(2) search is the most expensive thing in
-        the loop. So a body that found nowhere to go waits for the world to
-        change under it, or for the back-off to run out — whichever comes first.
-        """
+        """Return whether the actor's route may be planned again."""
         return (actor.retry_at == -math.inf
                 or actor.tried_version != self.version
                 or clock >= actor.retry_at)
 
     def _give_up_if_stuck(self, actor: Actor):
-        """Stop trying, rather than spin on a route that will never open.
-
-        A body that has stood still for this long is not going to get where it
-        was going, and a simulation is better off with it parked than with it
-        re-planning the same blocked route for the rest of the run.
-        """
+        """Park an actor that has exceeded the configured wait limit."""
         if actor.waited < self.cfg.dynamic_give_up:
             return
         actor.arrived = True
@@ -514,7 +413,7 @@ class WorldDynamics:
                 a[2] + geometry.wrap_dtheta(a[2], b[2]) * s)
 
 
-# --- shorthands for scenario files ---
+# Convenience constructors for scenario files.
 def at_time(t: float) -> AtTime:
     return AtTime(float(t))
 

@@ -62,7 +62,7 @@ class SE2Planner:
         assert connectivity in (8, 16), "connectivity supports only 8 or 16"
         assert containment in ("body", "centroid")
 
-        self.oid = oid          # only used for log identification, not in any computation
+        self.oid = oid
         self.forward_penalty = float(forward_penalty)
         self.wall_polys = wall_polys
         self.obstacle_w = obstacle_w
@@ -92,23 +92,14 @@ class SE2Planner:
         self.bulge = self.r_half_diag * (1.0 - math.cos(self.dtheta / 2.0))
         self.pose_margin = 0.1 * cell + self.bulge
         self.snap_margin = 0.5 * math.hypot(cell, cell) + self.bulge
-        # A cell is free if the body fits *there*, which says nothing about the
-        # ground between it and the next cell — and it is that ground a body
-        # takes a door jamb's corner off. `transition_safe` asks for cells whose
-        # freedom carries over to the step: clearance of half a diagonal step at
-        # both ends leaves every pose between them clear as well, because no
-        # point of the step is farther than that from one end or the other.
+        # Transition-safe mode adds enough margin to validate motion between cells.
         self.margin = self.snap_margin if transition_safe else self.pose_margin
         self.unit = cell / self._W_AXIS
         self.W_rot = int(round(self.rot_step_cost / self.unit))
 
         self._build_moves()
         self._build_cspace()
-        # (dist, parent, start state, how far the search was allowed to reach).
-        # The reach is part of it because a search stopped at a bucket has no
-        # opinion about anything beyond it — it did not find those states
-        # expensive, it never looked — and a later, longer question cannot be
-        # answered from it. None means it ran to exhaustion and answers anything.
+        # Cache includes the start state and search radius.
         self._cache: Optional[Tuple[np.ndarray, np.ndarray, int,
                                     Optional[int]]] = None
 
@@ -156,7 +147,7 @@ class SE2Planner:
         for k, th in enumerate(self.thetas):
             O = corners[k]
 
-            # collision check against walls
+            # Check each orientation against walls.
             layer_b = np.zeros((self.nx, self.ny), dtype=bool)
             for wp in self.wall_polys:
                 layer_b |= inside_convex(c_obstacle(wp, O), self.X, self.Y,
@@ -169,12 +160,12 @@ class SE2Planner:
                                          margin=self.pose_margin)
             rot_blocked[:, :, k] = layer_r
 
-            # workspace circle constraint
+            # Apply the manipulation workspace constraint.
             if not np.isfinite(R):
                 indisk[:, :, k] = True
             elif self.containment == "centroid":
                 indisk[:, :, k] = ((self.X - rx) ** 2 + (self.Y - ry) ** 2) <= R * R
-            else:  # body mode
+            else:
                 ok = np.ones((self.nx, self.ny), dtype=bool)
                 for ox, oy in O:  # O = corner offsets relative to centroid
                     ok &= ((self.X + ox - rx) ** 2 + (self.Y + oy - ry) ** 2) <= R * R
@@ -211,7 +202,7 @@ class SE2Planner:
         if self._unstuck:
             if self._unstuck_for == start_idx:
                 return 0
-            np.copyto(self.allowed, self._allowed_base)   # start changed, restore old exemptions
+            np.copyto(self.allowed, self._allowed_base)   # Restore base collision exemptions.
             np.copyto(self.rot_ok, self._rot_ok_base)
             self._unstuck = False
             self._unstuck_for = None
@@ -428,22 +419,17 @@ class SE2Planner:
             _CORRIDOR_MASK_CACHE.pop(next(iter(_CORRIDOR_MASK_CACHE)))
 
     def _forward_bias(self, start_pose: Tuple[float, float, float], ref_pos=None):
-        """Bias on drop poses, measured from wherever the pushing is done from.
-
-        Taken per call rather than from the instance: the C-space does not depend
-        on it, so one planner can serve every edge and keep its Dijkstra result.
-        """
+        """Return the optional forward-placement penalty field."""
         if self.forward_penalty <= 0.0:
             return None
         ref = self.robot_pos if ref_pos is None else ref_pos
         fx = start_pose[0] - ref[0]
         fy = start_pose[1] - ref[1]
         n = math.hypot(fx, fy)
-        if n < 1e-9:            # robot and obstacle coincide, no meaningful direction
+        if n < 1e-9:
             return None
         fx, fy = fx / n, fy / n
         along = (self.X - start_pose[0]) * fx + (self.Y - start_pose[1]) * fy
-        # dist uses self.unit metres per integer unit; penalty must use same scale
         return np.maximum(along, 0.0) * (self.forward_penalty / self.unit)
 
     def _select_goal(self, dist: np.ndarray,
@@ -457,7 +443,7 @@ class SE2Planner:
         if win is not None:
             i0, i1, j0, j1 = win
             sub = d3[i0:i1, j0:j1, :]
-            saved = sub[self._route_mask]    # cached dist is shared, must be restored exactly
+            saved = sub[self._route_mask]
             sub[self._route_mask] = INF
         try:
             bias = self._forward_bias(start_pose, ref_pos)
@@ -492,19 +478,12 @@ class SE2Planner:
 
     def _cache_answers(self, start_flat: int,
                        max_bucket: Optional[int]) -> bool:
-        """Can the search already in hand answer this question?
-
-        Only if it started in the same place and looked at least as far. A
-        search capped at one radius says nothing about what lies past it, so
-        reusing it for a question that reaches further would read "not looked
-        at" as "cannot be reached" — and the caller would be told an obstacle
-        has nowhere to go when it has somewhere just outside the old cap.
-        """
+        """Return whether the cached Dijkstra search covers this query."""
         if self._cache is None or self._cache[2] != start_flat:
             return False
         reached = self._cache[3]
         if reached is None:
-            return True                   # it ran out of world, not out of budget
+            return True
         return max_bucket is not None and max_bucket <= reached
 
     def plan_anywhere(self,
@@ -531,17 +510,7 @@ class SE2Planner:
                          goal_rank=None,
                          ref_pos=None,
                          widen: int = 1):
-        """Every drop pose that passes, cheapest push first.
-
-        A generator, because the caller is not obliged to take the first one.
-        Push cost is the only thing this class knows how to compare poses by,
-        and it is not what the move will be billed at — that also includes how
-        far the robot walks to escort the body there, which can differ between
-        two poses by more than the push does. A caller that knows the real price
-        can walk down this list and stop once the rest cannot beat what it
-        already has, which is sound only because the list ascends in push cost
-        and every other term of the bill is non-negative.
-        """
+        """Yield feasible drop poses in ascending push cost."""
         self._last_refusal = SE2PlanResult(False, "no drop pose was tried")
         start_idx = self._snap(*start_pose)
 
@@ -559,11 +528,9 @@ class SE2Planner:
                 return
 
         if self._unstick_start(start_idx):
-            self._cache = None            # C-space changed, invalidate previous Dijkstra result
+            self._cache = None
 
-        # Cap the Dijkstra search radius to the corridor extent + obstacle size.
-        # An obstacle never needs to be moved farther than this to clear the corridor;
-        # exploring beyond it wastes time on unreachable / irrelevant states.
+        # Limit search to the corridor extent plus obstacle size.
         max_bucket = None
         if self._route_window is not None:
             i0, i1, j0, j1 = self._route_window
@@ -594,14 +561,7 @@ class SE2Planner:
                     yield result
             if found:
                 return
-            # Every pose on the shortlist being one the caller will not have
-            # may be a statement about the length of the shortlist rather than
-            # about the map: an acceptable pose can sit just past the end of it.
-            # Asking for a longer one is what `widen` does — measured on
-            # strategy_demo it turns 104 refusals into 35, and costs 16% more J
-            # and 73% more planning, because the poses it turns up are further
-            # away and the extra marginally-feasible moves make the plan change
-            # its mind from cycle to cycle. Hence off by default.
+            # Widening retries beyond the initial shortlist when requested.
             if widened or widen <= 1 or goal_accept is None or refused < len(candidates):
                 break
             n_best = max(n_candidates, 1) * int(widen)
@@ -612,16 +572,7 @@ class SE2Planner:
             else "all candidate routes failed swept-volume validation")
 
     def _reorder(self, candidates, dist, goal_rank):
-        """Put the shortlist in the order the caller would rather have it.
-
-        The search ranks drop poses by what it costs to shove the body there.
-        The caller may care about something else as well — where the body ends
-        up leaving the map — and that belongs here, as a preference expressed in
-        the same currency, rather than as a veto. A veto on "leaves the map
-        worse than it found it" reads as "never move anything out of a doorway",
-        because a body in a doorway is half inside a wall and blocks almost
-        nothing, and any place it could legally stand instead is open floor.
-        """
+        """Order candidate poses by the caller's optional secondary cost."""
         if goal_rank is None:
             return candidates
         nyT = self.ny * self.n_theta
@@ -634,17 +585,7 @@ class SE2Planner:
         return [b for _score, b in scored]
 
     def _acceptable(self, parent, start_pose, validate, goal_accept, ordered):
-        """The best drop pose the caller would actually accept, and how many it would not.
-
-        `goal_accept` is a hard constraint on where the thing may be left, not a
-        preference. A pose it refuses is not a cheaper answer to fall back on,
-        it is not an answer at all: handing one back anyway is how a route that
-        shoves the obstacle back the way it came, or leaves it blocking more
-        than it started with, used to get executed after the search had already
-        ruled it out. It is also the cheap question — a couple of predicates
-        against `validate`, which plans the robot's whole escort — so it is
-        asked first.
-        """
+        """Yield candidate plans and whether each was rejected by a hard filter."""
         nyT = self.ny * self.n_theta
         for best in ordered:
             goal_idx = (best // nyT, (best % nyT) // self.n_theta,
@@ -655,7 +596,7 @@ class SE2Planner:
                 continue
             poses = self._trace(parent, best, start_pose)
             if validate is not None and not validate(poses):
-                yield None, False         # fails swept-volume validation; try the next
+                yield None, False
                 continue
             trans = sum(math.hypot(b[0] - a[0], b[1] - a[1])
                         for a, b in zip(poses, poses[1:]))
@@ -671,7 +612,7 @@ class SE2Planner:
 
         if not self.in_disk[start_idx]:
             return SE2PlanResult(False, "start pose is outside the robot workspace circle")
-        # check start against walls (no margin). tangent contact allowed, see _START_COLLISION_EPS.
+        # Tangent contact is allowed by _START_COLLISION_EPS.
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
@@ -702,10 +643,10 @@ class SE2Planner:
         poses = self._trace(parent, goal_flat, start_pose)
         trans = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(poses, poses[1:]))
         rot = sum(abs(wrap_dtheta(a[2], b[2])) for a, b in zip(poses, poses[1:]))
-        cost = trans + self.rot_weight * rot     # same as plan_anywhere: path length is the basis
+        cost = trans + self.rot_weight * rot
         return SE2PlanResult(True, "", cost, trans, rot, self._pose(*goal_idx), poses)
 
-def build_se2_planner(wall_polys,             # list of shapely Polygons — impassable region outlines
+def build_se2_planner(wall_polys,
                        obstacle_w: float,
                        obstacle_h: float,
                        bounds: Tuple[float, float, float, float],

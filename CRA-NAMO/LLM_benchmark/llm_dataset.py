@@ -1,76 +1,8 @@
-"""Ground-truth dataset for benchmarking the LLM estimators.
-
-Every object here is asked two independent questions:
-
-    mu*rho   how hard is this to push?          -> `llm_difficulty.DifficultyEstimator`
-    risk     what breaks if you push it?        -> `risk.RiskEstimator`
-
-They are deliberately not correlated. A propane cylinder is easy to shove and
-must not be shoved; a concrete block is immovable and harmless. An estimator
-that reads one off the other will look fine on a furniture-only set and fail
-here, which is the point of carrying both labels on the same item.
-
-The estimator in `llm_difficulty.py` short-circuits any label that is an exact
-PROMPT_ANCHORS entry (or a MATERIAL_ALIASES synonym): the prompt then orders the
-model to echo the calibrated number back. Testing those labels would only measure
-instruction following, not estimation. Every label below is therefore chosen to
-*miss* that short-circuit, so `DifficultyEstimator._deepseek` has to reason its
-way to a number. `assert_all_off_anchor()` enforces this.
-
-Groups
-------
-`object`
-    One pool of real objects, spanning every category in `CATEGORIES`. Two kinds
-    of ground truth live here, distinguished by `Item.anchor` rather than by
-    group, because for the estimator they are the same question:
-
-      anchor-derived (`anchor` set)  The label is a plain-language restatement of
-        one of the project's own anchors ("expanded polystyrene packing box" ==
-        `styrofoam_box`), and ground truth is that anchor's calibrated mu*rho.
-        Nothing new is asserted; the item measures wording robustness: does
-        dropping the magic string change the number the planner is handed?
-
-      derived (`anchor` is None)  The object is not in the anchor table at all.
-        Ground truth is *derived*: mu * (mass_kg / (l*d*h)), with mass, bounding
-        box and mu recorded per item so the number can be audited and argued
-        with. Reference values from published spec sheets and standard friction
-        coefficients, not laboratory measurements — treat a 1.5x disagreement on
-        a single item as "the reference is arguable", and only the distribution
-        over the group as evidence.
-
-`state`
-    Filled/empty pairs. Bulk density is the term that moves by an order of
-    magnitude in practice, and a pair isolates whether the model tracks it. The
-    propane pair does the same job for risk: the empty cylinder weighs half as
-    much and is exactly as dangerous.
-
-`brand`
-    Brand and product names. The prompt tells the model to resolve these to the
-    real object; this group checks whether it does.
-
-Risk labels
------------
-`Item.risk` is one of `risk.LEVELS` and answers a different question from
-mu*rho: what happens to people and to the building if the robot pushes this.
-The reference follows the ladder `risk.py` prompts with — low ordinary
-furniture, medium contents that spill or are costly, medium_high hazardous
-contents or a stressed structure, high a person is in/on/dependent on it,
-extreme it is holding the building up.
-
-For anchor paraphrases the reference is whatever `risk.keyword_level` already
-says about the anchor: restating a label must not change how dangerous the
-object is, and `validate()` enforces that. For everything else the reference is stated per item
-in `risk_note`. Several labels are deliberate traps for the keyword fallback in
-both directions: "three metre steel I-beam" contains `beam` (keyword says
-extreme, it is a loose girder), and "mattress on the floor with someone asleep
-on it" contains no risk keyword at all (keyword says low, there is a person on
-it). `risk_keyword_baseline()` scores that fallback, which is the floor any LLM
-risk estimator has to beat.
-"""
+"""Reference items for independent difficulty and risk estimator evaluation."""
 
 from __future__ import annotations
 
-# Run from anywhere: the library lives one directory up.
+# Add the project root when imported from the benchmark directory.
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
@@ -94,9 +26,7 @@ from risk import (
     keyword_level,
 )
 
-# What kind of place the object belongs to. Not used by the estimators — it
-# exists so a failure can be read as "the model does not know warehouses"
-# rather than as an undifferentiated error bar.
+# Object categories support subgroup error analysis.
 CATEGORIES = (
     "furniture", "container", "warehouse", "office", "appliance",
     "retail", "food_service", "medical", "lab", "hazmat",
@@ -139,8 +69,7 @@ class Item:
 
     @property
     def difficulty(self) -> float:
-        """Push resistance in newtons — what `RiskEstimator.reassess` is handed
-        once the robot has actually touched the thing."""
+        """Return reference push resistance in newtons."""
         return round(friction_force(self.mu_rho, self.volume), 3)
 
     @property
@@ -149,12 +78,7 @@ class Item:
         return "anchor" if self.anchor else "derived"
 
     def observation(self, oid: int = 0, scale: float = 1.0) -> dict:
-        """The dict shape `DifficultyEstimator.estimate` and `RiskEstimator.assess`
-        both consume.
-
-        `scale` multiplies every linear dimension, for the size-independence
-        probe: mu*rho is defined to be size-free, so the answer must not move.
-        """
+        """Return the observation shape consumed by both estimators."""
         return {
             "oid": oid,
             "material": self.label,
@@ -195,8 +119,7 @@ def _derived(label: str, group: str, category: str, mass_kg: float, mu: float,
     )
 
 
-# Group `object`, part A - paraphrases of the project's own anchors.
-# Ground truth = the anchor's calibrated mu*rho. Spans 1.0 -> 1440 kg/m^3.
+# Object group A: paraphrases of calibrated anchors.
 ANCHOR_PARAPHRASE: List[Item] = [
     _anchor_item("unloaded push trolley",            "empty_cart",         1.0, 0.7, 1.0,  "warehouse"),
     _anchor_item("loaded utility trolley",           "cart",               1.0, 0.7, 1.1,  "warehouse"),
@@ -222,9 +145,9 @@ ANCHOR_PARAPHRASE: List[Item] = [
     _anchor_item("solid concrete cube",              "concrete_block",     1.0, 1.0, 1.0,  "construction"),
 ]
 
-# Group `object`, part B - objects outside the anchor table entirely.
+# Object group B: objects outside the anchor table.
 OFF_TABLE: List[Item] = [
-    # -- office and IT ----------------------------------------------------
+    # Office and IT.
     _derived("office water cooler with full 19 litre bottle", "object", "office",
              34, 0.40, 0.35, 0.35, 1.10, MEDIUM,
              "cooler 15 kg + 19 kg water; plastic feet on hard floor",
@@ -247,7 +170,7 @@ OFF_TABLE: List[Item] = [
              22, 0.03, 1.80, 0.60, 1.90, LOW,
              "aluminium frame and a thin board; the bbox is nearly all air",
              "light and empty, and it is meant to be wheeled about"),
-    # -- appliances and building services ---------------------------------
+    # Appliances and building services.
     _derived("commercial chest freezer", "object", "appliance",
              90, 0.40, 1.40, 0.70, 0.85, LOW,
              "empty; sheet-steel cabinet on plastic feet",
@@ -265,7 +188,7 @@ OFF_TABLE: List[Item] = [
              "steel enclosure with busbars and breakers, bolted feet released",
              "live conductors and cables entering from below: moving it tears "
              "the supply out, and the arc goes where the robot is"),
-    # -- medical -----------------------------------------------------------
+    # Medical.
     _derived("unoccupied hospital bed", "object", "medical",
              140, 0.04, 2.20, 1.00, 0.90, MEDIUM,
              "electric bed frame on four braked castors, brakes off",
@@ -293,7 +216,7 @@ OFF_TABLE: List[Item] = [
              40, 0.03, 0.55, 0.55, 1.40, HIGH,
              "ventilator 25 kg on a 15 kg weighted stand, castors",
              "a patient is breathing through it; the circuit is only two metres long"),
-    # -- hazmat and stored energy -----------------------------------------
+    # Hazmat and stored energy.
     _derived("steel drum full of oil", "object", "hazmat",
              190, 0.40, 0.60, 0.60, 0.90, MEDIUM_HIGH,
              "208 L drum, 20 kg shell + 170 kg oil; steel on concrete",
@@ -329,7 +252,7 @@ OFF_TABLE: List[Item] = [
              "reflector and burner on a wheeled base with a 13 kg LPG cylinder",
              "two metres tall on a small footprint with a gas bottle in the "
              "base; it wants to fall over and it is plumbed to fuel"),
-    # -- structure and disaster -------------------------------------------
+    # Structure and disaster.
     _derived("load-bearing concrete pillar in a damaged building", "object", "structural",
              1152, 0.60, 0.40, 0.40, 3.00, EXTREME,
              "0.48 m^3 of reinforced concrete at 2400 kg/m^3",
@@ -378,7 +301,7 @@ OFF_TABLE: List[Item] = [
              120, 0.35, 1.50, 0.65, 0.65, LOW,
              "barrow 15 kg + 105 kg wet sand; parked on legs, not on its wheel",
              "spilling sand costs a shovel; the barrow is built to be shoved"),
-    # -- warehouse and logistics ------------------------------------------
+    # Warehouse and logistics.
     _derived("unloaded hand pallet jack", "object", "warehouse",
              75, 0.03, 1.55, 0.55, 1.20, LOW,
              "steel frame on polyurethane load rollers",
@@ -392,7 +315,7 @@ OFF_TABLE: List[Item] = [
              "tank + motor bolted to a steel skid dragging on concrete",
              "a charged receiver and rigid pipework: dragging it strains the "
              "connections rather than the vessel"),
-    # -- retail and food service ------------------------------------------
+    # Retail and food service.
     _derived("stocked drinks vending machine", "object", "retail",
              380, 0.45, 1.00, 0.90, 1.90, MEDIUM,
              "machine ~250 kg + ~130 kg stock; steel base",
@@ -425,7 +348,7 @@ OFF_TABLE: List[Item] = [
              65, 0.45, 0.60, 0.60, 0.85, LOW,
              "stainless cabinet on adjustable feet",
              "plumbed but cold and empty; the worst case is a disconnected hose"),
-    # -- laboratory --------------------------------------------------------
+    # Laboratory.
     _derived("ducted laboratory fume cupboard", "object", "lab",
              200, 0.50, 1.50, 0.80, 2.40, MEDIUM_HIGH,
              "steel and epoxy carcass, sash and blower; bbox mostly working volume",
@@ -436,7 +359,7 @@ OFF_TABLE: List[Item] = [
              "cast rotor housing, dense for its size; rubber feet",
              "biological samples and a rotor that must stay balanced; costly to "
              "replace, hazardous only if it is running"),
-    # -- valuables and display --------------------------------------------
+    # Valuables and display.
     _derived("upright piano on castors", "object", "valuables",
              220, 0.05, 1.50, 0.60, 1.25, MEDIUM,
              "small hard castors, rolling resistance not sliding",
@@ -460,7 +383,7 @@ OFF_TABLE: List[Item] = [
              "carved marble ~2700 kg/m^3 but the bbox is mostly air around the figure",
              "top-heavy, brittle and unique: it does not slide, it rocks and "
              "then it is gone"),
-    # -- furnishings, textiles, outdoor ------------------------------------
+    # Furnishings, textiles, and outdoor items.
     _derived("wooden church pew", "object", "furniture",
              60, 0.45, 2.50, 0.50, 1.00, LOW,
              "long but light; bbox is mostly the empty seat volume",
@@ -490,7 +413,7 @@ OFF_TABLE: List[Item] = [
              "precast planter ~350 kg + 250 kg of wet soil and root ball",
              "immovable in practice, which is a difficulty problem; nothing "
              "about it is dangerous"),
-    # -- fitness and leisure ----------------------------------------------
+    # Fitness and leisure.
     _derived("gym rack loaded with dumbbells", "object", "fitness",
              400, 0.50, 2.00, 0.60, 1.20, MEDIUM,
              "steel rack + cast iron; rubber feet grip hard",
@@ -508,7 +431,7 @@ OFF_TABLE: List[Item] = [
              80, 0.04, 1.55, 0.65, 1.60, LOW,
              "two folded halves on a wheeled frame",
              "designed to be wheeled folded; tall but braced"),
-    # -- vehicles, people and animals --------------------------------------
+    # Vehicles, people, and animals.
     _derived("motorcycle rolling in neutral", "object", "vehicle",
              200, 0.02, 2.10, 0.80, 1.15, MEDIUM,
              "pneumatic tyres in neutral: rolling resistance, not sliding",
@@ -528,7 +451,7 @@ OFF_TABLE: List[Item] = [
              "plastic crate 10 kg + 25 kg animal; moulded feet on hard floor",
              "a live occupant that can be injured and that reacts to being "
              "shoved; read as the `a living thing is in it` band"),
-    # -- facilities --------------------------------------------------------
+    # Facilities.
     _derived("mop bucket full of water on castors", "object", "facilities",
              20, 0.04, 0.50, 0.40, 0.90, MEDIUM,
              "20 L of water and a wringer on four small castors",
@@ -538,8 +461,7 @@ OFF_TABLE: List[Item] = [
 
 OBJECT: List[Item] = ANCHOR_PARAPHRASE + OFF_TABLE
 
-# Group `state` - filled vs empty. Same object, an order of magnitude apart in
-# rho. The propane pair is the risk counterpart: half the mass, identical risk.
+# State group: filled versus empty objects.
 STATE: List[Item] = [
     _derived("cardboard box packed with hardcover books", "state", "container",
              35, 0.35, 0.50, 0.40, 0.40, LOW,
@@ -594,8 +516,7 @@ STATE: List[Item] = [
              "must NOT follow the weight down"),
 ]
 
-# Group `brand` - brand and product names. The prompt tells the model to resolve
-# these to the real object; this group checks whether it does.
+# Brand group: product and manufacturer names.
 BRAND: List[Item] = [
     _derived("IKEA BILLY bookcase, empty", "brand", "furniture",
              41, 0.45, 0.80, 0.28, 2.02, LOW,
@@ -648,14 +569,12 @@ BRAND: List[Item] = [
 
 DATASET: List[Item] = OBJECT + STATE + BRAND
 
-# Anchor -> paraphrase label. One restatement per calibrated anchor, so an
-# experiment can hand the estimator wording it has never seen while the ground
-# truth behind that wording stays exactly the same.
+# Map each calibrated anchor to its paraphrase label.
 PARAPHRASE_OF_ANCHOR: Dict[str, str] = {
     item.anchor: item.label for item in DATASET if item.anchor
 }
 
-# label -> reference risk level, for a risk benchmark that only needs the answer.
+# Map each label to its reference risk level.
 RISK_REFERENCE: Dict[str, str] = {item.label: item.risk for item in DATASET}
 
 
@@ -672,12 +591,7 @@ def by_risk(level: str) -> List[Item]:
 
 
 def risk_keyword_baseline() -> dict:
-    """Score `risk.keyword_level` on this dataset — the no-LLM floor.
-
-    Reports exact agreement, plus the two error directions separately: reading a
-    dangerous object as safe is the failure that hurts someone, reading a safe
-    one as dangerous only costs a detour.
-    """
+    """Score the keyword risk baseline on the dataset."""
     order = {name: i for i, name in enumerate(LEVELS)}
     exact = under = over = 0
     misses: List[tuple] = []
@@ -697,11 +611,7 @@ def risk_keyword_baseline() -> dict:
 
 
 def assert_all_off_anchor() -> None:
-    """Fail loudly if a label would take the echo-the-anchor short-circuit.
-
-    Such an item would score a perfect match without the model estimating
-    anything, quietly inflating every accuracy number in the report.
-    """
+    """Fail if any label bypasses estimation through an anchor alias."""
     leaked = [it.label for it in DATASET if _canonical_anchor(it.label) is not None]
     if leaked:
         raise AssertionError(
@@ -733,10 +643,7 @@ def validate() -> None:
         if it.mu <= 0 or it.rho <= 0 or min(it.l, it.d, it.h) <= 0:
             raise AssertionError(f"{it.label}: non-positive mu, rho or dimension")
 
-    # A paraphrase restates an anchor; it does not re-rate it. If the wording
-    # reads as more dangerous than the anchor it stands for, the two are no
-    # longer the same object, and the item measures the rewording instead of the
-    # estimator.
+    # Anchor paraphrases must retain the anchor's risk level.
     for it in DATASET:
         if it.anchor and keyword_level(it.label) != keyword_level(it.anchor):
             raise AssertionError(
@@ -744,7 +651,7 @@ def validate() -> None:
                 f"anchor {it.anchor!r} reads as {keyword_level(it.anchor)}; "
                 "the paraphrase is not risk-neutral")
 
-    # A risk benchmark with nothing above `low` in it measures nothing.
+    # Require enough risk diversity for a meaningful benchmark.
     empty = [lvl for lvl in LEVELS if not by_risk(lvl)]
     if empty:
         raise AssertionError("risk levels with no items: " + ", ".join(empty))
