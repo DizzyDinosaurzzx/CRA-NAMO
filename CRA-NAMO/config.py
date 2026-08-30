@@ -99,7 +99,7 @@ class Config:
     step_execute_edges: int = 1     # edges executed before re-perception
     max_replans: int = 10000
 
-    deepseek_api_key: str = ""
+    deepseek_api_key: str = "sk-2c5fc50b67184b348a49a538c017a21d"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_thinking: bool = True

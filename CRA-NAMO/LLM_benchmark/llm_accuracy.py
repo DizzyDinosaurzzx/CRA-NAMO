@@ -329,15 +329,6 @@ def stage_size(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# Request-setting ablation.
-ABLATIONS = (
-    ("shipped: v4-flash, no thinking, 32 tok", "deepseek-v4-flash", "disabled", 32),
-    # A large budget avoids truncating difficult reasoning responses.
-    ("v4-flash, thinking on, 32k tok",         "deepseek-v4-flash", "enabled", 32000),
-    ("deepseek-chat, no thinking, 32 tok",     "deepseek-chat",     "disabled", 32),
-)
-
-
 def _ask_raw(cfg: Config, model: str, thinking: str, max_tokens: int,
              prompt: str) -> tuple:
     """Call an estimator with explicit settings and parse its final number."""
@@ -359,42 +350,6 @@ def _ask_raw(cfg: Config, model: str, thinking: str, max_tokens: int,
         return (float(nums[-1]) if nums else None), choice.get("finish_reason")
     except Exception as exc:
         return None, f"exception:{type(exc).__name__}"
-
-
-def stage_ablate(cfg: Config, workers: int) -> dict:
-    _preflight(cfg)
-    est = DifficultyEstimator(cfg)
-    prompts = {it.label: est._build_prompt(it.observation()) for it in DATASET}
-    variants = []
-    for tag, model, thinking, max_tokens in ABLATIONS:
-        log(f"ablate: {tag} - {len(DATASET)} items")
-        done = [0]
-
-        def ask(item: Item, _m=model, _t=thinking, _mt=max_tokens):
-            value, reason = _ask_raw(cfg, _m, _t, _mt, prompts[item.label])
-            done[0] += 1
-            if done[0] % 10 == 0 or done[0] == len(DATASET):
-                log(f"  {tag}: {done[0]}/{len(DATASET)}")
-            return item.label, (value, reason)
-
-        t0 = time.time()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(ask, DATASET))
-        got = dict(results)
-        rows = [{"label": it.label, "group": it.group, "mu_rho_true": it.mu_rho,
-                 "l": it.l, "d": it.d, "h": it.h, "note": it.note,
-                 "pred": got[it.label][0], "finish_reason": got[it.label][1]}
-                for it in DATASET]
-        truncated = sum(1 for r in rows if r["finish_reason"] == "length")
-        variants.append({"tag": tag, "model": model, "thinking": thinking,
-                         "max_tokens": max_tokens, "seconds": round(time.time() - t0, 1),
-                         "n_parsed": sum(1 for r in rows if r["pred"]),
-                         "n_truncated": truncated, "rows": rows})
-        log(f"  {tag}: {variants[-1]['n_parsed']}/{len(DATASET)} parsed "
-            f"({truncated} truncated) in {variants[-1]['seconds']}s")
-    payload = {"variants": variants}
-    _save("ablate.json", payload, cfg)
-    return payload
 
 
 # Anchor-ordering probe.
@@ -979,7 +934,6 @@ def stage_report() -> str:
     if risk_failed:
         risk = None
     size = _load("size.json")
-    abl = _load("ablate.json")
     if not acc:
         raise SystemExit("no accuracy.json - run `python3 LLM_test.py accuracy` first")
 
@@ -1063,25 +1017,6 @@ def stage_report() -> str:
             f"({heur['within_2x']:.0%} within 2x) on the same items, against the "
             f"model's {overall['median_abs_factor']:.1f}x. In the shipped "
             f"configuration, calling the API makes the estimate worse.")
-    if abl:
-        # Rank only variants that answered nearly every item.
-        rankable = [v for v in abl["variants"]
-                    if _accuracy_stats(v["rows"]).get("n", 0) >= 0.9 * len(v["rows"])]
-        best = min(rankable, key=lambda v: _accuracy_stats(v["rows"])["median_abs_factor"],
-                   default=None)
-        if best:
-            s = _accuracy_stats(best["rows"])
-            head.append(
-                f"- Best request setting tested is `{best['tag']}` at "
-                f"**{s['median_abs_factor']:.1f}x** typical error "
-                f"({s['within_2x']:.0%} within 2x, {best['n_parsed']}/"
-                f"{len(best['rows'])} answered). Note `_deepseek` hardcodes "
-                f"`max_tokens=32` and `thinking=disabled`, so any setting that "
-                f"needs a reasoning budget is unreachable without a code change.")
-        dropped = [v["tag"] for v in abl["variants"] if v not in rankable]
-        if dropped:
-            head.append(f"- Not ranked (token budget truncated too many items to "
-                        f"score fairly): {', '.join(dropped)}.")
     parts.append("\n## Headline\n\n" + "\n".join(head) + "\n")
 
     # Accuracy section.
@@ -1249,34 +1184,11 @@ def stage_report() -> str:
             "rather than removing it. Only giving the model room to reason "
             "does that.\n")
 
-    # Request-setting section.
-    if abl:
-        parts.append("\n## 4. Is it the model or the way it is asked?\n")
-        parts.append("Same prompt, same items, different request settings. "
-                     "`parsed` counts replies a number could be read out of — "
-                     "anything unparsed falls back to the heuristic in "
-                     "production, so a low count is itself a failure mode. "
-                     "`cut` counts replies truncated by the token budget; "
-                     "**scores on a variant with a non-zero `cut` are optimistic**, "
-                     "because the items that get truncated are the ones the model "
-                     "reasons longest about.\n\n")
-        body = []
-        for v in abl["variants"]:
-            s = _accuracy_stats(v["rows"])
-            body.append([v["tag"], f"{v['n_parsed']}/{len(v['rows'])}",
-                         v.get("n_truncated", "?"),
-                         s.get("median_abs_factor", "-"), s.get("median_ratio", "-"),
-                         f"{s.get('within_2x', 0):.0%}", f"{s.get('within_3x', 0):.0%}",
-                         _spearman(v["rows"]), f"{v['seconds']:.0f}s"])
-        parts.append(_table(
-            ["setting", "parsed", "cut", "typ. factor", "bias", "<=2x", "<=3x",
-             "Spearman", "wall time"], body))
-
     # Route-impact section.
     if doors:
         runs = doors["runs"]
         base = runs[0]
-        parts.append("\n## 5. What the error costs a route\n")
+        parts.append("\n## 4. What the error costs a route\n")
         parts.append(
             f"The `{doors['map']}` map is ten walls in a row, each with three "
             f"ways past it: move the obstacle in door A, move the one in door "
@@ -1382,7 +1294,7 @@ def stage_report() -> str:
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("stage", choices=["accuracy", "risk", "size", "ablate",
+    ap.add_argument("stage", choices=["accuracy", "risk", "size",
                                       "order", "doors", "report", "all"])
     ap.add_argument("--repeats", type=int, default=2,
                     help="LLM calls per item in the accuracy and risk stages")
@@ -1400,8 +1312,6 @@ def main():
         stage_risk(cfg, args.repeats, args.workers)
     if args.stage in ("size", "all"):
         stage_size(cfg, args.workers)
-    if args.stage in ("ablate", "all"):
-        stage_ablate(cfg, args.workers)
     if args.stage in ("order", "all"):
         stage_order(cfg, args.workers)
     if args.stage in ("doors", "all"):
