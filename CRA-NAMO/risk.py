@@ -332,6 +332,7 @@ class RiskEstimator:
             "stream": False,
             "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
                          else "disabled"},
+            "reasoning_effort": self.cfg.deepseek_reasoning_effort,
         }
         if self.cfg.llm_max_tokens:
             body["max_tokens"] = int(self.cfg.llm_max_tokens)
@@ -383,6 +384,7 @@ class RiskEstimator:
             "stream": False,
             "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
                          else "disabled"},
+            "reasoning_effort": self.cfg.deepseek_reasoning_effort,
         }
         if self.cfg.llm_max_tokens:
             body["max_tokens"] = int(self.cfg.llm_max_tokens)

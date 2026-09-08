@@ -304,6 +304,7 @@ class DifficultyEstimator:
             "stream": False,
             "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
                          else "disabled"},
+            "reasoning_effort": self.cfg.deepseek_reasoning_effort,
         }
         # 未设置时不限制 token，避免截断推理过程。
         if self.cfg.llm_max_tokens:

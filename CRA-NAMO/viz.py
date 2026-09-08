@@ -319,6 +319,8 @@ def _strategy_line(sim: OnlineNAMO) -> tuple:
         detail = ["baseline: shortest path, obstacle cost ignored"]
     else:
         detail = [f"cost={sim.estimator.mode}", f"risk={sim.risk.mode}"]
+        if sim.cfg.llm_choice:
+            detail.append(f"decide={sim.chooser.mode}")
     return ("strategy", [sim.cfg.strategy] + detail)
 
 

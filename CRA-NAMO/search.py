@@ -23,6 +23,14 @@ class Plan:
     actions: List[dict]                  # 已排序的搬移和清除动作。
     expansions: int
 
+    def removed_oids(self) -> List[int]:
+        """返回本计划打算搬走的障碍物，按首次出现顺序排列。"""
+        seen: List[int] = []
+        for act in self.actions:
+            if act["type"] == "remove" and act["oid"] not in seen:
+                seen.append(act["oid"])
+        return seen
+
 
 _MOVE_DIR_EPS = 1e-3    # 过小的位移不定义方向。
 
@@ -72,9 +80,23 @@ class Planner:
         self.wait_budget: Dict[tuple, float] = (
             {} if wait_budget is None else wait_budget)
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
+        # None 表示不限制；集合表示只有其中的障碍物允许被搬走。
+        self._allowed: Optional[set] = None
+        # 枚举候选时同一 belief 只清一次缓存，让各候选复用搬移规划结果。
+        self._suppress_flush = False
 
     def plan(self, start_node: int, goal_node: int,
-             start_heading: Optional[float] = None) -> Optional[Plan]:
+             start_heading: Optional[float] = None,
+             allowed: Optional[set] = None) -> Optional[Plan]:
+        """规划一条路线；allowed 非 None 时只准搬走其中列出的障碍物。"""
+        self._allowed = None if allowed is None else set(allowed)
+        try:
+            return self._plan(start_node, goal_node, start_heading)
+        finally:
+            self._allowed = None
+
+    def _plan(self, start_node: int, goal_node: int,
+              start_heading: Optional[float] = None) -> Optional[Plan]:
         rm = self.roadmap
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
@@ -90,7 +112,7 @@ class Planner:
                 kinematics.turn_between(heading, course)))
 
         # 新观测会使缓存的清除计划失效。
-        if self.belief.changed:
+        if self.belief.changed and not self._suppress_flush:
             self.forget_removals()
 
         def h(node):
@@ -162,6 +184,67 @@ class Planner:
         return Plan(cost=round(incumbent, 4), node_path=node_path,
                     actions=actions, expansions=expansions)
 
+    def options(self, start_node: int, goal_node: int,
+                start_heading: Optional[float] = None):
+        """枚举结构上不同、且几何层已验证可行的候选方案。
+
+        返回 (options, fallback, expansions)。每个候选都是一条完整可执行的
+        计划，区别只在于允许动哪些障碍物，因此上层可以只做离散选择。
+        """
+        rm = self.roadmap
+        sx, sy = rm.nodes[start_node]
+
+        blocking: set = set()
+        for oids in self.belief.edge_blockers.values():
+            blocking |= oids
+
+        def _distance(oid: int) -> float:
+            obs = self.belief.obstacle(oid)
+            return math.hypot(obs.x - sx, obs.y - sy)
+
+        # 只按离机器人的距离取近的若干个：纯几何排序，不泄漏代价信息。
+        budget = max(0, self.cfg.llm_choice_max_options - 1)
+        nearest = sorted(blocking, key=lambda oid: (_distance(oid), oid))[:budget]
+
+        # 同一 belief 下所有候选共享搬移规划缓存。
+        if self.belief.changed:
+            self.forget_removals()
+        self._suppress_flush = True
+        expansions = 0
+        options: List[dict] = []
+        seen: set = set()
+
+        def _add(kind: str, plan: Optional[Plan]) -> Optional[Plan]:
+            nonlocal expansions
+            if plan is None:
+                return None
+            expansions += plan.expansions
+            oids = tuple(plan.removed_oids())
+            if oids in seen:
+                return plan     # 与已列出的候选等价，不重复提问。
+            seen.add(oids)
+            options.append({"kind": kind, "oids": list(oids), "plan": plan})
+            return plan
+
+        try:
+            # 绕行：不新搬任何东西。
+            _add("detour", self.plan(start_node, goal_node, start_heading,
+                                     allowed=set()))
+            # 每个近处阻挡物各一个候选：只准搬它。
+            for oid in nearest:
+                _add("clear", self.plan(start_node, goal_node, start_heading,
+                                        allowed={oid}))
+            # 不受限的计划兜底；需要连搬多个时它是结构上独立的第三类选择。
+            fallback = self.plan(start_node, goal_node, start_heading)
+            if fallback is not None and len(fallback.removed_oids()) > 1:
+                _add("sequence", fallback)
+            elif fallback is not None:
+                expansions += fallback.expansions
+        finally:
+            self._suppress_flush = False
+
+        return options, fallback, expansions
+
     def forget_removals(self):
         """删除所有缓存搬移，因为其代价对应的世界已不存在。"""
         self._persistent_removal_cache.clear()
@@ -172,6 +255,9 @@ class Planner:
         blockers = self.belief.blockers_of(key)
         if not blockers:
             return base, []
+        # 候选枚举时把白名单外的阻挡物当作不可搬动，从而得到「绕行」等对照方案。
+        if self._allowed is not None and not blockers <= self._allowed:
+            return math.inf, []
 
         # 最短路基线只按几何长度选路：沿途障碍物照样清除，但不计入搜索代价。
         shortest = self.cfg.shortest_path_mode

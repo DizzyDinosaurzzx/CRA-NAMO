@@ -123,11 +123,15 @@ def main():
                 + ("" if estimator.mode == "heuristic" else " (DeepSeek)"))
 
     print(f"Scenario: {s['name']}   {sim.roadmap}")
-    print(f"Strategy: {cfg.strategy}"
-          + ("   (shortest path, obstacle cost ignored while planning)"
-             if cfg.shortest_path_mode else ""))
+    note = ""
+    if cfg.shortest_path_mode:
+        note = "   (shortest path, obstacle cost ignored while planning)"
+    elif cfg.llm_choice:
+        note = "   (LLM picks among geometrically validated options)"
+    print(f"Strategy: {cfg.strategy}{note}")
     print(f"Difficulty estimator: {_mode(sim.estimator)}"
-          f"   Risk estimator: {_mode(sim.risk)}")
+          f"   Risk estimator: {_mode(sim.risk)}"
+          + (f"   Action chooser: {_mode(sim.chooser)}" if cfg.llm_choice else ""))
     print("-" * 60)
 
     res = sim.run()
@@ -152,10 +156,18 @@ def main():
     print(f"{'  of which waiting':<{W}} : {res.wait_time:,}   (standing still for the world)")
     print(f"{'Total plan time (s)':<{W}} : {res.plan_time:,}")
     print(f"{'A* expansions':<{W}} : {res.total_expansions:,}")
-    print(f"{'LLM calls':<{W}} : {res.llm_calls:,}  (mode={res.llm_mode})")
+    breakdown = [f"cost {res.llm_calls_cost:,}", f"risk {res.llm_calls_risk:,}"]
+    if cfg.llm_choice:
+        breakdown.append(f"choice {res.llm_calls_choice:,}")
+    print(f"{'LLM calls':<{W}} : {res.llm_calls:,}  ({', '.join(breakdown)})")
     print(f"{'Risk assessments':<{W}} : {len(sim.risk.level):,} seen, "
           f"{len(sim.risk.on_contact):,} revised on contact"
-          f"  ({sim.risk.calls:,} calls, mode={sim.risk.mode})")
+          f"  (mode={sim.risk.mode})")
+    if cfg.llm_choice:
+        print(f"{'Action choices':<{W}} : {len(res.choices):,} logged, "
+              f"{sim.chooser.reused:,} reused  (mode={sim.chooser.mode})")
+        for line in res.choices:
+            print(f"{'':<{W}}   {line}")
     if res.decisions:
         print(f"{'Decision points':<{W}} : {len(res.decisions):,}")
         for line in res.decisions:

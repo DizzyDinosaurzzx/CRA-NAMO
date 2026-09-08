@@ -17,6 +17,7 @@ from obstacle import MovableObstacle, StaticObstacle
 from roadmap import Roadmap
 from perception import Belief
 from llm_difficulty import DifficultyEstimator
+from llm_choice import ActionChooser
 import risk
 from risk import RiskEstimator
 from search import FailedMoves, Planner, move_signature
@@ -68,14 +69,18 @@ class RunResult:
     plan_time: float = 0.0                  # 墙钟规划时间。
     first_plan_time: float = 0.0            # 首次规划时间。
     total_expansions: int = 0               # A* 总扩展数。
-    llm_calls: int = 0                      # LLM API 调用数。
-    llm_mode: str = "heuristic"             # 估计器模式。
+    llm_calls: int = 0                      # LLM API 调用总数。
+    llm_calls_cost: int = 0                 # 其中：难度估计。
+    llm_calls_risk: int = 0                 # 其中：风险评估。
+    llm_calls_choice: int = 0               # 其中：候选决策。
+    llm_mode: str = "heuristic"             # 难度估计器模式。
     removed: List[int] = field(default_factory=list)    # 搬移过的障碍物 ID。
     robot_track: List[Tuple[float, float]] = field(     # 机器人节点坐标。
         default_factory=list)
     frames: List[dict] = field(default_factory=list)    # 可视化快照。
     world_events: List[str] = field(default_factory=list)  # 世界自主事件。
     decisions: List[str] = field(default_factory=list)     # 预设决策记录。
+    choices: List[str] = field(default_factory=list)       # LLM 候选决策记录。
     message: str = ""                       # 结果说明。
 
 class OnlineNAMO:
@@ -103,6 +108,7 @@ class OnlineNAMO:
 
         self.estimator = DifficultyEstimator(cfg)
         self.risk = RiskEstimator(cfg)
+        self.chooser = ActionChooser(cfg)
         self.belief = Belief(self.roadmap, cfg, self.risk, self.estimator)
         # 动力学更新真实状态，不直接改变机器人 belief。
         self.dynamics = dynamics.WorldDynamics(
@@ -129,6 +135,8 @@ class OnlineNAMO:
         self._frame_node = self.start_node
         self._world_frame_t = 0.0
         self._waited = 0.0
+        # 只在候选结构或选择发生变化时记一笔，避免每条边都刷一行。
+        self._last_choice: Optional[tuple] = None
 
     def _add_terminal(self, p: Tuple[float, float]) -> int:
         cfg = self.cfg
@@ -160,7 +168,8 @@ class OnlineNAMO:
             if self.failed_moves.drop_stale(self.dynamics.version):
                 planner.forget_removals()
             t0 = time.time()
-            plan = planner.plan(node, self.goal_node, self.robot_heading)
+            plan = (self._choose_plan(res, planner, node) if cfg.llm_choice
+                    else planner.plan(node, self.goal_node, self.robot_heading))
             dt = time.time() - t0
             res.plan_time += dt
             if cycle == 0:
@@ -259,6 +268,36 @@ class OnlineNAMO:
 
         return self._finalize(res, node)
 
+    def _choose_plan(self, res: RunResult, planner: Planner, node: int):
+        """枚举几何层已验证的候选，交由 LLM 选择；无 LLM 时按代价取最优。"""
+        options, fallback, expansions = planner.options(
+            node, self.goal_node, self.robot_heading)
+        if not options:
+            return fallback
+
+        here = self.roadmap.nodes[node]
+        rows = self.chooser.describe(options, self.belief, here, self.goal_point)
+        goal_distance = math.hypot(self.goal_point[0] - here[0],
+                                   self.goal_point[1] - here[1])
+        pick, source = self.chooser.choose(options, rows, goal_distance)
+        if pick is None:
+            # 没有 LLM 判断时按目标代价取最优，与 A* 的选择一致。
+            pick = min(range(len(options)),
+                       key=lambda i: options[i]["plan"].cost)
+        chosen = options[pick]
+
+        # 候选枚举跑了多次 A*，把额外的扩展数一并计入报告。
+        res.total_expansions += max(0, expansions - chosen["plan"].expansions)
+
+        key = (self.chooser._key(options), pick, source)
+        if len(options) > 1 and key != self._last_choice:
+            self._last_choice = key
+            note = (f"t={self.clock:,.1f}s  {len(options)} options -> "
+                    f"#{pick} {rows[pick]['detail']}  [{source}]")
+            res.choices.append(note)
+            self.cfg.log(f"[choice] {note}")
+        return chosen["plan"]
+
     def _finalize(self, res: RunResult, node: int) -> RunResult:
         """完成运行并填充结果。"""
         res.success = (node == self.goal_node)
@@ -272,7 +311,11 @@ class OnlineNAMO:
         res.move_time = round(res.move_time, 4)
         res.wait_time = round(res.wait_time, 4)
         res.plan_time = round(res.plan_time, 4)
-        res.llm_calls = self.estimator.calls
+        res.llm_calls_cost = self.estimator.calls
+        res.llm_calls_risk = self.risk.calls
+        res.llm_calls_choice = self.chooser.calls
+        res.llm_calls = (res.llm_calls_cost + res.llm_calls_risk
+                         + res.llm_calls_choice)
         res.decisions = self._decisions_taken(res)
         if res.success and not res.message:
             res.message = "Reached goal."

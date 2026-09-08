@@ -1,15 +1,29 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import kinematics
 
-STRATEGIES: dict[str, tuple[bool, bool, bool]] = {
-    "llm-cost-risk": (True, True, False),   # LLM 同时估计代价与风险。
-    "llm-cost": (True, False, False),       # LLM 估计代价，风险用启发式。
-    "llm-risk": (False, True, False),       # 代价用启发式，LLM 估计风险。
-    "no-llm": (False, False, False),        # 两项都用启发式，不调用 LLM。
-    "shortest": (False, False, True),       # 忽略搬移代价，直取最短路。
+class StrategyFlags(NamedTuple):
+    """一个策略 arm 打开的能力。"""
+
+    llm_cost: bool       # LLM 估计推动代价 mu*rho，否则查材料表。
+    llm_risk: bool       # LLM 评估风险等级，否则查关键词表。
+    shortest: bool       # 忽略搬移代价，只按几何最短路前进。
+    llm_choice: bool     # 由 LLM 在几何层验证过的候选中做离散选择。
+
+
+# 关闭 LLM 的一项表示改用离线启发式，而不是不估计。
+STRATEGIES: dict[str, StrategyFlags] = {
+    # LLM 只提供代价/风险数值，仍由 A* 决策。
+    "llm-cost-risk": StrategyFlags(True, True, False, False),
+    "llm-cost": StrategyFlags(True, False, False, False),
+    "llm-risk": StrategyFlags(False, True, False, False),
+    "no-llm": StrategyFlags(False, False, False, False),
+    # 不做取舍的下界基线。
+    "shortest": StrategyFlags(False, False, True, False),
+    # L2：几何层枚举并验证候选，LLM 直接选一个。
+    "llm-choice": StrategyFlags(True, True, False, True),
 }
 DEFAULT_STRATEGY = "shortest"
 
@@ -19,6 +33,22 @@ def validate_strategy(value: str) -> str:
     if name not in STRATEGIES:
         raise ValueError(
             f"unknown strategy {value!r}; available: {', '.join(STRATEGIES)}")
+    return name
+
+
+# DeepSeek 的推理强度档位。medium/xhigh 在服务端并入 high，这里先行归一，
+# 避免日志里出现一个实际不生效的档位名。
+REASONING_EFFORTS = ("low", "high", "max")
+_EFFORT_ALIASES = {"medium": "high", "xhigh": "high"}
+
+
+def validate_reasoning_effort(value: str) -> str:
+    name = str(value).strip().lower()
+    name = _EFFORT_ALIASES.get(name, name)
+    if name not in REASONING_EFFORTS:
+        raise ValueError(
+            f"unknown reasoning effort {value!r}; available: "
+            + ", ".join(REASONING_EFFORTS))
     return name
 
 
@@ -40,7 +70,7 @@ def validate_lambda(value: float) -> float:
 class Config:
     """规划、执行和可视化共用的配置。"""
 
-    robot_radius: float = 0.1
+    robot_radius: float = 0.3
 
     # 空载和载物行驶的运动限制。
     robot_v_max: float = 0.6         # [米/秒]
@@ -119,13 +149,20 @@ class Config:
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
-    deepseek_model: str = "deepseek-v4-flash-vision-exp"
+    deepseek_model: str = "deepseek-v4.1-flash-expires-on-0910"
     deepseek_thinking: bool = True
+    # 请求里不带 reasoning_effort 时服务端按 high 处理，这里显式降到 low。
+    deepseek_reasoning_effort: str = "low"
     llm_max_tokens: int | None = None
     llm_timeout: float = 300.0
     llm_max_retries: int = 2
     perception_llm_timeout: float = 60.0
     perception_llm_max_calls: int = 8
+
+    # llm-choice：每次决策最多给 LLM 看几个候选，按离机器人的距离取近的。
+    llm_choice_max_options: int = 6
+    # 候选集合不变时沿用上次决定，避免每条 0.3 m 边都重新提问。
+    llm_choice_reuse_decision: bool = True
 
     out_dir: str = "img"
     save_frames: bool = True
@@ -142,21 +179,28 @@ class Config:
         self.lambda_distance = validate_lambda(self.lambda_distance)
         self.time_importance = validate_time_importance(self.time_importance)
         self.strategy = validate_strategy(self.strategy)
+        self.deepseek_reasoning_effort = validate_reasoning_effort(
+            self.deepseek_reasoning_effort)
 
     @property
     def use_llm_cost(self) -> bool:
         """LLM 是否估计搬移代价（mu*rho）？否则使用材料表启发式。"""
-        return STRATEGIES[self.strategy][0]
+        return STRATEGIES[self.strategy].llm_cost
 
     @property
     def use_llm_risk(self) -> bool:
         """LLM 是否评估搬移风险等级？否则使用关键词启发式。"""
-        return STRATEGIES[self.strategy][1]
+        return STRATEGIES[self.strategy].llm_risk
 
     @property
     def shortest_path_mode(self) -> bool:
         """是否忽略搬移代价，只按最短路径前进并清除沿途障碍物？"""
-        return STRATEGIES[self.strategy][2]
+        return STRATEGIES[self.strategy].shortest
+
+    @property
+    def llm_choice(self) -> bool:
+        """是否由 LLM 在候选方案中做决策，而不是由 A* 比较代价？"""
+        return STRATEGIES[self.strategy].llm_choice
 
     def free_profile(self) -> kinematics.MotionProfile:
         """返回空载运动参数。"""
