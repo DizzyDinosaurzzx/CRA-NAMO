@@ -1,4 +1,4 @@
-"""Corridor scenario requiring rotational and contact-constrained crate motion."""
+"""需要旋转和接触约束搬移箱子的走廊场景。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ _GOAL_X = 13.0
 
 
 def create():
-    """Create the corridor scenario."""
+    """创建走廊场景。"""
     t = _SHELL_T
     mid_y = _HEIGHT / 2.0
     north = _HEIGHT - t

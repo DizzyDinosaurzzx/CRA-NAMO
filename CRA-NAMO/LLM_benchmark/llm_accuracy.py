@@ -1,8 +1,8 @@
-"""Benchmark difficulty and risk estimators with a synthetic ten-door gap study."""
+"""用合成十门误差研究评估难度和风险估计器。"""
 
 from __future__ import annotations
 
-# Add the project root when imported from the benchmark directory.
+# 从 benchmark 目录导入时加入项目根目录。
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
@@ -52,13 +52,13 @@ REPO_DIR = os.path.dirname(PROJECT_DIR)
 
 SIZE_SCALES = (0.5, 1.0, 2.0)
 
-# One accessible color and marker pair per dataset group.
+# 为每个数据组指定一组易读的颜色和标记。
 GROUP_STYLE = {
     "object": ("#2a78d6", "o"),
     "state":  ("#eb6834", "^"),
     "brand":  ("#1baf7a", "D"),
 }
-# Sequential blue palette for charts.
+# 图表使用连续蓝色调色板。
 SEQ_BLUE = ("#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
             "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281",
             "#0d366b")
@@ -66,7 +66,7 @@ INK, MUTED, GRID, SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#fcfcfb"
 
 
 def log(msg: str) -> None:
-    """Print a timestamped progress message."""
+    """输出带时间戳的进度消息。"""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
@@ -144,11 +144,11 @@ def _load(name: str):
 
 
 def _preflight(cfg: Config) -> None:
-    """Validate API connectivity before launching parallel requests."""
+    """启动并行请求前校验 API 连通性。"""
     import requests
     log(f"model {cfg.deepseek_model} at {cfg.deepseek_base_url}")
     try:
-        # Use a minimal non-streaming request to catch configuration errors.
+        # 使用最小非流式请求捕获配置错误。
         r = requests.post(
             cfg.deepseek_base_url, timeout=cfg.llm_timeout,
             headers={"Content-Type": "application/json",
@@ -169,7 +169,7 @@ def _preflight(cfg: Config) -> None:
 
 
 def _require_answers(kind: str, n_ok: int, n_total: int) -> None:
-    """Refuse to save a stage with no usable model responses."""
+    """拒绝保存没有可用模型响应的阶段结果。"""
     if n_ok:
         return
     raise SystemExit(
@@ -178,7 +178,7 @@ def _require_answers(kind: str, n_ok: int, n_total: int) -> None:
         f"name in Config, then run this stage again.")
 
 
-# Difficulty estimator accuracy.
+# 难度估计器准确率。
 
 def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
     validate()
@@ -216,7 +216,7 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
             **{k: v for k, v in asdict(item).items()},
             "mu_rho_true": item.mu_rho,
             "preds": by_label[item.label],
-            # Median reduces the effect of malformed repeat responses.
+            # 中位数可降低格式错误的重复响应影响。
             "pred": statistics.median(preds) if preds else None,
             "n_ok": len(preds),
             "heuristic": material_mu_rho(item.label),
@@ -228,7 +228,7 @@ def stage_accuracy(cfg: Config, repeats: int, workers: int) -> dict:
     return payload
 
 
-# Risk estimator accuracy for sight and contact observations.
+# 视觉和接触观测下的风险估计准确率。
 RISK_CONTACT_REPEATS = 1
 
 
@@ -239,7 +239,7 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
         raise SystemExit("no DeepSeek API key in Config.deepseek_api_key / $DEEPSEEK_API_KEY")
     _preflight(cfg)
 
-    # None denotes sight-only; a number denotes the contact arm.
+    # None 表示仅视觉；数值表示接触阶段。
     jobs = [(it, None) for it in DATASET for _ in range(repeats)]
     jobs += [(it, it.difficulty) for it in DATASET for _ in range(RISK_CONTACT_REPEATS)]
     log(f"risk: {len(DATASET)} items x {repeats} on sight + {RISK_CONTACT_REPEATS} "
@@ -249,7 +249,7 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
 
     def ask(job):
         item, difficulty = job
-        # Use the same label normalization as production.
+        # 使用与生产代码相同的标签归一化。
         level = est._deepseek(item.observation(), _risk_normalise(item.label),
                               difficulty)
         done[0] += 1
@@ -277,7 +277,7 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
             "sight": _modal_level(sight.get(it.label, [])),
             "contact_levels": contact.get(it.label, []),
             "contact": _modal_level(contact.get(it.label, [])),
-            # Score the no-API fallback on the same labels.
+            # 在相同标签上评估无 API 后备方案。
             "keyword": keyword_level(it.label),
             "risk_note": it.risk_note,
         })
@@ -289,10 +289,10 @@ def stage_risk(cfg: Config, repeats: int, workers: int) -> dict:
     return payload
 
 
-# Size-independence probe.
+# 尺寸独立性检查。
 
 def stage_size(cfg: Config, workers: int) -> dict:
-    """Check that estimated mu*rho does not vary with object scale."""
+    """检查估计的 mu*rho 是否随物体缩放而变化。"""
     _preflight(cfg)
     est = DifficultyEstimator(cfg)
     subset = [it for it in DATASET
@@ -331,7 +331,7 @@ def stage_size(cfg: Config, workers: int) -> dict:
 
 def _ask_raw(cfg: Config, model: str, thinking: str, max_tokens: int,
              prompt: str) -> tuple:
-    """Call an estimator with explicit settings and parse its final number."""
+    """按显式设置调用估计器，并解析最终数值。"""
     import re
     import requests
     body = {"model": model, "messages": [{"role": "user", "content": prompt}],
@@ -352,13 +352,13 @@ def _ask_raw(cfg: Config, model: str, thinking: str, max_tokens: int,
         return None, f"exception:{type(exc).__name__}"
 
 
-# Anchor-ordering probe.
+# 锚点顺序检查。
 
 _ANCHOR_LINE = re.compile(r"^\s{2}(\S+)\s+mu=\S+\s+rho=\S+\s+mu\*rho=(\S+)\s*$")
 
 
 def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
-    """Rewrite only the anchor table row order in a production prompt."""
+    """只改写生产提示词中的锚点表行顺序。"""
     lines = prompt.split("\n")
     idx = [i for i, ln in enumerate(lines) if _ANCHOR_LINE.match(ln)]
     if not idx:
@@ -371,7 +371,7 @@ def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
         pairs.sort(key=lambda p: p[1])
     elif order == "descending":
         pairs.sort(key=lambda p: -p[1])
-    else:                                   # Shuffle the anchor rows.
+    else:                                   # 打乱锚点行顺序。
         random.Random(seed).shuffle(pairs)
 
     for slot, (line, _) in zip(idx, pairs):
@@ -383,7 +383,7 @@ def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
 def stage_order(cfg: Config, workers: int) -> dict:
     _preflight(cfg)
     est = DifficultyEstimator(cfg)
-    # Off-table objects distinguish copying from estimation.
+    # 表外物体用于区分复制和估计。
     items = [it for it in DATASET if it.anchor is None]
     orders = [("ascending", 0), ("descending", 0), ("shuffled", 1), ("shuffled", 2)]
 
@@ -439,20 +439,20 @@ def stage_order(cfg: Config, workers: int) -> dict:
     return payload
 
 
-# Synthetic estimator-gap route study.
+# 合成估计误差路线研究。
 
 DOORS_MAP = "ten_doors"
 
-# Each gap point bounds a seeded multiplicative cost error and risk-level shift.
+# 每个误差点限定一个带种子的乘性代价误差和风险等级偏移。
 DOORS_GAPS = ((1.0, 0), (1.5, 1), (2.0, 2), (4.0, 3), (10.0, 4))
 
-# Each seed preserves paired draws across the cost-only, risk-only, and joint arms.
+# 每个种子在仅代价、仅风险和联合实验中保持配对采样。
 DOORS_SEEDS = 1
 
 
 def _doors_beliefs(gates: List[dict], seed: int, cost_factor: float,
                    risk_levels: int, perturb: tuple):
-    """Draw offline LLM-like beliefs at one user-controlled Gap level."""
+    """在用户指定的 Gap 等级下生成离线 LLM 风格 belief。"""
     rng_d = random.Random(f"difficulty-{seed}-{cost_factor:g}")
     rng_r = random.Random(f"risk-{seed}-{risk_levels}")
     difficulty, level = {}, {}
@@ -473,7 +473,7 @@ def _doors_beliefs(gates: List[dict], seed: int, cost_factor: float,
 
 
 def _gate_choices(gates: List[dict], removed) -> Dict[int, str]:
-    """What the run did at each gate: `A`, `B`, `AB`, or `detour`."""
+    """记录每个门的选择：`A`、`B`、`AB` 或 `detour`。"""
     by_oid = {r["oid"]: r for r in gates}
     choice = {r["gate"]: "detour" for r in gates}
     for oid in removed:
@@ -486,8 +486,8 @@ def _gate_choices(gates: List[dict], removed) -> Dict[int, str]:
 
 def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
                level: Dict[int, str], summary_path: Optional[str] = None) -> dict:
-    """Run one ten-door crossing with seeded estimator beliefs."""
-    scenario = scenarios.load(DOORS_MAP)             # Load fresh objects for each run.
+    """使用带种子的估计器 belief 运行一次十门穿越。"""
+    scenario = scenarios.load(DOORS_MAP)             # 每次运行加载全新的物体。
     cfg: Config = scenario["cfg"]
     cfg.save_frames = False
     cfg.verbose = False
@@ -523,7 +523,7 @@ def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
         "walk_cost": res.walk_cost, "work_cost": res.work_cost,
         "risk_cost": res.risk_cost, "pushes": len(res.removed),
         "removed": sorted(res.removed),
-        # Count moved obstacles whose true risk was above low.
+        # 统计真实风险高于 low 且被搬移的障碍物。
         "risky_pushes": sorted(oid for oid in res.removed
                                if true_risk.get(oid, LOW) != LOW),
         "choices": {str(g): c for g, c in sorted(choices.items())},
@@ -598,19 +598,19 @@ def stage_doors(seeds: int) -> dict:
     return payload
 
 
-# Risk metrics.
+# 风险指标。
 RISK_ARMS = (("keyword fallback", "keyword"),
              ("LLM on sight", "sight"),
              ("LLM after contact", "contact"))
 
 
 def _risk_measured(risk_payload: Optional[dict], key: str = "sight") -> bool:
-    """Did the risk stage produce at least one usable verdict?"""
+    """风险阶段是否产生至少一个可用判断？"""
     return bool(risk_payload) and any(r.get(key) for r in risk_payload["rows"])
 
 
 def _modal_level(levels) -> Optional[str]:
-    """Return the modal level, breaking ties toward greater risk."""
+    """返回众数等级；并列时选择更高风险。"""
     got = [lvl for lvl in levels if lvl]
     if not got:
         return None
@@ -622,7 +622,7 @@ def _modal_level(levels) -> Optional[str]:
 
 
 def _risk_stats(rows, key: str) -> dict:
-    """Summarize risk agreement and detour-equivalent error."""
+    """汇总风险一致性和等效绕行误差。"""
     pairs = [(r["risk_true"], r[key]) for r in rows if r.get(key)]
     if not pairs:
         return {"n": 0}
@@ -643,7 +643,7 @@ def _risk_stats(rows, key: str) -> dict:
 
 
 def _risk_confusion(rows, key: str) -> List[List[int]]:
-    """counts[reference][estimate], in LEVELS order."""
+    """counts[reference][estimate]，顺序与 LEVELS 一致。"""
     order = {name: i for i, name in enumerate(LEVELS)}
     grid = [[0] * len(LEVELS) for _ in LEVELS]
     for r in rows:
@@ -654,13 +654,13 @@ def _risk_confusion(rows, key: str) -> List[List[int]]:
 
 
 def _risk_under_calls(rows, key: str) -> List[dict]:
-    """Items called safer than they are, worst drop first."""
+    """被判断得比真实更安全的数据项，按风险下降幅度降序。"""
     order = {name: i for i, name in enumerate(LEVELS)}
     out = [r for r in rows if r.get(key) and order[r[key]] < order[r["risk_true"]]]
     return sorted(out, key=lambda r: order[r[key]] - order[r["risk_true"]])
 
 
-# Difficulty metrics.
+# 难度指标。
 
 def _log_errors(rows, key="pred"):
     out = []
@@ -692,7 +692,7 @@ def _accuracy_stats(rows, key="pred") -> dict:
 
 
 def _anchor_snapping(rows, key="pred") -> dict:
-    """Measure responses that exactly match an anchor-table value."""
+    """统计与锚点表数值完全匹配的响应。"""
     anchor_values = {round(v, 4) for k, v in MATERIAL_MU_RHO.items() if k != "unknown"}
     top = max(anchor_values)
     preds = [r[key] for r in rows if r.get(key)]
@@ -717,7 +717,7 @@ def _spearman(rows, key="pred") -> Optional[float]:
 
 
 def _repeatability(rows) -> dict:
-    """Measure spread across repeated deterministic requests."""
+    """测量重复确定性请求之间的离散程度。"""
     spreads = []
     for r in rows:
         preds = [p for p in r["preds"] if p and p > 0]
@@ -731,7 +731,7 @@ def _repeatability(rows) -> dict:
             "max_spread": round(max(spreads), 3)}
 
 
-# Charts.
+# 图表。
 
 def _chart_accuracy(rows, path: str):
     import matplotlib
@@ -739,7 +739,7 @@ def _chart_accuracy(rows, path: str):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7.2, 6.4))
-    # Bound axes by observed data to avoid clipping points.
+        # 按观测数据设置坐标轴范围，避免裁剪点。
     seen = [v for r in rows for v in (r["mu_rho_true"], r.get("pred")) if v]
     lo, hi = min(0.2, min(seen) / 1.6), max(3000.0, max(seen) * 1.6)
     ax.plot([lo, hi], [lo, hi], color=INK, lw=1.2, zorder=2)
@@ -747,7 +747,7 @@ def _chart_accuracy(rows, path: str):
         ax.fill_between([lo, hi], [lo / band, hi / band], [lo * band, hi * band],
                         color=MUTED, alpha=alpha, lw=0, zorder=1)
 
-    # Label repeated anchor-valued responses directly on the chart.
+        # 在图表中直接标注重复出现的锚点数值。
     counts: Dict[float, int] = {}
     for r in rows:
         if r.get("pred"):
@@ -776,7 +776,7 @@ def _chart_accuracy(rows, path: str):
     ax.set_ylabel("LLM estimate  [kg/m$^3$]", color=INK)
     ax.set_title("LLM mu*rho vs reference — shaded bands are 1.5x and 2x",
                  color=INK, fontsize=11, loc="left")
-    # Major decades keep the log grid readable.
+        # 主要数量级保持对数网格可读。
     ax.grid(True, which="major", color=GRID, lw=0.6, zorder=0)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
@@ -789,7 +789,7 @@ def _chart_accuracy(rows, path: str):
 
 
 def _chart_risk(risk: dict, path: str):
-    """Plot one confusion matrix per risk-estimation arm."""
+    """为每个风险估计阶段绘制一个混淆矩阵。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -823,11 +823,11 @@ def _chart_risk(risk: dict, path: str):
                     ax.text(j, i, str(count), ha="center", va="center",
                             fontsize=9, zorder=3,
                             color=SURFACE if shade > 0.55 else INK)
-            # Outline the diagonal so the ramp continues to encode counts.
+        # 描出对角线，使色阶继续表示计数。
             ax.add_patch(Rectangle((i - 0.5, i - 0.5), 1, 1, fill=False,
                                    edgecolor=INK, lw=1.1, zorder=2))
 
-        # Leave a small surface gap between cells.
+        # 在单元格之间留出少量间隙。
         ax.set_xticks([k - 0.5 for k in range(n + 1)], minor=True)
         ax.set_yticks([k - 0.5 for k in range(n + 1)], minor=True)
         ax.grid(which="minor", color=SURFACE, lw=2)
@@ -857,7 +857,7 @@ def _chart_risk(risk: dict, path: str):
 
 
 def _chart_doors_gap(doors: dict, path: str):
-    """Show how route cost and decisions change as simulated Gap grows."""
+    """展示模拟 Gap 增大时路线代价和决策如何变化。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -916,7 +916,7 @@ def _chart_doors_gap(doors: dict, path: str):
     log(f"wrote {path}")
 
 
-# Report generation.
+# 报告生成。
 
 def _table(header: List[str], body: List[List[str]]) -> str:
     lines = ["| " + " | ".join(header) + " |",
@@ -929,7 +929,7 @@ def stage_report() -> str:
     acc = _load("accuracy.json")
     risk = _load("risk.json")
     doors = _load("doors.json")
-    # Treat an all-failed risk stage as unavailable data.
+    # 风险阶段全部失败时视为无可用数据。
     risk_failed = bool(risk) and not _risk_measured(risk)
     if risk_failed:
         risk = None
@@ -942,7 +942,7 @@ def stage_report() -> str:
              f"Model `{acc['model']}`, {acc['repeats']} repeats per item, "
              f"{len(rows)} items, {acc['seconds']}s of API time.\n"]
 
-    # Headline.
+    # 标题摘要。
     overall = _accuracy_stats(rows)
     snapshot = _anchor_snapping(rows)
     head = [
@@ -952,7 +952,7 @@ def stage_report() -> str:
         f"reference, and it over-estimates "
         f"({overall['median_ratio']:.1f}x median bias).",
     ]
-    # Report anchor concentration only when observed.
+    # 仅在实际观测到时报告锚点集中度。
     if snapshot.get("n"):
         if snapshot["on_max_anchor"] >= 0.15:
             head.append(
@@ -1019,7 +1019,7 @@ def stage_report() -> str:
             f"configuration, calling the API makes the estimate worse.")
     parts.append("\n## Headline\n\n" + "\n".join(head) + "\n")
 
-    # Accuracy section.
+    # 准确率部分。
     parts.append("\n## 1. Estimator accuracy\n")
     parts.append("`median_abs_factor` is the typical multiplicative miss: 1.0 is "
                  "exact, 2.0 means the usual answer is off by a factor of two in "
@@ -1081,7 +1081,7 @@ def stage_report() -> str:
           f"{r['pred']:.1f}",
           f"{r['pred'] / r['mu_rho_true']:.2f}x", r["note"]] for r in worst]))
 
-    # Risk section.
+    # 风险部分。
     if risk:
         rk = risk["rows"]
         parts.append("\n## 1b. Risk assessment\n")
@@ -1134,7 +1134,7 @@ def stage_report() -> str:
                 [[r["label"], r["risk_true"], r["sight"], r["keyword"],
                   r["risk_note"]] for r in under]))
 
-    # Size-independence section.
+    # 尺寸独立性部分。
     if size:
         parts.append("\n## 2. Size independence\n")
         parts.append("mu*rho must not depend on the object's size — the caller "
@@ -1154,7 +1154,7 @@ def stage_report() -> str:
               r["by_scale"].get("2.0"), f"{s:.2f}x"]
              for s, r in sorted(moved, key=lambda t: -t[0])]))
 
-    # Anchor-ordering section.
+    # 锚点顺序部分。
     order = _load("order.json")
     if order:
         parts.append("\n## 3. Proof that it is copying, not estimating\n")
@@ -1184,7 +1184,7 @@ def stage_report() -> str:
             "rather than removing it. Only giving the model room to reason "
             "does that.\n")
 
-    # Route-impact section.
+    # 路线影响部分。
     if doors:
         runs = doors["runs"]
         base = runs[0]
@@ -1258,7 +1258,7 @@ def stage_report() -> str:
             f"that is the planner disturbing something it should have walked "
             f"around.\n")
 
-        # Per-gate detail shows which decisions changed.
+        # 逐门细节显示发生变化的决策。
         parts.append("\n### Where the decisions moved\n")
         gates_by_i: Dict[str, dict] = {}
         for r in doors["gates"]:

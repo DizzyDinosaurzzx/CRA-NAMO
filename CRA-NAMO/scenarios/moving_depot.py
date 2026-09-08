@@ -1,4 +1,4 @@
-"""Dynamic depot scenario with moving, triggered, and mutated obstacles."""
+"""包含移动、触发和属性变化障碍物的动态仓库场景。"""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ _WIDTH = 20.0
 _HEIGHT = 10.0
 _SHELL = 0.5
 
-_DIVIDER_X = (9.8, 10.2)         # Wall separating the two rooms.
-_DOOR = (4.0, 6.0)               # Door opening in the divider.
-_NECK_X = (13.0, 13.4)           # Narrow neck beyond the divider.
+_DIVIDER_X = (9.8, 10.2)         # 分隔两个房间的墙。
+_DOOR = (4.0, 6.0)               # 隔墙上的门洞。
+_NECK_X = (13.0, 13.4)           # 隔墙之外的狭窄通道。
 _NECK = (4.0, 6.0)
 
 _START = (2.5, 5.0)
@@ -45,21 +45,21 @@ def create():
     ]
 
     movable = [
-        # Trolley waits in the first room.
+        # 小车停在第一个房间。
         MovableObstacle(
             x=9.0, y=6.6, l=1.6, d=0.6, h=0.9, theta=math.pi / 2.0,
             material="service_trolley",
             difficulty=_difficulty("service_trolley", 1.6, 0.6, 0.9),
             oid=1,
         ),
-        # Crate plugs the narrow neck.
+        # 木箱堵住狭窄通道。
         MovableObstacle(
             x=13.2, y=5.0, l=1.5, d=1.1, h=1.0, theta=math.pi / 2.0,
             material="wooden_crate",
             difficulty=_difficulty("wooden_crate", 1.5, 1.1, 1.0),
             oid=2,
         ),
-        # Pallet starts parked in the far room.
+        # 托盘初始停在远端房间。
         MovableObstacle(
             x=16.5, y=8.4, l=1.2, d=1.0, h=0.9, theta=0.0,
             material="empty_pallet",

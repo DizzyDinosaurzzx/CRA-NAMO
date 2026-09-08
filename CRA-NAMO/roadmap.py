@@ -1,4 +1,4 @@
-"""Construct and query a uniform augmented roadmap."""
+"""构建并查询均匀增强路线图。"""
 
 from __future__ import annotations
 import math
@@ -13,14 +13,14 @@ from config import Config
 EdgeKey = Tuple[int, int]
 
 class Roadmap:
-    """Uniform roadmap over free space defined by static obstacles."""
+    """在静态障碍物定义的自由空间上构建均匀路线图。"""
 
     def __init__(self, workspace: Polygon, static_obstacles, cfg: Config):
         self.cfg = cfg
         self.workspace = workspace
         polys = [so.polygon for so in static_obstacles]
-        self.static_obstacles = static_obstacles  # Obstacles passed to the SE(2) planner.
-        # Nested free-space sets apply progressively stricter robot clearance.
+        self.static_obstacles = static_obstacles  # 传给 SE(2) 规划器的障碍物。
+        # 嵌套自由空间逐级施加更严格的机器人净空。
         self.static_free = workspace.difference(unary_union(polys)) if polys else workspace
         self.static_free_prep = prep(self.static_free)
         self.free_eroded = self.static_free.buffer(-cfg.robot_radius, quad_segs=16)
@@ -62,7 +62,7 @@ class Roadmap:
                 self.adj[nid] = []
                 b = (int(x // cfg.conn_radius), int(y // cfg.conn_radius))
                 buckets.setdefault(b, []).append(nid)
-        # A 3x3 bucket neighborhood covers every edge within conn_radius.
+        # 3x3 桶邻域覆盖 conn_radius 内的所有边。
         for nid, (x, y) in enumerate(self.nodes):
             bx, by = int(x // cfg.conn_radius), int(y // cfg.conn_radius)
             for dbx in (-1, 0, 1):
@@ -72,7 +72,7 @@ class Roadmap:
                             continue
                         self._try_edge(nid, mid)
 
-    # Edge corridors use round caps so planning and execution share the same footprint.
+    # 边通道使用圆端帽，使规划和执行采用相同的占用范围。
     def _try_edge(self, u: int, v: int):
         a, b = self.nodes[u], self.nodes[v]
         dist = math.hypot(a[0] - b[0], a[1] - b[1])
@@ -96,7 +96,7 @@ class Roadmap:
         return len(self.corridors_intersecting(poly))
 
     def corridors_intersecting(self, poly: Polygon) -> List[EdgeKey]:
-        """Return only roadmap edges whose swept corridor intersects *poly*."""
+        """只返回扫掠通道与 poly 相交的路线图边。"""
         if self._corridor_tree is None:
             self._corridor_keys = list(self.edge_corridor)
             self._corridor_tree = STRtree(
@@ -119,7 +119,7 @@ class Roadmap:
     def can_drive(self, a: Tuple[float, float], b: Tuple[float, float],
                   blocked=None) -> bool:
         if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9:
-            # A zero-length segment is valid when the point lies in free space.
+            # 点位于自由空间时，零长度线段有效。
             return shapely.contains(self.free_eroded_tol, Point(a))
         seg = LineString([a, b])
         if not shapely.contains(self.free_eroded_tol, seg):
@@ -128,7 +128,7 @@ class Roadmap:
 
     def nearest_reachable_node(self, p: Tuple[float, float], blocked=None,
                                k: int = 24) -> int | None:
-        """Return the nearest node reachable from a point by a straight segment."""
+        """返回可由直线段从给定点到达的最近节点。"""
         if self._kdtree is None:
             return None
         k = min(k, len(self.nodes))
@@ -155,7 +155,7 @@ class Roadmap:
                 self.edge_corridor[key] = seg.buffer(cfg.robot_radius, cap_style=1)
                 self.adj[nid].append(other)
                 self.adj[other].append(nid)
-        self._corridor_tree = None      # New corridors invalidate the index.
+        self._corridor_tree = None      # 新通道会使索引失效。
         self._corridor_keys = []
         self._rebuild_kdtree()
         return nid

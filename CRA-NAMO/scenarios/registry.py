@@ -1,4 +1,4 @@
-"""Discover and validate scenario modules."""
+"""发现并校验场景模块。"""
 
 from __future__ import annotations
 import pkgutil
@@ -21,20 +21,20 @@ _PACKAGE = __name__.rpartition(".")[0] or "scenarios"
 
 
 def names() -> tuple[str, ...]:
-    """Return all automatically discovered scenario names."""
+    """返回自动发现的全部场景名称。"""
     return tuple(sorted(
         m.name for m in pkgutil.iter_modules([str(_PKG_DIR)])
         if not m.name.startswith("_") and m.name != "registry"
     ))
 
 
-# Decision-point keys whose values must reference existing obstacle IDs.
+# 决策点中必须引用已有障碍物 ID 的字段。
 _OID_KEYS = ("risky", "partners", "safer_alternative",
              "temporary_obstacles", "obstacles")
 
 
 def _checked_decisions(name: str, points, movable) -> list[dict]:
-    """Validate decision-point obstacle references."""
+    """校验决策点中的障碍物引用。"""
     oids = {obs.oid for obs in movable}
     checked = []
     for i, point in enumerate(points or ()):
@@ -56,7 +56,7 @@ def _checked_decisions(name: str, points, movable) -> list[dict]:
 
 
 def load(name: str | None = None) -> dict[str, Any]:
-    """Load and validate a scenario by name."""
+    """按名称加载并校验场景。"""
     selected = name or DEFAULT_SCENARIO
     available = names()
     if selected not in available:
@@ -82,7 +82,7 @@ def load(name: str | None = None) -> dict[str, Any]:
             raise ValueError(f"Map {selected!r}: {field} must be a single (x, y) point")
         scenario[field] = (float(point[0]), float(point[1]))
 
-    # Missing dynamics means a static map.
+    # 缺少 dynamics 表示静态地图。
     scenario["dynamics"] = list(scenario.get("dynamics") or ())
     scenario["decision_points"] = _checked_decisions(
         selected, scenario.get("decision_points"), scenario["movable"])

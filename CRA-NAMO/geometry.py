@@ -1,4 +1,4 @@
-"""Provide shared geometric and collision primitives."""
+"""提供通用几何与碰撞计算。"""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ from typing import Tuple
 
 import numpy as np
 
-# Shared overlap tolerance for planning and execution.
+# 规划和执行共用的重叠容差。
 CONTACT_AREA_EPS = 1e-6
 
 
 def rect_corners(cx: float, cy: float, w: float, h: float,
                  theta: float) -> np.ndarray:
-    """Return counter-clockwise corners of a rotated rectangle."""
+    """返回旋转矩形的逆时针顶点。"""
     dx, dy = w / 2.0, h / 2.0
     local = np.array([[-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]], dtype=float)
     c, s = math.cos(theta), math.sin(theta)
@@ -49,7 +49,7 @@ def minkowski_sum(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 
 def c_obstacle(shape_poly: np.ndarray, obs_corners_local: np.ndarray) -> np.ndarray:
-    """Configuration-space obstacle: where the body centre may not go."""
+    """配置空间障碍物，即物体中心不可到达的区域。"""
     return minkowski_sum(shape_poly, -obs_corners_local)
 
 
@@ -121,7 +121,7 @@ def offset_bbox(poly: np.ndarray, margin: float):
 
 
 def mean_rotation_radius(w: float, h: float) -> float:
-    """Return the mean centroid radius used to price rotation as distance."""
+    """返回将旋转折算为距离时代价使用的平均质心半径。"""
     if w <= 0.0 or h <= 0.0:
         return 0.0
     s = math.hypot(w, h)
@@ -131,7 +131,7 @@ def mean_rotation_radius(w: float, h: float) -> float:
 
 
 def wrap_dtheta(a: float, b: float) -> float:
-    """Return the shortest rectangle rotation modulo pi."""
+    """返回矩形模 pi 后的最短旋转角。"""
     return (b - a + math.pi / 2) % math.pi - math.pi / 2
 
 
@@ -152,7 +152,7 @@ def sat_rect_intersect(A: np.ndarray, B: np.ndarray, eps: float = 1e-9) -> bool:
 
 
 def polygon_exterior_coords(polygon) -> np.ndarray:
-    """Vertices of a shapely Polygon as an (N, 2) array, without the repeated last point."""
+    """将 Shapely 多边形顶点返回为 (N, 2) 数组，不含重复的末点。"""
     coords = list(polygon.exterior.coords)
     if len(coords) >= 2 and coords[0] == coords[-1]:
         coords = coords[:-1]

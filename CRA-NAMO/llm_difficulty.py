@@ -1,4 +1,4 @@
-"""Estimate obstacle motion difficulty from material and geometry."""
+"""根据材料和几何尺寸估计障碍物运动难度。"""
 
 from __future__ import annotations
 import os
@@ -8,21 +8,21 @@ from typing import Dict
 import requests
 from config import Config
 
-# Difficulty is calculated as `(mu * rho) * volume * g`, using bulk density.
-G = 9.81                       # gravitational acceleration [m/s^2]
+# 难度按 `(mu * rho) * volume * g` 计算，其中 rho 为体密度。
+G = 9.81                       # 重力加速度 [米/秒^2]
 
-# Floor friction coefficient or rolling resistance for wheeled objects.
+# 地面摩擦系数或轮式物体的滚动阻力。
 MATERIAL_MU: Dict[str, float] = {
     "styrofoam_box": 0.35,
     "foam_mat": 0.50,
     "cardboard_box": 0.35,
-    "empty_cart": 0.02,        # wheels
+    "empty_cart": 0.02,        # 轮式物体
     "plastic_chair": 0.40,
     "trash_bin": 0.40,
     "stool": 0.40,
     "chair": 0.45,
     "empty_shelf": 0.45,
-    "cart": 0.03,              # wheels, loaded
+    "cart": 0.03,              # 载物轮式物体
     "wooden_table": 0.40,
     "wooden_crate": 0.45,
     "shelf": 0.45,
@@ -37,9 +37,9 @@ MATERIAL_MU: Dict[str, float] = {
     "industrial_machine": 0.50,
     "unknown": 0.40,
 }
-# Bulk density is total mass divided by bounding-box volume.
+# 体密度等于总质量除以包围盒体积。
 MATERIAL_RHO: Dict[str, float] = {
-    "styrofoam_box": 15.0,     # EPS foam
+    "styrofoam_box": 15.0,     # EPS 泡沫
     "plastic_chair": 22.0,
     "wooden_table": 26.0,
     "foam_mat": 30.0,
@@ -52,23 +52,23 @@ MATERIAL_RHO: Dict[str, float] = {
     "sofa": 52.0,
     "wooden_crate": 60.0,
     "cabinet": 100.0,
-    "cart": 150.0,             # loaded
-    "shelf": 167.0,            # loaded
+    "cart": 150.0,             # 载物状态
+    "shelf": 167.0,            # 载物状态
     "pallet": 174.0,
-    "steel_shelf": 300.0,      # loaded
+    "steel_shelf": 300.0,      # 载物状态
     "filing_cabinet": 308.0,
     "loaded_pallet": 434.0,
     "industrial_machine": 700.0,
     "steel_safe": 800.0,
-    "concrete_block": 2400.0,  # solid concrete
+    "concrete_block": 2400.0,  # 实心混凝土
     "unknown": 100.0,
 }
-# Per-material coefficient returned by the estimator.
+# 估计器返回的材料系数。
 MATERIAL_MU_RHO: Dict[str, float] = {
     name: round(MATERIAL_MU[name] * MATERIAL_RHO[name], 4)
     for name in MATERIAL_RHO
 }
-# Typical object height used by scenarios.
+# 场景使用的典型物体高度。
 MATERIAL_HEIGHT: Dict[str, float] = {
     "styrofoam_box": 1.0,
     "foam_mat": 0.1,
@@ -94,7 +94,7 @@ MATERIAL_HEIGHT: Dict[str, float] = {
     "industrial_machine": 1.6,
     "unknown": 1.0,
 }
-# Normalized material synonyms.
+# 归一化的材料同义词。
 MATERIAL_ALIASES: Dict[str, str] = {
     "box": "cardboard_box",
     "carton": "cardboard_box",
@@ -116,7 +116,7 @@ PROMPT_ANCHORS = tuple(
 
 _NON_WORD = re.compile(r"[^a-z0-9]+")
 
-def _normalise(name) -> str:  # normalise material name
+def _normalise(name) -> str:  # 归一化材料名称
     return _NON_WORD.sub("_", str(name).strip().lower()).strip("_")
 
 
@@ -160,7 +160,7 @@ def material_height(name) -> float:
     return _lookup(MATERIAL_HEIGHT, name)
 
 def friction_force(mu_rho: float, volume: float) -> float:
-    """f = mu * rho * V * g  [N] -- the push resistance charged per metre."""
+    """按 f = mu * rho * V * g 计算推行阻力，单位为 [牛]。"""
     return mu_rho * volume * G
 
 class DifficultyEstimator:
@@ -177,7 +177,7 @@ class DifficultyEstimator:
         self.calls = 0
         self.mode = "deepseek" if self.api_key else "heuristic"
 
-    def estimate(self, obs_obs: dict) -> float:  # estimate difficulty from perceived material
+    def estimate(self, obs_obs: dict) -> float:  # 根据感知材料估计难度
         oid = obs_obs["oid"]
         if oid in self.cache:
             self.object_cache_hits += 1
@@ -215,7 +215,7 @@ class DifficultyEstimator:
         return difficulty
 
     def forget(self, oid: int):
-        """Drop per-object estimates while retaining material-level caches."""
+        """删除逐物体估计，同时保留材料级缓存。"""
         self.cache.pop(oid, None)
         self.mu_rho_cache.pop(oid, None)
         self.source_cache.pop(oid, None)
@@ -302,7 +302,7 @@ class DifficultyEstimator:
             "thinking": {"type": "enabled" if self.cfg.deepseek_thinking
                          else "disabled"},
         }
-        # Omit the token cap when unset so reasoning is not truncated.
+        # 未设置时不限制 token，避免截断推理过程。
         if self.cfg.llm_max_tokens:
             body["max_tokens"] = int(self.cfg.llm_max_tokens)
         for attempt in range(self.cfg.llm_max_retries + 1):
@@ -327,7 +327,7 @@ class DifficultyEstimator:
                     continue
                 choice = data["choices"][0]
                 text = choice.get("message", {}).get("content") or ""
-                # Use the final number because reasoning may restate intermediate values.
+        # 使用最终数值，因为推理过程可能重复中间值。
                 nums = re.findall(
                     r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?",
                     text,

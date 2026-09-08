@@ -1,4 +1,4 @@
-"""Simulate obstacle motion and state changes driven by scenario events."""
+"""模拟由场景事件驱动的障碍物运动和状态变化。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ _ARRIVED_EPS = 1e-6
 
 @dataclass
 class AtTime:
-    """Fire once the simulated clock passes `t` seconds."""
+    """模拟时钟达到 t 秒后触发一次。"""
     t: float
 
     def ready(self, clock: float, robot_xy: XY, moved: set) -> bool:
@@ -31,7 +31,7 @@ class AtTime:
 
 @dataclass
 class AfterMoved:
-    """Fire once the robot has moved obstacle `oid`."""
+    """机器人搬移障碍物 oid 后触发一次。"""
     oid: int
 
     def ready(self, clock: float, robot_xy: XY, moved: set) -> bool:
@@ -40,7 +40,7 @@ class AfterMoved:
 
 @dataclass
 class NearPoint:
-    """Fire once the robot comes within `radius` of `at`."""
+    """机器人进入 at 周围 radius 范围后触发一次。"""
     at: XY
     radius: float = 1.0
 
@@ -50,7 +50,7 @@ class NearPoint:
 
 @dataclass
 class MoveTo:
-    """Send an obstacle toward a target pose."""
+    """让障碍物向目标姿态移动。"""
     oid: int
     goal: Pose
     speed: Optional[float] = None
@@ -63,7 +63,7 @@ class MoveTo:
 
 @dataclass
 class Halt:
-    """Stop an obstacle wherever it has got to."""
+    """让障碍物在当前位置停止。"""
     oid: int
 
     def apply(self, dyn: "WorldDynamics") -> str:
@@ -73,7 +73,7 @@ class Halt:
 
 @dataclass
 class Mutate:
-    """Change selected obstacle properties in place."""
+    """原地修改障碍物的指定属性。"""
     oid: int
     material: Optional[str] = None
     l: Optional[float] = None
@@ -91,7 +91,7 @@ class Mutate:
             raise ValueError("Mutate difficulty must be non-negative")
 
     def apply(self, dyn: "WorldDynamics") -> str:
-        """Apply the mutation, rejecting size growth into occupied space."""
+        """应用修改；若尺寸扩大会侵入占用空间则拒绝扩展。"""
         obs = dyn.obstacle(self.oid)
         if obs is None:
             return f"obstacle {self.oid} is not in the world"
@@ -119,7 +119,7 @@ class Mutate:
 
 @dataclass
 class Event:
-    """One trigger, one effect, fired at most once."""
+    """一个触发条件对应一个效果，最多触发一次。"""
     trigger: object
     effect: object
     name: str = ""
@@ -132,19 +132,19 @@ class Actor:
     goal: Pose
     speed: float
     path: Optional[List[Pose]] = None
-    leg: int = 0                     # index of the path pose already passed
-    replan: bool = True              # route is stale and must be worked out again
-    suspended: bool = False          # the robot has hold of it
+    leg: int = 0                     # 已通过的路径姿态索引
+    replan: bool = True              # 路径已过期，需要重新规划
+    suspended: bool = False          # 机器人正在握持该物体
     arrived: bool = False
-    blocked_for: float = 0.0         # seconds since it last sought another route
-    waited: float = 0.0              # seconds since it last made any progress
-    avoid_robot: bool = False        # waited long enough to route around it
-    retry_at: float = -math.inf      # clock before which re-planning is pointless
-    tried_version: int = -1          # world version the last failed attempt saw
+    blocked_for: float = 0.0         # 上次寻找其他路线以来的秒数
+    waited: float = 0.0              # 上次取得进展以来的秒数
+    avoid_robot: bool = False        # 等待足够久，开始绕开机器人
+    retry_at: float = -math.inf      # 早于此时刻不值得重新规划
+    tried_version: int = -1          # 上次失败尝试看到的世界版本
 
 
 class WorldDynamics:
-    """Advance the world's own motion alongside the robot's."""
+    """让世界运动与机器人运动同步推进。"""
 
     def __init__(self, world: List[MovableObstacle], static_obstacles,
                  workspace, events: Optional[Sequence[Event]], cfg: Config):
@@ -165,12 +165,12 @@ class WorldDynamics:
 
     @property
     def active(self) -> bool:
-        """Return whether events or moving actors need simulation."""
+        """返回是否存在需要模拟的事件或运动主体。"""
         return bool(self.events) or bool(self.actors)
 
     @property
     def moving(self) -> set:
-        """Obstacles actually under way this instant."""
+        """返回当前实际在运动的障碍物。"""
         return {oid for oid, a in self.actors.items()
                 if not (a.arrived or a.suspended) and a.path}
 
@@ -181,7 +181,7 @@ class WorldDynamics:
         return None
 
     def mark_stale(self, oid: int):
-        """Ground truth for this obstacle changed; any route it was on is void."""
+        """该障碍物的真值发生变化，使其原路径失效。"""
         self.version += 1
         self.stale.add(oid)
         actor = self.actors.get(oid)
@@ -190,12 +190,12 @@ class WorldDynamics:
             actor.retry_at = -math.inf
 
     def drain_stale(self) -> set:
-        """Which obstacles have changed since this was last asked."""
+        """返回上次查询后发生变化的障碍物。"""
         changed, self.stale = self.stale, set()
         return changed
 
     def room_to_grow(self, obs: MovableObstacle, l: float, d: float) -> str:
-        """Return the first object that would block a proposed size increase."""
+        """返回会阻挡尺寸扩大的第一个物体。"""
         grown = (Polygon(geometry.rect_corners(obs.x, obs.y, l, d, obs.theta))
                  .difference(obs.polygon))
         if grown.is_empty or grown.area <= geometry.CONTACT_AREA_EPS:
@@ -217,7 +217,7 @@ class WorldDynamics:
         return ""
 
     def send(self, oid: int, goal: Pose, speed: Optional[float] = None):
-        """Give an obstacle somewhere to be."""
+        """为障碍物设置移动目标。"""
         if self.obstacle(oid) is None:
             return
         self.actors[oid] = Actor(oid, tuple(goal),
@@ -228,17 +228,17 @@ class WorldDynamics:
         self.actors.pop(oid, None)
 
     def note_moved(self, oid: int):
-        """The robot has moved this obstacle; `AfterMoved` triggers may fire."""
+        """机器人已搬移该障碍物，可触发 AfterMoved 事件。"""
         self.moved_by_robot.add(oid)
 
     def suspend(self, oid: int):
-        """The robot has taken hold of it: the script is off until it lets go."""
+        """机器人已握住该物体；释放前暂停其自主运动。"""
         actor = self.actors.get(oid)
         if actor is not None:
             actor.suspended = True
 
     def release(self, oid: int):
-        """The robot has let go: carry on from wherever it was put down."""
+        """机器人已释放该物体，从当前位置继续运动。"""
         actor = self.actors.get(oid)
         if actor is None:
             return
@@ -249,7 +249,7 @@ class WorldDynamics:
 
     def advance(self, seconds: float, clock: float,
                 robot_xy: XY) -> List[Tuple[float, str]]:
-        """Advance world time in bounded steps and return event log entries."""
+        """以有界步长推进世界时间，并返回事件日志。"""
         if not self.active or seconds <= 0.0:
             return []
         self.robot_xy = robot_xy
@@ -283,7 +283,7 @@ class WorldDynamics:
         return notes
 
     def _until_next_time_trigger(self, clock: float) -> float:
-        """Return the time until the next unfired timed event."""
+        """返回下一个未触发定时事件的剩余时间。"""
         gap = math.inf
         for ev in self.events:
             if not ev.fired and isinstance(ev.trigger, AtTime):
@@ -300,13 +300,13 @@ class WorldDynamics:
         return moved
 
     def _blockers(self, oid: int, robot_xy: XY):
-        """Return dynamic blockers for an actor's next route segment."""
+        """返回运动主体下一段路径的动态阻挡物。"""
         polys = [w.polygon for w in self.world if w.oid != oid]
         polys.append(Point(robot_xy).buffer(self.cfg.robot_radius))
         return [(p, p.bounds) for p in polys]
 
     def _others_union(self, oid: int, robot_xy: Optional[XY] = None):
-        """Return the union of obstacles that an actor must avoid."""
+        """返回运动主体必须避开的障碍物并集。"""
         polys = [w.polygon for w in self.world if w.oid != oid]
         if robot_xy is not None:
             polys.append(Point(robot_xy).buffer(self.cfg.robot_radius))
@@ -332,7 +332,7 @@ class WorldDynamics:
             actor.replan = False
             actor.avoid_robot = False
             if not actor.path:
-                # Retry after the world changes or the back-off interval expires.
+                # 等世界变化或退避时间结束后再试。
                 actor.retry_at = clock + max(self.cfg.dynamic_replan_backoff, 0.0)
                 actor.tried_version = self.version
                 actor.blocked_for += dt
@@ -359,7 +359,7 @@ class WorldDynamics:
                 candidate, done_leg = self._lerp(pose, nxt, budget / span), False
             if not manipulation.path_is_clear_against(obs, [pose, candidate],
                                                      blockers):
-                # Wait before replanning around the blocker.
+                # 等待后再规划绕开阻挡物的路线。
                 actor.blocked_for += dt
                 actor.waited += dt
                 if actor.blocked_for >= self.cfg.dynamic_block_patience:
@@ -383,13 +383,13 @@ class WorldDynamics:
         return moved
 
     def _may_replan(self, actor: Actor, clock: float) -> bool:
-        """Return whether the actor's route may be planned again."""
+        """返回是否允许再次规划该主体的路线。"""
         return (actor.retry_at == -math.inf
                 or actor.tried_version != self.version
                 or clock >= actor.retry_at)
 
     def _give_up_if_stuck(self, actor: Actor):
-        """Park an actor that has exceeded the configured wait limit."""
+        """将超过配置等待上限的主体停在原地。"""
         if actor.waited < self.cfg.dynamic_give_up:
             return
         actor.arrived = True
@@ -413,7 +413,7 @@ class WorldDynamics:
                 a[2] + geometry.wrap_dtheta(a[2], b[2]) * s)
 
 
-# Convenience constructors for scenario files.
+# 为场景文件提供便捷构造函数。
 def at_time(t: float) -> AtTime:
     return AtTime(float(t))
 

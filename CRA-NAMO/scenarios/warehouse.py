@@ -24,15 +24,15 @@ def _load(oid: str, x: float, y: float, l: float, d: float, h: float,
 
 
 def create():
-    """Create the 60 m by 40 m warehouse map."""
+    """创建 60 米乘 40 米的仓库地图。"""
 
-    # Coordinates use metres with origin at the lower-left corner.
+    # 坐标单位为米，原点位于左下角。
     workspace = box(0.0, 0.0, 60.0, 40.0)
     wall_t = 0.75
 
-    # Build fixed walls and shelves.
+    # 构建固定墙体和货架。
     walls = [
-        # Outer boundary walls.
+        # 外边界墙。
         StaticObstacle.rect(
             x=30.0,
             y=wall_t / 2.0,
@@ -67,18 +67,18 @@ def create():
         ),
     ]
 
-    # Seven shelf columns leave four horizontal aisles.
+    # 七列货架形成四条水平通道。
     shelf_columns = (
-        (8.5, 10.0),    # Column 1.
-        (15, 16.50),    # Column 2.
-        (21.0, 22.5),   # Column 3.
-        (32, 33.50),    # Column 4.
-        (38.5, 40),      # Column 5.
-        (47.5, 49.0),   # Column 6.
-        (54.5, 56.0),   # Column 7; upper section is shipping space.
+        (8.5, 10.0),    # 第 1 列。
+        (15, 16.50),    # 第 2 列。
+        (21.0, 22.5),   # 第 3 列。
+        (32, 33.50),    # 第 4 列。
+        (38.5, 40),      # 第 5 列。
+        (47.5, 49.0),   # 第 6 列。
+        (54.5, 56.0),   # 第 7 列；上部为发货区。
     )
 
-    # Top shelves occupy columns 1 through 6.
+    # 顶部货架占据第 1 至 6 列。
     for column, (x0, x1) in enumerate(shelf_columns[:6], start=1):
         walls.append(
             StaticObstacle.rect(
@@ -91,7 +91,7 @@ def create():
             )
         )
 
-    # Left shelves are split around aisle B.
+    # 左侧货架在通道 B 两侧分段。
     for column, (x0, x1) in enumerate(shelf_columns[:4], start=1):
         walls.extend(
             (
@@ -114,7 +114,7 @@ def create():
             )
         )
 
-    # Right shelves span the middle aisles.
+    # 右侧货架横跨中部通道。
     for column, (x0, x1) in enumerate(shelf_columns[4:], start=5):
         walls.append(
             StaticObstacle.rect(
@@ -127,7 +127,7 @@ def create():
             )
         )
 
-    # All columns have lower and bottom shelf segments.
+    # 所有列都有下部和底部货架段。
     for column, (x0, x1) in enumerate(shelf_columns, start=1):
         walls.extend(
             (
@@ -150,30 +150,30 @@ def create():
             )
         )
 
-    # Shelf bridges close selected aisle segments.
+    # 货架横梁封闭指定通道段。
     shelf_bridges = (
-        # Aisle A.
+        # 通道 A。
         (1, 29.0, 32.0, "A"),
         (3, 29.0, 32.0, "A"),
         (6, 29.0, 32.0, "A"),
 
-        # Aisle B.
+        # 通道 B。
         (2, 21.5, 24.5, "B"),
         (4, 21.5, 24.5, "B"),
 
-        # Aisle C.
+        # 通道 C。
         (1, 13.0, 16.0, "C"),
         (2, 13.0, 16.0, "C"),
         (3, 13.0, 16.0, "C"),
 
-        # Aisle D.
+        # 通道 D。
         (1, 6.5, 9.0, "D"),
         (3, 6.5, 9.0, "D"),
         (4, 6.5, 9.0, "D"),
         (5, 6.5, 9.0, "D"),
         (7, 6.5, 9.0, "D"),
 
-        # Extend selected bridges to the lower boundary.
+        # 将指定横梁延伸到下边界。
         (2, wall_t, 2.5, "floor"),
         (3, wall_t, 2.5, "floor"),
         (5, wall_t, 2.5, "floor"),
@@ -193,7 +193,7 @@ def create():
             )
         )
 
-    # Small fixed shelves in the shipping area.
+    # 发货区的小型固定货架。
     # 发货区右侧的六组小型固定货架，按 (x0, x1, y0, y1) 给出占地范围。
     shipping_shelves = (
         (58.00, 59.25, 28.5, 29.0),
@@ -215,17 +215,13 @@ def create():
             )
         )
 
-    # Build movable obstacles by map region.
-    # ======================================================================
+    # 按地图区域构建可移动障碍物。
     # 可移动障碍物
     # 尺寸取自真实仓储器具：欧标托盘 1.2 x 0.8 m，笼车 0.8 x 0.72 m，
     # 手动液压车 1.6 x 0.55 m，叉车 2.4 x 1.15 m。阻力由质量和地面摩擦
     # 系数决定：带刹车或直接拖动的货物很重，装在轮子上的很轻。
-    # ======================================================================
     movable = [
-        # ------------------------------------------------------------------
         # 左侧区域（x < 30）
-        # ------------------------------------------------------------------
         # 通道 D 里遗留的一段辊道输送机。
         _load("conveyor101", 18.7, 10.5, 3.6, 0.6, 0.85, 0.5,
               "roller_conveyor", mass=180.0, mu=MU_STEEL),
@@ -239,9 +235,7 @@ def create():
         _load("blockStack101", 12.0, 23.0, 2.4, 2.4, 1.6, 0.0,
               "block_stacked_pallets", mass=1_600.0, mu=MU_WOOD),
 
-        # ------------------------------------------------------------------
         # 中央区域（约 x=30--45）
-        # ------------------------------------------------------------------
         # 三节笼车串在一起，脚轮自由。
         _load("rollCage101", 36.0, 23.0, 2.4, 0.75, 1.75, 0.23,
               "roll_cage", mass=620.0, mu=MU_CASTORS),
@@ -252,9 +246,7 @@ def create():
         _load("loadedPallet101", 39.0, 14.3, 1.2, 0.8, 1.35, 0.8,
               "loaded_pallet", mass=620.0, mu=MU_WOOD),
 
-        # ------------------------------------------------------------------
         # 右侧区域（x > 45）
-        # ------------------------------------------------------------------
         _load("cartonBlock201", 52.0, 16.0, 2.4, 1.6, 1.1, 0.0,
               "cardboard_box", mass=480.0, mu=MU_WOOD),
         # 十块空托盘叠成一摞。
@@ -264,9 +256,7 @@ def create():
         _load("gaylord201", 52.0, 25.0, 1.2, 1.0, 1.15, 0.3,
               "bulk_box", mass=400.0, mu=MU_WOOD),
 
-        # ------------------------------------------------------------------
         # 通道内的零散器具
-        # ------------------------------------------------------------------
         # 通道 D 里上下相邻的两个小木箱。
         _load("crate101", 16.0, 7.35, 0.5, 0.5, 0.45, 0.0,
               "wooden_crate", mass=28.0, mu=MU_STEEL),
@@ -292,10 +282,8 @@ def create():
         _load("rollCage203", 48.0, 8.0, 0.8, 0.72, 1.75, 0.4,
               "roll_cage", mass=260.0, mu=MU_CASTORS),
 
-        # ------------------------------------------------------------------
         # 由 AGV 载着自主行驶的送货托盘。停下时驻车制动，
         # 所以推它比等它让路贵得多。
-        # ------------------------------------------------------------------
         _load("deliveryBox101", 13.5, 28.0, 1.3, 1.1, 1.4, 0.0,
               "agv_pallet", mass=420.0, mu=MU_BRAKED_WHEELS),
     ]
@@ -456,7 +444,7 @@ def create():
    
 
 
-    # Start in receiving and finish in shipping.
+    # 从收货区出发，在发货区结束。
     start = (5.0, 1.25)
     goal = (56.0, 33.0)
 

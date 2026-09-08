@@ -1,4 +1,4 @@
-"""Connect world geometry to the obstacle SE(2) planner."""
+"""连接世界几何与障碍物 SE(2) 规划器。"""
 
 from __future__ import annotations
 import hashlib
@@ -13,11 +13,11 @@ from config import Config
 from obstacle import MovableObstacle
 
 
-_SWEPT_MAX_DTHETA = math.pi / 12.0  # baseline for a ~1 m² obstacle (half-diag ≈ 0.5 m)
+_SWEPT_MAX_DTHETA = math.pi / 12.0  # 约 1 平方米障碍物的基准值（半对角线约 0.5 米）
 _SWEPT_REF_HALF_DIAG = 0.5
 
 def swept_between(obs: MovableObstacle, a, b) -> Polygon:
-    """Return an interpolated swept region between two obstacle poses."""
+    """返回两个障碍物姿态之间插值得到的扫掠区域。"""
     ax, ay, ath = a
     bx, by, bth = b
     dtheta = geometry.wrap_dtheta(ath, bth)
@@ -36,7 +36,7 @@ def swept_between(obs: MovableObstacle, a, b) -> Polygon:
 
 def swept_region(obs: MovableObstacle, nx: float, ny: float,
                  theta: Optional[float] = None) -> Polygon:
-    """Region swept moving *obs* from where it is now to the given pose."""
+    """返回将 obs 从当前位置移动到目标姿态时扫掠的区域。"""
     return swept_between(obs, (obs.x, obs.y, obs.theta),
                          (nx, ny, obs.theta if theta is None else theta))
 
@@ -60,7 +60,7 @@ def _geometry_signature(geom) -> tuple:
 
 
 def _walls_signature(static_obstacles) -> bytes:
-    """Return a geometry digest for caching C-space planners."""
+    """返回用于缓存配置空间规划器的几何摘要。"""
     digest = hashlib.blake2b(digest_size=16)
     for so in static_obstacles:
         digest.update(so.polygon.wkb)
@@ -81,7 +81,7 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
                  work_radius: Optional[float] = None,
                  forward_penalty: Optional[float] = None,
                  transition_safe: bool = False) -> se2_planner.SE2Planner:
-    """Return a cached SE(2) planner for one obstacle and world arrangement."""
+    """返回指定障碍物和世界布局对应的缓存 SE(2) 规划器。"""
     forward_penalty = (cfg.manip_forward_penalty if forward_penalty is None
                        else forward_penalty)
     cell = _resolve_cell(bounds, cfg)
@@ -97,10 +97,10 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
            _geometry_signature(others_polys))
     planner = _PLANNER_CACHE.get(key)
     if planner is not None:
-        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # Mark as most recently used.
+        _PLANNER_CACHE[key] = _PLANNER_CACHE.pop(key)   # 标记为最近使用。
         return planner
 
-    # Static and movable exclusions share one C-space.
+    # 静态和可移动禁行区共用一个配置空间。
     walls = [so.polygon for so in static_obstacles] + _polygon_parts(others_polys)
     planner = se2_planner.build_se2_planner(
         wall_polys=walls,
@@ -119,13 +119,13 @@ def _get_planner(obs: MovableObstacle, static_obstacles,
     )
     _PLANNER_CACHE[key] = planner
     while len(_PLANNER_CACHE) > _PLANNER_CACHE_MAX:
-        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # Evict the least-recently-used entry.
+        _PLANNER_CACHE.pop(next(iter(_PLANNER_CACHE)))   # 移除最久未使用的条目。
     return planner
 
 
 
 def path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
-    """Return whether the swept body path clears every blocker."""
+    """返回物体扫掠路径是否避开所有阻挡物。"""
     if not path or len(path) < 2 or not blockers:
         return True
     for a, b in zip(path, path[1:]):
@@ -141,7 +141,7 @@ def path_is_clear_against(obs: MovableObstacle, path, blockers) -> bool:
     return True
 
 def blocker_index(static_obstacles, others_polys):
-    """Polygons plus their bounding boxes, for cheap AABB pre-filtering."""
+    """返回多边形及其包围盒，用于快速 AABB 预筛选。"""
     polys = [so.polygon for so in static_obstacles] + _polygon_parts(others_polys)
     return [(p, p.bounds) for p in polys]
 
@@ -158,7 +158,7 @@ def plan_move_se2(
     goal_rank=None,
     path_accept=None,
 ) -> Tuple[bool, Optional[list], float, Optional[Tuple[float, float, float]]]:
-    """The cheapest place to put *obs* by push cost, for callers wanting just one."""
+    """按推动代价返回 obs 的最低代价放置点。"""
     for path, cost_, goal in move_se2_options(
             obs, must_clear_polys, static_obstacles, bounds, robot_pos, cfg,
             others_polys, goal_accept, goal_rank, path_accept):
@@ -168,22 +168,22 @@ def plan_move_se2(
 
 def move_se2_options(
     obs: MovableObstacle,
-    must_clear_polys,                   # corridor polygons that must be cleared
-    static_obstacles,                   # list of StaticObstacle
+    must_clear_polys,                   # 必须清除的通道多边形
+    static_obstacles,                   # StaticObstacle 列表
     bounds: Tuple[float, float, float, float],
     robot_pos: Tuple[float, float],
     cfg: Config,
-    others_polys=None,                  # other movable obstacles to avoid
-    goal_accept=None,                   # (goal_pose) -> bool, filters candidate drop poses
-    goal_rank=None,                     # (goal_pose) -> float, extra metres of regret, for ordering
-    path_accept=None,                   # (poses) -> bool, extra hard constraint on the whole path
+    others_polys=None,                  # 需要避开的其他可移动障碍物
+    goal_accept=None,                   # (goal_pose) -> bool，筛选候选放置姿态
+    goal_rank=None,                     # (goal_pose) -> float，排序用的额外距离惩罚
+    path_accept=None,                   # (poses) -> bool，对整条路径施加的额外硬约束
 ):
-    """Yield candidate obstacle relocations ordered by push cost."""
+    """按推动代价升序生成候选障碍物搬移方案。"""
     try:
-        # Use the same swept-volume-safe C-space as obstacle routing.
+        # 使用与障碍物路径规划相同、可验证扫掠体积的配置空间。
         planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys,
                                transition_safe=True)
-        # The blocked corridor may change between planning cycles.
+        # 被阻挡通道可能在规划周期之间变化。
         corridor_verts = [geometry.polygon_exterior_coords(p)
                           for p in must_clear_polys] if must_clear_polys else []
         planner.set_corridor([c for c in corridor_verts if len(c) >= 3])
@@ -193,7 +193,7 @@ def move_se2_options(
         def _validate(poses):
             if not path_is_clear_against(obs, poses, blockers):
                 return False
-            # A candidate is valid only if the robot can escort it in contact.
+            # 只有机器人能保持接触伴随移动时，候选方案才有效。
             return path_accept is None or path_accept(poses)
 
         for result in planner.acceptable_goals(
@@ -213,7 +213,7 @@ def move_se2_options(
 
 
 def _split_mixed_leg(obs: MovableObstacle, a, b, blockers) -> Optional[list]:
-    """Split a mixed translation-and-rotation leg into two validated legs."""
+    """将平移和旋转混合的一段拆成两段并分别验证。"""
     for middle in ((b[0], b[1], a[2]), (a[0], a[1], b[2])):
         if path_is_clear_against(obs, [a, middle, b], blockers):
             return [a, middle, b]
@@ -221,7 +221,7 @@ def _split_mixed_leg(obs: MovableObstacle, a, b, blockers) -> Optional[list]:
 
 
 def _verified_prefix(obs: MovableObstacle, path, blockers, cfg: Config) -> list:
-    """Return the longest prefix whose swept legs pass collision validation."""
+    """返回通过碰撞验证的最长路径前缀。"""
     if not path or len(path) < 2:
         return []
     out = [path[0]]
@@ -244,7 +244,7 @@ def plan_route_se2(obs: MovableObstacle,
                    bounds: Tuple[float, float, float, float],
                    cfg: Config,
                    others_polys=None) -> Optional[list]:
-    """Plan and swept-validate a route for an independently moving obstacle."""
+    """为独立运动的障碍物规划并验证扫掠路径。"""
     try:
         planner = _get_planner(obs, static_obstacles, bounds, cfg, others_polys,
                                work_radius=float("inf"), forward_penalty=0.0,

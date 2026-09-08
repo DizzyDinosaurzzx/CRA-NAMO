@@ -1,4 +1,4 @@
-"""Command-line entry point."""
+"""命令行入口。"""
 
 from __future__ import annotations
 import argparse
@@ -11,7 +11,7 @@ _log_repeats = 0
 
 
 def emit_log(line: str) -> None:
-    """Print a line, folding consecutive duplicates into a repeat count."""
+    """输出一行，并将连续重复项折叠为重复次数。"""
     global _pending_log, _log_repeats
     if line == _pending_log:
         _log_repeats += 1
@@ -22,7 +22,7 @@ def emit_log(line: str) -> None:
 
 
 def flush_log() -> None:
-    """Finish the current run of folded console messages."""
+    """结束当前一组折叠的控制台消息。"""
     global _pending_log, _log_repeats
     if _log_repeats:
         times = "time" if _log_repeats == 1 else "times"
@@ -36,7 +36,7 @@ import viz
 from executor import OnlineNAMO
 
 def main():
-    """Parse command-line options and run one scenario."""
+    """解析命令行选项并运行一个场景。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default=scenarios.DEFAULT_SCENARIO,
                     choices=scenarios.names())

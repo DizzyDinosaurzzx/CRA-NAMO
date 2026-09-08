@@ -1,4 +1,4 @@
-"""Plan obstacle motion on a discretized SE(2) grid."""
+"""在离散 SE(2) 网格上规划障碍物运动。"""
 
 from __future__ import annotations
 import heapq
@@ -92,14 +92,14 @@ class SE2Planner:
         self.bulge = self.r_half_diag * (1.0 - math.cos(self.dtheta / 2.0))
         self.pose_margin = 0.1 * cell + self.bulge
         self.snap_margin = 0.5 * math.hypot(cell, cell) + self.bulge
-        # Transition-safe mode adds enough margin to validate motion between cells.
+        # 过渡安全模式增加足够余量，以验证网格单元之间的运动。
         self.margin = self.snap_margin if transition_safe else self.pose_margin
         self.unit = cell / self._W_AXIS
         self.W_rot = int(round(self.rot_step_cost / self.unit))
 
         self._build_moves()
         self._build_cspace()
-        # Cache includes the start state and search radius.
+        # 缓存包含起始状态和搜索半径。
         self._cache: Optional[Tuple[np.ndarray, np.ndarray, int,
                                     Optional[int]]] = None
 
@@ -109,7 +109,7 @@ class SE2Planner:
                         f"-> reachable {self.allowed.mean() * 100:.0f}%")
 
     def _build_moves(self) -> None:
-        """(di, dj, dk, integer weight). Translation and rotation are mutually exclusive."""
+        """返回 (di, dj, dk, 整数权重)；平移和旋转互斥。"""
         mv: List[Tuple[int, int, int, int]] = []
         for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             mv.append((di, dj, 0, self._W_AXIS))
@@ -147,7 +147,7 @@ class SE2Planner:
         for k, th in enumerate(self.thetas):
             O = corners[k]
 
-            # Check each orientation against walls.
+            # 检查每个朝向是否与墙体碰撞。
             layer_b = np.zeros((self.nx, self.ny), dtype=bool)
             for wp in self.wall_polys:
                 layer_b |= inside_convex(c_obstacle(wp, O), self.X, self.Y,
@@ -160,14 +160,14 @@ class SE2Planner:
                                          margin=self.pose_margin)
             rot_blocked[:, :, k] = layer_r
 
-            # Apply the manipulation workspace constraint.
+            # 应用搬移工作空间约束。
             if not np.isfinite(R):
                 indisk[:, :, k] = True
             elif self.containment == "centroid":
                 indisk[:, :, k] = ((self.X - rx) ** 2 + (self.Y - ry) ** 2) <= R * R
             else:
                 ok = np.ones((self.nx, self.ny), dtype=bool)
-                for ox, oy in O:  # O = corner offsets relative to centroid
+                for ox, oy in O:  # O 表示相对质心的顶点偏移
                     ok &= ((self.X + ox - rx) ** 2 + (self.Y + oy - ry) ** 2) <= R * R
                 indisk[:, :, k] = ok
 
@@ -202,17 +202,17 @@ class SE2Planner:
         if self._unstuck:
             if self._unstuck_for == start_idx:
                 return 0
-            np.copyto(self.allowed, self._allowed_base)   # Restore base collision exemptions.
+            np.copyto(self.allowed, self._allowed_base)   # 恢复基础碰撞豁免。
             np.copyto(self.rot_ok, self._rot_ok_base)
             self._unstuck = False
             self._unstuck_for = None
         if self.allowed[start_idx]:
             return 0
         if not self.in_disk[start_idx]:
-            return 0                      # outside workspace circle – not a margin artifact, let caller error
+            return 0                      # 位于工作空间圆外，不是余量伪影，交由调用方报错
         clearance = self._unstick_clearance(self._pose(*start_idx))
         if clearance is None:
-            return 0                      # genuinely embedded in wall, cannot exempt
+            return 0                      # 确实嵌入墙体，不能豁免
         max_cells = max(3, int(math.ceil(self.r_half_diag / self.cell)) + 2)
         si, sj, sk = start_idx
         stack = [start_idx]
@@ -234,12 +234,12 @@ class SE2Planner:
                     continue
                 nxt = (ni, nj, nk)
                 if nxt in seen or self.allowed[nxt]:
-                    continue              # already unblocked or originally free -> reached normal space, stop
+                    continue              # 已解除阻挡或原本空闲，已回到正常空间，停止处理
                 seen.add(nxt)
                 if not self.in_disk[nxt]:
                     continue
                 if self._true_collision(self._pose(*nxt), clearance):
-                    continue              # true collision, keep as occupied
+                    continue              # 真实碰撞，继续视为占用
                 stack.append(nxt)
 
         if freed:
@@ -272,7 +272,7 @@ class SE2Planner:
         return i, j, rem - j * nT
 
     def _search(self, start_idx: Tuple[int, int, int], max_bucket: int | None = None):
-        """Bucketed Dijkstra using a heap of occupied distance buckets."""
+        """使用距离桶堆实现分桶 Dijkstra。"""
         N = self.nx * self.ny * self.n_theta
         allowed = self.allowed.reshape(-1)
         rot_ok = self.rot_ok
@@ -292,17 +292,17 @@ class SE2Planner:
             queued.discard(b)
             if max_bucket is not None and b > max_bucket:
                 break
-            while True:  # inner loop: compatible with zero-weight edges (when rotation is free)
+            while True:  # 内层循环兼容零权重边（旋转不计代价时）
                 arrs = buckets.pop(b, None)
                 if not arrs:
                     break
                 idx = arrs[0] if len(arrs) == 1 else np.concatenate(arrs)
-                idx = np.unique(idx[dist[idx] == b])  # discard stale entries
+                idx = np.unique(idx[dist[idx] == b])  # 丢弃过期条目
                 if idx.size == 0:
                     continue
                 i, j, k = self._unflat(idx)
                 for w, DI, DJ in self._move_groups:
-                    ni, nj = i + DI, j + DJ            # (num directions, frontier size)
+                    ni, nj = i + DI, j + DJ            # （方向数，前沿大小）
                     ok = (ni >= 0) & (ni < nx) & (nj >= 0) & (nj < ny)
                     if not ok.any():
                         continue
@@ -326,7 +326,7 @@ class SE2Planner:
                 for dk in (1, -1):
                     kk = k if dk == 1 else (k - 1) % nT
                     nidx = (i * ny + j) * nT + (k + dk) % nT
-                    # (i, j, k) pairwise distinct -> (i, j, k+dk) also pairwise distinct, no dedup needed
+                    # (i, j, k) 两两不同，因此 (i, j, k+dk) 也不同，无需去重。
                     better = (rot_ok[i, j, kk] & allowed[nidx]
                               & (dist[nidx] > nd))
                     tgt = nidx[better]
@@ -362,14 +362,14 @@ class SE2Planner:
 
     def _build_corridor_mask(self, corridor_polys: List[np.ndarray]):
         x0, y0, cell = float(self.xs[0]), float(self.ys[0]), self.cell
-        layers = []                       # (k, i0, i1, j0, j1, layer)
+        layers = []                       # （k，i0，i1，j0，j1，层）
         wi0, wi1, wj0, wj1 = self.nx, 0, self.ny, 0
         for k, th in enumerate(self.thetas):
             O = rect_corners(0.0, 0.0, self.obstacle_w, self.obstacle_h, th)
             for cp in corridor_polys:
                 C = c_obstacle(cp, O)
                 bb = offset_bbox(C, self.snap_margin)
-                if bb is None:                       # unreliable solution -> fall back to full grid layer
+                if bb is None:                       # 结果不可靠，退回完整网格层
                     i0, i1, j0, j1 = 0, self.nx, 0, self.ny
                 else:
                     bxmin, bxmax, bymin, bymax = bb
@@ -377,7 +377,7 @@ class SE2Planner:
                     i1 = min(self.nx, int(math.floor((bxmax - x0) / cell)) + 1)
                     j0 = max(0, int(math.ceil((bymin - y0) / cell)))
                     j1 = min(self.ny, int(math.floor((bymax - y0) / cell)) + 1)
-                    if i0 >= i1 or j0 >= j1:         # window entirely outside the grid
+                    if i0 >= i1 or j0 >= j1:         # 窗口完全位于网格外
                         continue
                 layer = inside_convex(C, self.xs[i0:i1, None],
                                       self.ys[None, j0:j1], margin=self.snap_margin)
@@ -401,7 +401,7 @@ class SE2Planner:
                tuple(np.asarray(cp, dtype=float).tobytes() for cp in corridor_polys))
         hit = _CORRIDOR_MASK_CACHE.get(key)
         if hit is not None:
-            _CORRIDOR_MASK_CACHE[key] = _CORRIDOR_MASK_CACHE.pop(key)  # mark as most recently used
+            _CORRIDOR_MASK_CACHE[key] = _CORRIDOR_MASK_CACHE.pop(key)  # 标记为最近使用
             win, packed, shape = hit
             self._route_window = win
             self._route_mask = (None if win is None else
@@ -419,7 +419,7 @@ class SE2Planner:
             _CORRIDOR_MASK_CACHE.pop(next(iter(_CORRIDOR_MASK_CACHE)))
 
     def _forward_bias(self, start_pose: Tuple[float, float, float], ref_pos=None):
-        """Return the optional forward-placement penalty field."""
+        """返回可选的前向放置惩罚场。"""
         if self.forward_penalty <= 0.0:
             return None
         ref = self.robot_pos if ref_pos is None else ref_pos
@@ -467,7 +467,7 @@ class SE2Planner:
 
     @staticmethod
     def _smallest(score: np.ndarray, n: int) -> list:
-        """Indices of the n smallest finite elements in score, sorted by value ascending."""
+        """返回 score 中 n 个最小有限值的索引，并按值升序排列。"""
         n = max(1, n)
         if n == 1:
             b = int(np.argmin(score))
@@ -478,7 +478,7 @@ class SE2Planner:
 
     def _cache_answers(self, start_flat: int,
                        max_bucket: Optional[int]) -> bool:
-        """Return whether the cached Dijkstra search covers this query."""
+        """返回缓存的 Dijkstra 搜索是否覆盖当前查询。"""
         if self._cache is None or self._cache[2] != start_flat:
             return False
         reached = self._cache[3]
@@ -494,7 +494,7 @@ class SE2Planner:
                       goal_rank=None,
                       ref_pos=None,
                       widen: int = 1) -> SE2PlanResult:
-        """The cheapest drop pose by push cost alone, or why there was none."""
+        """按推动代价返回最低代价放置姿态及无解原因。"""
         for result in self.acceptable_goals(
                 start_pose, validate=validate, n_candidates=n_candidates,
                 goal_accept=goal_accept, goal_rank=goal_rank, ref_pos=ref_pos,
@@ -510,7 +510,7 @@ class SE2Planner:
                          goal_rank=None,
                          ref_pos=None,
                          widen: int = 1):
-        """Yield feasible drop poses in ascending push cost."""
+        """按推动代价升序生成可行放置姿态。"""
         self._last_refusal = SE2PlanResult(False, "no drop pose was tried")
         start_idx = self._snap(*start_pose)
 
@@ -530,7 +530,7 @@ class SE2Planner:
         if self._unstick_start(start_idx):
             self._cache = None
 
-        # Limit search to the corridor extent plus obstacle size.
+        # 将搜索限制在通道范围加障碍物尺寸内。
         max_bucket = None
         if self._route_window is not None:
             i0, i1, j0, j1 = self._route_window
@@ -561,7 +561,7 @@ class SE2Planner:
                     yield result
             if found:
                 return
-            # Widening retries beyond the initial shortlist when requested.
+            # 按请求在初始候选列表之外扩大搜索。
             if widened or widen <= 1 or goal_accept is None or refused < len(candidates):
                 break
             n_best = max(n_candidates, 1) * int(widen)
@@ -572,7 +572,7 @@ class SE2Planner:
             else "all candidate routes failed swept-volume validation")
 
     def _reorder(self, candidates, dist, goal_rank):
-        """Order candidate poses by the caller's optional secondary cost."""
+        """按调用方提供的可选次级代价排序候选姿态。"""
         if goal_rank is None:
             return candidates
         nyT = self.ny * self.n_theta
@@ -585,7 +585,7 @@ class SE2Planner:
         return [b for _score, b in scored]
 
     def _acceptable(self, parent, start_pose, validate, goal_accept, ordered):
-        """Yield candidate plans and whether each was rejected by a hard filter."""
+        """生成候选计划，并标记每个计划是否被硬过滤器拒绝。"""
         nyT = self.ny * self.n_theta
         for best in ordered:
             goal_idx = (best // nyT, (best % nyT) // self.n_theta,
@@ -612,7 +612,7 @@ class SE2Planner:
 
         if not self.in_disk[start_idx]:
             return SE2PlanResult(False, "start pose is outside the robot workspace circle")
-        # Tangent contact is allowed by _START_COLLISION_EPS.
+        # _START_COLLISION_EPS 允许相切接触。
         O_start = rect_corners(0, 0, self.obstacle_w, self.obstacle_h, start_pose[2])
         for wp in self.wall_polys:
             if sat_rect_intersect(
@@ -662,7 +662,7 @@ def build_se2_planner(wall_polys,
                        oid: int = -1,
                        verbose: bool = False,
                        logger: Callable[[str], None] = print) -> SE2Planner:
-    """Build a SE2Planner from CA-NAMO-style data."""
+    """根据 CRA-NAMO 风格的数据构建 SE2Planner。"""
     wall_verts = [polygon_exterior_coords(p) for p in wall_polys]
 
     return SE2Planner(

@@ -1,4 +1,4 @@
-"""Estimate manipulation risk and convert it to a cost surcharge."""
+"""估计搬移风险并将其转换为代价附加项。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ EXTREME = "extreme"
 LEVELS = (LOW, MEDIUM, MEDIUM_HIGH, HIGH, EXTREME)
 _ORDER = {name: i for i, name in enumerate(LEVELS)}
 
-# Detour-equivalent surcharge for each risk level.
+# 各风险等级对应的等效绕行附加项。
 RISK_DETOUR_EQUIV_M: Dict[str, float] = {
     LOW: 0.0,
     MEDIUM: 20.0,
@@ -31,7 +31,7 @@ RISK_DETOUR_EQUIV_M: Dict[str, float] = {
     EXTREME: 5000.0,
 }
 
-# Exact labels with known risk levels.
+# 已知风险等级的精确标签。
 RISK_LABELS: Dict[str, str] = {
     "chair": LOW, "plastic_chair": LOW, "stool": LOW, "wooden_table": LOW,
     "desk": LOW, "cardboard_box": LOW, "styrofoam_box": LOW, "foam_mat": LOW,
@@ -54,7 +54,7 @@ RISK_LABELS: Dict[str, str] = {
     "collapsed_beam": EXTREME,
 }
 
-# Keyword fallback for labels absent from the exact table.
+# 精确表中没有标签时使用的关键词后备规则。
 RISK_KEYWORDS: Dict[str, str] = {
     "water": MEDIUM, "liquid": MEDIUM, "full": MEDIUM, "glass": MEDIUM,
     "fragile": MEDIUM, "cup": MEDIUM, "bottle": MEDIUM, "tank": MEDIUM,
@@ -79,14 +79,14 @@ def _normalise(name) -> str:
 
 
 def step_up(level: Optional[str]) -> str:
-    """One rung further up the ladder, or the top if already there."""
+    """风险等级上调一级；已到顶级时保持不变。"""
     if level is None:
         return LEVELS[0]
     return LEVELS[min(_ORDER[level] + 1, len(LEVELS) - 1)]
 
 
 def higher(a: Optional[str], b: Optional[str]) -> Optional[str]:
-    """Whichever of two levels is the more dangerous. None counts as no opinion."""
+    """返回两个等级中更危险者；None 表示没有判断。"""
     if a is None:
         return b
     if b is None:
@@ -95,7 +95,7 @@ def higher(a: Optional[str], b: Optional[str]) -> Optional[str]:
 
 
 def keyword_level(label) -> str:
-    """Return the highest risk implied by an exact label or keyword."""
+    """返回精确标签或关键词暗示的最高风险等级。"""
     key = _normalise(label)
     if key in RISK_LABELS:
         return RISK_LABELS[key]
@@ -109,21 +109,21 @@ def keyword_level(label) -> str:
 
 
 def detour_equivalent_m(level: Optional[str]) -> float:
-    """Metres of detour this level is worth avoiding. Unknown levels read as low."""
+    """返回值得为避免该等级而绕行的米数；未知等级按低风险处理。"""
     if level is None:
         return 0.0
     return RISK_DETOUR_EQUIV_M.get(level, 0.0)
 
 
 def label_of(o: dict, difficulty: Optional[float] = None) -> str:
-    """Return the currently observable label, including contact revelations."""
+    """返回当前可观察标签，包括接触后揭示的标签。"""
     if difficulty is not None and o.get("contact_reveals"):
         return _normalise(o["contact_reveals"])
     return _normalise(o.get("material", "unknown"))
 
 
 class RiskEstimator:
-    """Estimate one risk level per obstacle and revise it after contact."""
+    """为每个障碍物估计风险等级，并在接触后修正。"""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -131,7 +131,7 @@ class RiskEstimator:
         self.level: Dict[int, str] = {}
         self.source: Dict[int, str] = {}
         self.on_contact: set[int] = set()
-        # Cache keys include every prompt input.
+        # 缓存键包含提示词的所有输入。
         self.verdict_cache: Dict[tuple, str] = {}
         self.calls = 0
         self.perception_calls = 0
@@ -139,7 +139,7 @@ class RiskEstimator:
         self.mode = "deepseek" if self.api_key else "heuristic"
 
     def assess(self, observation: dict) -> str:
-        """First look, from the visual label. Cached: one verdict per obstacle."""
+        """根据首次视觉标签评估；每个障碍物只缓存一个判断。"""
         oid = observation["oid"]
         if oid in self.level:
             return self.level[oid]
@@ -149,7 +149,7 @@ class RiskEstimator:
         return level
 
     def assess_many(self, observations: List[dict]) -> Dict[int, str]:
-        """Assess newly visible obstacles in one request, within a stage budget."""
+        """在阶段预算内通过一次请求评估新可见障碍物。"""
         unresolved: Dict[tuple, List[dict]] = {}
         for observation in observations:
             oid = observation["oid"]
@@ -180,7 +180,7 @@ class RiskEstimator:
         return {o["oid"]: self.level[o["oid"]] for o in observations}
 
     def reassess(self, observation: dict, difficulty: float) -> str:
-        """Reassess an obstacle once after contact reveals its difficulty."""
+        """接触揭示难度后重新评估一次障碍物。"""
         oid = observation["oid"]
         if oid in self.on_contact:
             return self.level[oid]
@@ -191,20 +191,20 @@ class RiskEstimator:
         return level
 
     def forget(self, oid: int):
-        """Drop per-obstacle verdicts while retaining reusable question results."""
+        """删除逐障碍物判断，同时保留可复用的问题结果。"""
         self.level.pop(oid, None)
         self.source.pop(oid, None)
         self.on_contact.discard(oid)
 
     def level_of(self, oid: int, partners: Sequence[int] = ()) -> Optional[str]:
-        """Return the obstacle's verdict, raised by any coupled partners."""
+        """返回障碍物的判断，并与耦合对象取更高风险。"""
         level = self.level.get(oid)
         for other in partners:
             level = higher(level, self.level.get(other))
         return level
 
     def forbids(self, level: Optional[str]) -> bool:
-        """Is this level one the robot is not allowed to disturb at any price?"""
+        """该等级是否高到机器人无论代价如何都不得搬移？"""
         bar = _normalise(self.cfg.risk_forbidden_level)
         if level is None or bar not in _ORDER:
             return False
@@ -227,14 +227,14 @@ class RiskEstimator:
         return level, "keyword"
 
     def _cache_key(self, o: dict, difficulty: Optional[float]) -> tuple:
-        """Build a cache key from every value that reaches the risk prompt."""
+        """根据进入风险提示词的所有值构造缓存键。"""
         return (label_of(o, difficulty),
                 round(float(o["l"]), 3), round(float(o["d"]), 3),
                 round(float(o.get("h", 1.0)), 3),
                 None if difficulty is None else round(float(difficulty), 3))
 
     def _weighed(self, o: dict, label: str, difficulty: float) -> str:
-        """Raise the keyword verdict when measured force exceeds expectation."""
+        """测得的力超过预期时提高关键词判断的风险等级。"""
         level = keyword_level(label)
         volume = float(o["l"]) * float(o["d"]) * float(o.get("h", 1.0))
         expected = friction_force(material_mu_rho(label), volume)
@@ -294,7 +294,7 @@ class RiskEstimator:
 
     def _parse(self, text: str) -> Optional[str]:
         found = _normalise(text)
-        # longest first, so "medium_high" is not swallowed by "medium"
+        # 按长度降序，避免 medium_high 被 medium 先匹配。
         for name in sorted(LEVELS, key=len, reverse=True):
             if name in found:
                 return name

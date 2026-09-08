@@ -1,4 +1,4 @@
-"""Self-storage facility: one maze, and stock that only looks alike."""
+"""自助仓储迷宫场景，外观相同但内容不同。"""
 
 from __future__ import annotations
 from shapely.geometry import box
@@ -10,14 +10,12 @@ from scenarios._realism import MU_STEEL, MU_WOOD, push_force
 DOOR_OID_BASE = 900
 
 _WALL_T = 0.45
-# Trim the long side so blockers fit between wall stubs.
+# 缩短长边，使阻塞物能放入墙垛之间。
 DOOR_CLEARANCE = 0.2
 
-# Stock kinds: material label, height, packed density [kg/m^3], floor grip.
-# `carton` and `books` are deliberately the same label at the same size. A
-# metre cube of bedding weighs 45 kg and a metre cube of books weighs 420, and
-# nothing the robot can see from the aisle tells the two apart -- only the
-# force it measures once it is already pushing.
+# 货物类型：材料标签、高度、堆积密度 [千克/米^3] 和地面抓地系数。
+# carton 和 books 特意使用相同标签和尺寸。每立方米被褥重 45 千克，
+# 书本重 420 千克；机器人从通道看不出差异，只有推动时测得的力能区分。
 _STORED_KINDS = {
     "carton":     ("storage_carton",  1.10,  45.0, MU_WOOD),
     "books":      ("storage_carton",  1.10, 420.0, MU_WOOD),
@@ -30,13 +28,13 @@ _STORED_KINDS = {
     "safe":       ("steel_safe",      1.45, 731.0, MU_STEEL),
 }
 
-# What contact reveals about a unit that looked like any other.
+# 接触后揭示外观相同货物的真实内容。
 _STORED_REVEALS = {
     "books": "cartons_of_books",
     "drums": "sealed_steel_drums",
 }
 
-# Doorway rows: label, centre, opening dimensions, stock kind.
+# 门洞行：标签、中心、开口尺寸和货物类型。
 _DOORWAYS = (
     ("d1",  5.5 + _WALL_T / 2, 27.75, _WALL_T, 1.5, "carton"),
     ("d2",  20 + _WALL_T / 2,  27.5,  _WALL_T, 2.0, "books"),
@@ -62,7 +60,7 @@ _DOORWAYS = (
     ("d19", 20 + _WALL_T / 2, 3.75, _WALL_T, 1.5, "carton"),
     ("d20", 5.0 + _WALL_T / 2, 2.75, _WALL_T, 1.5, "whitegoods"),
     ("d21", 10.025, 2.75, 0.45, 1.5, "carton"),
-    # The one door not worth clearing: a 700 kg floor safe left in the frame.
+    # 唯一不值得清除的门洞：门框内放着 700 千克的保险柜。
     ("d22", 25 + _WALL_T / 2, 2.75, _WALL_T, 1.5, "safe"),
 
     ("d23", 2.5,  12.0 + _WALL_T / 2, 2.0, _WALL_T, "crate"),
@@ -77,7 +75,7 @@ _DOORWAYS = (
 
 def _door_blocker(label: str, x: float, y: float, l: float, d: float,
                   kind: str) -> MovableObstacle:
-    """Stand one unit of stored goods in a doorway, trimmed to fit the frame."""
+    """在门洞中放置一件货物，并裁剪到适合门框的尺寸。"""
     material, h, density, mu = _STORED_KINDS[kind]
     if l > d:
         l -= DOOR_CLEARANCE
@@ -100,7 +98,7 @@ def _door_blocker(label: str, x: float, y: float, l: float, d: float,
 def _stored(oid: int, x: float, y: float, l: float, d: float, h: float,
             theta: float, material: str, *, density: float,
             mu: float) -> MovableObstacle:
-    """Place stored goods whose mass follows from their bulk and their volume."""
+    """按体密度和体积确定质量，并放置仓储货物。"""
     return MovableObstacle(
         x=x, y=y, l=l, d=d, h=h, theta=theta, material=material,
         difficulty=push_force(density * l * d * h, mu), oid=oid,
@@ -108,7 +106,7 @@ def _stored(oid: int, x: float, y: float, l: float, d: float, h: float,
 
 
 def create():
-    """Create the complex maze scenario."""
+    """创建复杂迷宫场景。"""
     workspace = box(0, 0, 30, 30)
     t = 0.45
 
@@ -179,19 +177,18 @@ def create():
     start = (28, 2)
     goal = (2,27)
 
-    # Stored goods, unit by unit. Footprints are the ones the map was built
-    # around; what fills them is bulk density and floor grip, so a 2 x 2 m
-    # concrete block is 9.6 t and a 2 x 2 m stack of bedding cartons is 200 kg.
+    # 逐件列出仓储货物。地图按占地尺寸构建，质量由体密度和地面抓地系数决定；
+    # 例如 2 x 2 米混凝土块重 9.6 吨，2 x 2 米被褥纸箱堆重 200 千克。
     stored = (
-        # oid,  x,     y,    l,    d,    h,   theta, material, density, mu
+        # oid， x，     y，    l，    d，    h，   theta，材料，密度，mu
         (1,   1.5,  13.5,  2.0,  2.0, 1.00,  0.00, "concrete_block",  2400.0, 0.60),
         (2,  12.8,  11.0,  4.6,  6.6, 1.60,  0.00, "palletised_stock", 250.0, 0.40),
         (3,  17.7,  11.5,  2.0,  3.8, 1.20,  0.00, "palletised_stock", 250.0, 0.40),
         (4,  12.0,   6.65, 1.6,  1.2, 1.00,  0.00, "wooden_crate",     160.0, 0.45),
         (5,  12.0,   3.25, 1.5,  2.0, 1.00,  0.00, "wooden_crate",     160.0, 0.45),
         (6,  13.8,   5.2,  0.8,  1.0, 1.00,  0.00, "storage_carton",    45.0, 0.35),
-        # 7 and 8 are the same cartons at the same size 1.3 m apart. One holds
-        # bedding, the other holds books, and only pushing tells them apart.
+        # 7 和 8 是相距 1.3 米、尺寸相同的纸箱。一个装被褥，一个装书，
+        # 只有推动才能区分。
         (7,  18.9,   4.7,  1.2,  1.3, 1.10,  0.00, "storage_carton",    45.0, 0.35),
         (8,  18.9,   3.4,  1.2,  1.3, 1.10,  0.00, "storage_carton",   420.0, 0.35),
         (10, 27.75,  6.7,  1.4,  1.2, 0.90,  0.00, "white_goods",      150.0, 0.45),
@@ -213,7 +210,7 @@ def create():
         (27,  3.8,   9.5,  4.3,  0.75, 1.00, -1.05, "racking_rails",    87.0, 0.45),
         (28, 23.0,   4.0,  3.8,  0.9, 1.00, -0.70, "racking_rails",     87.0, 0.45),
         (29, 15.0,   2.0,  4.6,  0.75, 1.00, -0.45, "racking_rails",    87.0, 0.45),
-        # The eight cartons in the far corner: two of them hold books.
+        # 远角的八个纸箱中有两个装书。
         (30, 28.1,  23.2,  0.5,  0.5, 0.50,  0.00, "storage_carton",    45.0, 0.35),
         (31, 26.2,  23.2,  0.5,  0.5, 0.50,  0.17, "storage_carton",    45.0, 0.35),
         (32, 27.0,  23.2,  0.5,  0.5, 0.50,  0.35, "storage_carton",    45.0, 0.35),

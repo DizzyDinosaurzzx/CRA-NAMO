@@ -1,4 +1,4 @@
-"""Run branch-and-bound best-first search on the augmented roadmap."""
+"""在增强路线图上运行分支定界最佳优先搜索。"""
 
 from __future__ import annotations
 import heapq
@@ -20,11 +20,11 @@ import manipulation
 class Plan:
     cost: float
     node_path: List[int]
-    actions: List[dict]                  # Ordered move and removal actions.
+    actions: List[dict]                  # 已排序的搬移和清除动作。
     expansions: int
 
 
-_MOVE_DIR_EPS = 1e-3    # Smaller displacements do not define a direction.
+_MOVE_DIR_EPS = 1e-3    # 过小的位移不定义方向。
 
 
 def move_signature(obs) -> tuple:
@@ -32,7 +32,7 @@ def move_signature(obs) -> tuple:
 
 
 class FailedMoves:
-    """Track failed manipulations until the world state changes."""
+    """跟踪失败的搬移，直到世界状态发生变化。"""
 
     def __init__(self):
         self._at: Dict[tuple, int] = {}
@@ -41,7 +41,7 @@ class FailedMoves:
         self._at[key] = version
 
     def drop_stale(self, version: int) -> int:
-        """Forget refusals collected before world version *version*."""
+        """忘记世界版本 version 之前记录的拒绝结果。"""
         stale = [k for k, v in self._at.items() if v < version]
         for k in stale:
             del self._at[k]
@@ -55,7 +55,7 @@ class FailedMoves:
 
 
 class Planner:
-    """Plan robot motion and obstacle-removal actions against current belief."""
+    """根据当前 belief 规划机器人运动和障碍物清除动作。"""
 
     def __init__(self, roadmap: Roadmap, belief: Belief,
                  estimator: DifficultyEstimator, cfg: Config,
@@ -68,7 +68,7 @@ class Planner:
         self.risk = risk_estimator
         self.cfg = cfg
         self.failed_moves = FailedMoves() if failed_moves is None else failed_moves
-        # Wait budgets are keyed by blocker sets rather than individual edges.
+        # 等待预算按阻挡物集合记录，而不是按单条边记录。
         self.wait_budget: Dict[tuple, float] = (
             {} if wait_budget is None else wait_budget)
         self._persistent_removal_cache: Dict[tuple, tuple] = {}
@@ -79,7 +79,7 @@ class Planner:
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
 
-        # Track heading only when the objective prices time.
+        # 只有目标函数计入时间时才跟踪航向。
         track = cfg.time_importance > 0.0
         profile = cfg.free_profile()
 
@@ -89,7 +89,7 @@ class Planner:
             return cost.combine(cfg, 0.0, profile.rotate_time(
                 kinematics.turn_between(heading, course)))
 
-        # New observations invalidate cached removal plans.
+        # 新观测会使缓存的清除计划失效。
         if self.belief.changed:
             self.forget_removals()
 
@@ -163,11 +163,11 @@ class Planner:
                     actions=actions, expansions=expansions)
 
     def forget_removals(self):
-        """Drop every cached manipulation; the world they were costed in is gone."""
+        """删除所有缓存搬移，因为其代价对应的世界已不存在。"""
         self._persistent_removal_cache.clear()
 
     def _edge_cost(self, key: EdgeKey) -> Tuple[float, list]:
-        """Return edge objective cost and any required preparatory actions."""
+        """返回边的目标代价及所需的准备动作。"""
         base = cost.edge_cost(self.cfg, self.roadmap.edge_len[key])
         blockers = self.belief.blockers_of(key)
         if not blockers:
@@ -176,7 +176,7 @@ class Planner:
         wait = self._wait_option(key, blockers)
         removals = []
         extra = 0.0
-        # Sort and plan removals sequentially for deterministic dependencies.
+        # 按序规划清除动作，保证依赖关系确定。
         moved_ahead: Dict[int, tuple] = {}
         for oid in sorted(blockers):
             feasible, work, drop, move_dist, move_path, cplan = self._removal(
@@ -204,7 +204,7 @@ class Planner:
             for (oid, drop, move_dist, work, move_path, cplan) in removals]
 
     def _wait_option(self, key: EdgeKey, blockers) -> Optional[float]:
-        """Return the cost of one allowed wait step, or None."""
+        """返回一次允许等待的代价；不允许时返回 None。"""
         moving = getattr(self.belief, "seen_moving", ())
         if not moving or self.cfg.dynamic_wait_step <= 0.0:
             return None
@@ -216,13 +216,13 @@ class Planner:
         return cost.combine(self.cfg, 0.0, self.cfg.dynamic_wait_step)
 
     def _risk_to_charge(self, oid: int):
-        """Return the risk surcharge level unless it was already paid."""
+        """返回风险附加等级；若已支付则不再计入。"""
         if self.risk is None or oid in self.belief.disturbed:
             return None
         return self.risk.level_of(oid, self.belief.partners_of(oid))
 
     def _off_limits(self, oid: int, obs) -> str:
-        """Return a reason this obstacle is physically or semantically forbidden."""
+        """返回该障碍物因物理或语义原因被禁止搬移的理由。"""
         cfg = self.cfg
         if self.risk is not None:
             level = self.risk.level_of(oid, self.belief.partners_of(oid))
@@ -240,22 +240,22 @@ class Planner:
         return ""
 
     def _removal(self, oid: int, key: EdgeKey, moved_ahead=None):
-        """Compute the work, route and drop pose for one obstacle removal."""
+        """计算清除一个障碍物所需的功、路线和放置姿态。"""
         obs = self.belief.obstacle(oid)
         moved_ahead = moved_ahead or {}
         estimated_diff = self.belief.get_difficulty(oid, self.est)
-        # Failed moves are keyed by pose and edge, independent of cost belief.
+        # 失败搬移按姿态和边记录，与代价 belief 无关。
         fail_key = (move_signature(obs), key)
-        # Reuse only results tied to the current belief, difficulty and risk.
+        # 只复用与当前 belief、难度和风险绑定的结果。
         cache_key = (fail_key, self.belief.version,
                      round(estimated_diff, 6), self._risk_to_charge(oid),
                      tuple(sorted(moved_ahead.items())))
-        # Do not resurrect a move the executor already rejected.
+        # 不恢复执行器已经拒绝的搬移。
         if fail_key in self.failed_moves:
             res = (False, math.inf, None, 0.0, None, None)
             self._persistent_removal_cache[cache_key] = res
             return res
-        # Reject forbidden obstacles before planning a route.
+        # 规划路线前先拒绝禁止搬移的障碍物。
         off_limits = self._off_limits(oid, obs)
         if off_limits:
             self.cfg.log(f"[refuse] oid={oid} {off_limits}")
@@ -264,7 +264,7 @@ class Planner:
             return res
         if cache_key in self._persistent_removal_cache:
             return self._persistent_removal_cache[cache_key]
-        # Plan only the edge being evaluated; clearing adjacent edges is a separate decision.
+        # 只规划当前评估的边；清除相邻边是独立决策。
         clear_polys = [self.roadmap.edge_corridor[key]]
         others = self.belief.others_union(oid, moved_ahead)
 
@@ -277,7 +277,7 @@ class Planner:
         bounds = self.roadmap.workspace.bounds
         bounds_xy = (bounds[0], bounds[2], bounds[1], bounds[3])
 
-        # Use the edge midpoint so cached costs do not depend on traversal direction.
+        # 使用边中点，使缓存代价不依赖遍历方向。
         u, v = key
         mid = tuple((a + b) / 2.0 for a, b in
                     zip(self.roadmap.nodes[u], self.roadmap.nodes[v]))
@@ -286,7 +286,7 @@ class Planner:
         contact_memo: Dict[int, tuple] = {}
 
         def _contact_for(poses):
-            # Memoize validation for the exact pose-list object.
+            # 缓存对同一姿态列表对象的验证结果。
             hit = contact_memo.get(id(poses))
             if hit is not None:
                 return hit[1]
@@ -305,7 +305,7 @@ class Planner:
                 if not plan.feasible:
                     rejected.append(plan.reason)
                 return plan.feasible
-        # Evaluate candidates by full manipulation cost, not push distance alone.
+        # 按完整搬移代价评估候选，而不是只看推动距离。
         best = math.inf
         for path, push_cost, goal in manipulation.move_se2_options(
                 obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
@@ -330,7 +330,7 @@ class Planner:
                 feasible = True
                 move_path, drop, move_dist, cplan = path, goal, push_cost, plan
         if not feasible and rejected:
-            # Summarize why otherwise valid obstacle paths were rejected.
+            # 汇总其他条件有效的障碍物路径被拒绝的原因。
             counts = Counter(rejected).most_common(2)
             self.cfg.log(f"[contact] oid={oid} rejected {len(rejected):,} path(s): "
                          + "; ".join(f"{why} x{n:,}" for why, n in counts))
@@ -345,7 +345,7 @@ class Planner:
         return res
 
     def _goal_filter(self, obs):
-        """Return a filter that prevents immediately reversing a relocation."""
+        """返回一个过滤器，防止立即反向搬移。"""
         last_dir = self.belief.move_dir.get(obs.oid)
 
         def accept(goal):
@@ -359,7 +359,7 @@ class Planner:
         return accept
 
     def _goal_rank(self, obs):
-        """Return a soft penalty for drop poses that block extra roadmap edges."""
+        """返回阻挡额外路线图边的放置姿态软惩罚。"""
         per_edge = self.cfg.manip_blocked_edge_penalty_m
         if per_edge <= 0.0:
             return None

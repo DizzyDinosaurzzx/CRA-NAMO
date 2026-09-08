@@ -1,4 +1,4 @@
-"""Scenario covering cost, risk, hidden state, and online replanning."""
+"""覆盖代价、风险、隐藏状态和在线重规划的场景。"""
 
 from __future__ import annotations
 
@@ -16,16 +16,16 @@ XY = Tuple[float, float]
 _SHELL_T = 0.5
 _WALL_T = 0.6
 
-# Total clearance around a doorway plug.
+    # 门洞阻塞物周围的总净空。
 _DOOR_DAYLIGHT = 0.6
 
-# Door tuples contain (fraction along wall, opening width).
+    # 门元组为（沿墙比例，开口宽度）。
 _WEST_WALL = ((12.0, 0.3), (15.0, 23.7))
 _CABINET_DOOR = (0.12, 2.6)
 _WHEELCHAIR_DOOR = (0.45, 1.8)
 _CART_DOOR = (0.92, 2.6)
 
-# Keep the hidden block's gap narrower than the robot.
+    # 隐藏阻塞物的间隙必须窄于机器人。
 _TRAP_GAP = 0.35
 
 _EAST_WALL = ((25.0, 0.3), (22.0, 23.7))
@@ -44,7 +44,7 @@ def _lerp(a: XY, b: XY, t: float) -> XY:
 
 def _wall_with_doors(a: XY, b: XY, doors: Sequence[Tuple[float, float]],
                      name: str) -> Tuple[List[StaticObstacle], List[dict]]:
-    """Build a wall with gaps defined by fractional position and width."""
+    """根据相对位置和宽度构建带开口的墙。"""
     span = math.hypot(b[0] - a[0], b[1] - a[1])
     theta = math.atan2(b[1] - a[1], b[0] - a[0])
     cuts = sorted((at, 0.5 * width / span) for at, width in doors)
@@ -68,7 +68,7 @@ def _wall_with_doors(a: XY, b: XY, doors: Sequence[Tuple[float, float]],
 def _plug(gap: dict, d: float, h: float, material: str, oid: int,
           difficulty: float | None = None,
           contact_reveals: str = "") -> MovableObstacle:
-    """Create an obstacle aligned with and filling a doorway gap."""
+    """创建与门洞对齐并填满门洞的障碍物。"""
     l = gap["width"] - _DOOR_DAYLIGHT
     if difficulty is None:
         difficulty = round(friction_force(material_mu_rho(material), l * d * h), 3)
@@ -82,7 +82,7 @@ def _plug(gap: dict, d: float, h: float, material: str, oid: int,
 
 def _behind(gap: dict, d: float, h: float, material: str, oid: int,
             overhang: float = 0.3) -> MovableObstacle:
-    """Create a hidden blocker across the far face of a doorway."""
+    """在门洞远侧创建横跨门洞的隐藏阻挡物。"""
     theta = gap["theta"]
     normal = (math.sin(theta), -math.cos(theta))
     offset = _WALL_T / 2.0 + _TRAP_GAP + d / 2.0
@@ -99,7 +99,7 @@ def _behind(gap: dict, d: float, h: float, material: str, oid: int,
 
 def _shelf(ends: Tuple[XY, XY], d: float, h: float, material: str,
            oid: int) -> MovableObstacle:
-    """A body lying along the line between two points, `d` wide across it."""
+    """创建沿两点连线放置、横向宽度为 d 的物体。"""
     (ax, ay), (bx, by) = ends
     l = math.hypot(bx - ax, by - ay)
     return MovableObstacle(
@@ -113,7 +113,7 @@ def _shelf(ends: Tuple[XY, XY], d: float, h: float, material: str,
 
 def _reject_overlaps(walls: Sequence[StaticObstacle],
                      movable: Sequence[MovableObstacle]) -> None:
-    """Reject scenario geometry in which a movable obstacle overlaps a wall."""
+    """拒绝可移动障碍物与墙体重叠的场景几何。"""
     for obs in movable:
         body = obs.polygon
         for wall in walls:
@@ -125,7 +125,7 @@ def _reject_overlaps(walls: Sequence[StaticObstacle],
 
 
 def create():
-    """Create the strategy demonstration scenario."""
+    """创建策略演示场景。"""
     workspace = box(0, 0, 36, 24)
     t = _SHELL_T
 
@@ -146,18 +146,18 @@ def create():
     ]
 
     movable = [
-        # Cheap physically but avoided because of occupant risk.
+    # 物理代价低，但因人员风险而避开。
         _plug(wheelchair_door, d=0.85, h=1.3, material="occupied_wheelchair",
               difficulty=28.0, oid=1),
-        # Cheap cart conceals an expensive blocker.
+    # 廉价小车遮挡着代价高的阻塞物。
         _plug(cart_door, d=0.9, h=1.0, material="empty_cart", oid=2),
         _behind(cart_door, d=0.9, h=1.0, material="concrete_block", oid=3),
         _plug(cabinet_door, d=0.9, h=1.8, material="filing_cabinet", oid=4),
-        # Contact reveals hazardous contents.
+    # 接触后揭示危险内容物。
         _plug(sealed_door, d=0.7, h=1.0, material="sealed_crate",
               contact_reveals="crate_of_gas_cylinders", difficulty=1200.0, oid=5),
         _plug(crate_door, d=0.9, h=1.0, material="wooden_crate", oid=6),
-        # Heavy shelving makes detouring cheaper.
+    # 沉重货架使绕行更便宜。
         _shelf(_SHELF_ENDS, d=1.2, h=2.0, material="steel_shelf", oid=7),
     ]
 

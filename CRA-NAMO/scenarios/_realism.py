@@ -1,4 +1,4 @@
-"""Physical coefficients and geometry checks shared by reference scenarios."""
+"""参考场景共用的物理系数和几何检查。"""
 
 from __future__ import annotations
 
@@ -6,23 +6,23 @@ from typing import Iterable, Sequence
 
 from shapely.geometry import Point
 
-G = 9.81                        # gravitational acceleration [m/s^2]
+G = 9.81                        # 重力加速度 [米/秒^2]
 
-MU_CASTORS = 0.03               # free castors on a hard, clean floor
-MU_CASTORS_FOULED = 0.22        # castors jammed by grit, debris or a brake
-MU_RUBBER_WHEELS = 0.08         # trolley wheels over rubble or a threshold
-MU_BRAKED_WHEELS = 0.60         # castors with the brake set, dragged anyway
-MU_FELT_PADS = 0.25             # furniture pads on hard floor
-MU_WOOD = 0.35                  # bare wood or plastic on hard floor
-MU_UPHOLSTERY = 0.50            # sofa or mattress dragged on its base
-MU_STEEL = 0.45                 # sheet-steel base on concrete or tile
-MU_CONCRETE = 0.60              # concrete or masonry on concrete
+MU_CASTORS = 0.03               # 坚硬清洁地面上的自由脚轮
+MU_CASTORS_FOULED = 0.22        # 被砂砾、碎屑或刹车卡住的脚轮
+MU_RUBBER_WHEELS = 0.08         # 小车轮越过碎石或门槛
+MU_BRAKED_WHEELS = 0.60         # 脚轮刹车锁定后被拖动
+MU_FELT_PADS = 0.25             # 家具脚垫在硬地面上
+MU_WOOD = 0.35                  # 裸木或塑料在硬地面上
+MU_UPHOLSTERY = 0.50            # 沙发或床垫沿底面拖动
+MU_STEEL = 0.45                 # 钢板底座在混凝土或瓷砖上
+MU_CONCRETE = 0.60              # 混凝土或砌体在混凝土上
 
 _OVERLAP_EPS = 1e-7
 
 
 def push_force(mass_kg: float, mu: float) -> float:
-    """Ground-truth sliding resistance mu * m * g [N] of one real object."""
+    """返回真实物体的地面滑动阻力 mu * m * g [牛]。"""
     if mass_kg <= 0.0:
         raise ValueError(f"mass must be positive, got {mass_kg!r} kg")
     if mu <= 0.0:
@@ -31,7 +31,7 @@ def push_force(mass_kg: float, mu: float) -> float:
 
 
 def bulk_density(mass_kg: float, l: float, d: float, h: float) -> float:
-    """Mass over bounding-box volume [kg/m^3] -- what the estimator must guess."""
+    """返回质量除以包围盒体积 [千克/米^3]，即估计器需要推断的量。"""
     volume = l * d * h
     if volume <= 0.0:
         raise ValueError("bounding box must have positive volume")
@@ -39,7 +39,7 @@ def bulk_density(mass_kg: float, l: float, d: float, h: float) -> float:
 
 
 def tip_over_width(cfg) -> float:
-    """Return the minimum obstacle width that avoids tipping."""
+    """返回避免倾倒所需的障碍物最小宽度。"""
     if cfg.robot_push_height <= 0.0 or cfg.push_friction_mu <= 0.0:
         return 0.0
     return 2.0 * cfg.push_friction_mu * cfg.robot_push_height
@@ -48,7 +48,7 @@ def tip_over_width(cfg) -> float:
 def check_layout(name: str, *, workspace, static: Iterable, movable: Iterable,
                  start: Sequence[float], goal: Sequence[float], cfg,
                  require_pushable_width: bool = True) -> None:
-    """Raise if authored coordinates violate map geometry constraints."""
+    """若预设坐标违反地图几何约束则抛出异常。"""
     walls = list(static)
     obstacles = list(movable)
 

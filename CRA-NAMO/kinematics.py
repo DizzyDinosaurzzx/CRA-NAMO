@@ -1,4 +1,4 @@
-"""Compute rest-to-rest translation and rotation times."""
+"""计算起停平移和旋转时间。"""
 
 from __future__ import annotations
 
@@ -10,22 +10,22 @@ XY = Tuple[float, float]
 
 
 def _trapezoid_time(distance: float, v_max: float, a_max: float) -> float:
-    """Return rest-to-rest time for a trapezoidal or triangular profile."""
+    """返回梯形或三角形速度曲线的起停时间。"""
     distance = abs(float(distance))
     if distance <= 0.0:
         return 0.0
     if distance * a_max >= v_max * v_max:
         return distance / v_max + v_max / a_max
-    return 2.0 * math.sqrt(distance / a_max)   # triangular profile
+    return 2.0 * math.sqrt(distance / a_max)   # 三角形速度曲线
 
 
 @dataclass(frozen=True)
 class MotionProfile:
-    """Velocity and acceleration limits for one robot motion state."""
-    v_max: float          # [m/s]
-    a_max: float          # [m/s^2]
-    w_max: float          # [rad/s]
-    alpha_max: float      # [rad/s^2]
+    """一种机器人运动状态的速度和加速度限制。"""
+    v_max: float          # [米/秒]
+    a_max: float          # [米/秒^2]
+    w_max: float          # [弧度/秒]
+    alpha_max: float      # [弧度/秒^2]
 
     def __post_init__(self):
         for name in ("v_max", "a_max", "w_max", "alpha_max"):
@@ -33,22 +33,22 @@ class MotionProfile:
                 raise ValueError(f"{name} must be positive")
 
     def translate_time(self, distance: float) -> float:
-        """Seconds to drive `distance` metres in a straight line, rest to rest."""
+        """直线起停行驶 distance 米所需的秒数。"""
         return _trapezoid_time(distance, self.v_max, self.a_max)
 
     def rotate_time(self, angle: float) -> float:
-        """Seconds to turn `angle` radians in place, rest to rest."""
+        """原地起停旋转 angle 弧度所需的秒数。"""
         return _trapezoid_time(angle, self.w_max, self.alpha_max)
 
 
 def turn_between(heading: float, target: float) -> float:
-    """Return the smallest full-circle heading change."""
+    """返回最小的整圆航向变化量。"""
     return abs((target - heading + math.pi) % (2.0 * math.pi) - math.pi)
 
 
 def segment_legs(profile: MotionProfile, a: XY, b: XY,
                  heading: float) -> Tuple[float, float, float]:
-    """Return turn time, drive time and arrival heading for one segment."""
+    """返回一段路径的转向时间、行驶时间和到达航向。"""
     dx, dy = b[0] - a[0], b[1] - a[1]
     distance = math.hypot(dx, dy)
     if distance <= 1e-12:
@@ -60,14 +60,14 @@ def segment_legs(profile: MotionProfile, a: XY, b: XY,
 
 def segment_time(profile: MotionProfile, a: XY, b: XY,
                  heading: float) -> Tuple[float, float]:
-    """Return travel time and arrival heading for one segment."""
+    """返回一段路径的行驶时间和到达航向。"""
     turn, drive, target = segment_legs(profile, a, b, heading)
     return turn + drive, target
 
 
 def path_time(profile: MotionProfile, points: Sequence[XY],
               heading: float = None) -> float:
-    """Return time to traverse a polyline with turns at its vertices."""
+    """返回带顶点转向的折线通过时间。"""
     if points is None or len(points) < 2:
         return 0.0
     total = 0.0

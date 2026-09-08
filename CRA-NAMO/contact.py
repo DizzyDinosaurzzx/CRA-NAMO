@@ -1,4 +1,4 @@
-"""Plan robot contact trajectories during obstacle manipulation."""
+"""规划障碍物搬移时的机器人接触轨迹。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ _INFLATED_CACHE: Dict[Tuple[bytes, float], object] = {}
 
 
 def inflate_others(others, cfg):
-    """Return cached robot-centre exclusions for stationary obstacles."""
+    """返回静止障碍物的机器人中心禁行区，并使用缓存。"""
     if others is None or others.is_empty:
         return None
     pad = max(cfg.robot_radius - cfg.contact_clearance, 1e-6)
@@ -42,33 +42,33 @@ def inflate_others(others, cfg):
 
 @dataclass
 class ContactPlan:
-    """Store the robot path, alignment and travel for one manipulation."""
+    """保存一次搬移的机器人路径、对齐信息和行驶距离。"""
     feasible: bool
     reason: str = ""
     robot_path: List[XY] = field(default_factory=list)
     move_offset: int = 0
-    travel: float = 0.0            # total robot travel over the whole manipulation [m]
-    exit_index: int = -1           # which of the candidate release points was used
+    travel: float = 0.0            # 整次搬移的机器人总行驶距离 [米]
+    exit_index: int = -1           # 使用的候选释放点
 
     def at(self, i: int) -> XY:
         return self.robot_path[self.move_offset + i]
 
     def leg_length(self, a: int, b: int) -> float:
-        """Length of robot_path[a:b+1] (indices into robot_path, a <= b)."""
+        """返回 robot_path[a:b+1] 的长度（a <= b）。"""
         return sum(math.dist(self.robot_path[t], self.robot_path[t + 1])
                    for t in range(a, b))
 
 
 def idle_plan(robot_pos: XY, n_poses: int) -> ContactPlan:
-    """Return a zero-travel plan for an obstacle that moves without contact."""
+    """为无接触移动的障碍物返回零行驶计划。"""
     return ContactPlan(True, "", [tuple(robot_pos)] * (max(1, n_poses) + 2), 1, 0.0)
 
 
 def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
-    """Return equally spaced contact centres around a rectangle."""
+    """返回矩形周围等间距的接触中心。"""
     hl, hd = l / 2.0, d / 2.0
     quarter = 0.5 * math.pi * r
-    # Segments follow the rectangle boundary counter-clockwise.
+    # 各段沿矩形边界逆时针排列。
     segments = [
         ("line", (hl + r, -hd), (0.0, 1.0), d),
         ("arc", (hl, hd), 0.0, quarter),
@@ -88,7 +88,7 @@ def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray
     seg_i, seg_s = 0, 0.0
     for n in range(k):
         target = n * step
-        # Locate the segment containing this perimeter distance.
+        # 找到包含该周边距离的线段。
         acc = 0.0
         for si, seg in enumerate(segments):
             length = seg[3]
@@ -108,14 +108,14 @@ def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray
 
 
 def lever_arms(stations: np.ndarray, l: float, d: float) -> np.ndarray:
-    """Return the lever arm from the body centre to each contact station."""
+    """返回物体中心到各接触站点的力臂。"""
     cx = np.clip(stations[:, 0], -l / 2.0, l / 2.0)
     cy = np.clip(stations[:, 1], -d / 2.0, d / 2.0)
     return np.hypot(cx, cy)
 
 
 def min_lever_arm(l: float, d: float, cfg) -> float:
-    """Return the minimum lever arm allowed by the configured force ratio."""
+    """返回按施力比例限制得到的最小力臂。"""
     ratio = float(getattr(cfg, "contact_max_force_ratio", 0.0))
     if ratio <= 0.0:
         return 0.0
@@ -123,7 +123,7 @@ def min_lever_arm(l: float, d: float, cfg) -> float:
 
 
 def _unwrapped_angles(poses: Sequence[Pose]) -> np.ndarray:
-    """Unwrap headings so a tracked grip stays on the same rectangle face."""
+    """展开航向角，保持跟踪的抓握点位于同一矩形面。"""
     th = [float(poses[0][2])]
     for a, b in zip(poses, poses[1:]):
         th.append(th[-1] + geometry.wrap_dtheta(a[2], b[2]))
@@ -131,7 +131,7 @@ def _unwrapped_angles(poses: Sequence[Pose]) -> np.ndarray:
 
 
 def _world_positions(stations: np.ndarray, poses: Sequence[Pose]) -> np.ndarray:
-    """(T, K, 2) world positions of every station at every pose."""
+    """返回每个姿态下各站点的世界坐标，形状为 (T, K, 2)。"""
     th = _unwrapped_angles(poses)
     c, s = np.cos(th), np.sin(th)
     sx = stations[:, 0][None, :]
@@ -142,7 +142,7 @@ def _world_positions(stations: np.ndarray, poses: Sequence[Pose]) -> np.ndarray:
 
 
 def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
-    """Check a straight robot segment against static and movable exclusions."""
+    """检查机器人直线段是否避开静态和可移动禁行区。"""
     seg = LineString([a, b])
     if not shapely.contains(free_geom, seg):
         return False
@@ -156,7 +156,7 @@ def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
 
 
 def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
-    """Return the nearest feasible robot position to a roadmap reference point."""
+    """返回路线图参考点附近最近的可行机器人位置。"""
     if not shapely.intersects_xy(blockers, *p):
         return p
     boundary = blockers.boundary
@@ -179,7 +179,7 @@ def plan_contact(obs,
                  free_geom,
                  others_inflated,
                  cfg) -> ContactPlan:
-    """Plan a collision-free robot trajectory for one obstacle manipulation."""
+    """为一次障碍物搬移规划无碰撞机器人轨迹。"""
     if not poses:
         return ContactPlan(False, "empty move path")
     if not exits:
@@ -189,14 +189,14 @@ def plan_contact(obs,
     tol = float(cfg.contact_clearance)
     stations = contact_stations(obs.l, obs.d, r, cfg.contact_station_spacing)
     k = len(stations)
-    # Turning requires a contact station with enough lever arm.
+    # 转向需要力臂足够大的接触站点。
     has_lever = (lever_arms(stations, obs.l, obs.d)
                  >= min_lever_arm(obs.l, obs.d, cfg) - 1e-9)
 
-    # Limit contact-index movement to the configured slide distance.
+    # 将接触索引的移动限制在配置的滑移距离内。
     step_arc = (2.0 * (obs.l + obs.d) + 2.0 * math.pi * r) / k
     max_shift = max(1, int(cfg.contact_max_slide / max(step_arc, 1e-6)))
-    # Padding gives the robot room to walk around the stationary obstacle.
+    # 首尾填充为机器人绕过静止障碍物留出空间。
     pad = int(math.ceil(k / (2.0 * max_shift)))
 
     ext: List[Pose] = ([poses[0]] * pad) + list(poses) + ([poses[-1]] * pad)
@@ -214,7 +214,7 @@ def plan_contact(obs,
     if not feas.any():
         return ContactPlan(False, "no reachable grip point on this obstacle")
 
-    # The body blocks approach and exit paths, but not its contact stations.
+    # 物体本体阻挡接近和离开路径，但不阻挡自身接触站点。
     def _with_body(pose: Pose):
         body = obs.polygon_at(pose[0], pose[1], pose[2]).buffer(max(r - tol, 0.0))
         merged = body if others_inflated is None else others_inflated.union(body)
@@ -224,7 +224,7 @@ def plan_contact(obs,
     approach_blockers = _with_body(poses[0])
     exit_blockers = approach_blockers if len(poses) == 1 else _with_body(poses[-1])
 
-    # Roadmap references may lie inside the body, so line tests use standable points.
+    # 路线图参考点可能位于物体内部，因此直线检查使用可站立点。
     start_ref = _standable(robot_start, approach_blockers, free_geom)
     exit_pts = np.asarray([e[0] for e in exits], dtype=float)
     exit_detour = np.asarray([e[1] for e in exits], dtype=float)
@@ -247,13 +247,13 @@ def plan_contact(obs,
     shifts = range(-max_shift, max_shift + 1)
     for t in range(t_total - 1):
         feas_next = feas[t + 1]
-        # A turning step requires both endpoint grips to supply the needed moment.
+        # 转向步要求两端抓握点都能提供所需力矩。
         turning = turns[t]
         src_cost = np.where(has_lever, cost, _INF) if turning else cost
         best = np.full(k, _INF)
         best_src = np.full(k, -1, dtype=np.int64)
         for shift in shifts:
-            # Every station crossed during a slide must be free at the next pose.
+            # 滑移经过的每个站点在下一姿态都必须空闲。
             slide_ok = np.ones(k, dtype=bool)
             span = range(0, shift + 1) if shift >= 0 else range(shift, 1)
             for e in span:
@@ -263,7 +263,7 @@ def plan_contact(obs,
             step = np.linalg.norm(np.roll(world[t + 1], -shift, axis=0) - world[t],
                                   axis=1)
             cand = np.where(slide_ok, src_cost + step, _INF)
-            cand = np.roll(cand, shift)          # scatter source s onto target s+shift
+            cand = np.roll(cand, shift)          # 将源站点 s 分散到目标 s+shift
             upd = cand < best
             best[upd] = cand[upd]
             best_src[upd] = (idx[upd] - shift) % k
@@ -272,7 +272,7 @@ def plan_contact(obs,
             return ContactPlan(
                 False, "robot cannot stay in contact for the whole manipulation")
 
-    # Evaluate release points by total travel plus the caller's detour estimate.
+    # 按总行驶距离加调用方绕行估计评估释放点。
     exit_dist = np.linalg.norm(world[-1][:, None, :] - exit_pts[None, :, :], axis=2)
     total = cost[:, None] + exit_dist + exit_detour[None, :]
     chosen, chosen_exit = -1, -1

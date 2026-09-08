@@ -1,4 +1,4 @@
-"""Static ten-gate corridor for measuring route impact of estimator gaps."""
+"""用于测量估计误差对路线影响的静态十门走廊。"""
 
 from __future__ import annotations
 
@@ -8,50 +8,50 @@ import risk as risk_model
 from config import Config
 from obstacle import MovableObstacle, StaticObstacle
 
-# Geometry constants.
-WALL_T = 0.4                 # wall and shell thickness [m]
-CORRIDOR_H = 18.0            # workspace height [m]
-GATE_SPACING = 5.0           # wall-to-wall pitch [m]
-FIRST_GATE_X = 5.0           # x of the first wall [m]
+# 几何常量。
+WALL_T = 0.4                 # 墙和外壳厚度 [米]
+CORRIDOR_H = 18.0            # 工作空间高度 [米]
+GATE_SPACING = 5.0           # 墙间距 [米]
+FIRST_GATE_X = 5.0           # 第一面墙的 x 坐标 [米]
 N_GATES = 10
 
-DOOR_H = 1.8                 # opening size along y [m]
-DOOR_A_Y = 7.6               # door A occupies [7.6, 9.4]
-DOOR_B_Y = 9.7               # door B occupies [9.7, 11.5]
-TRAVEL_Y = 9.55              # the corridor axis, midway between A and B
-BLOCKER_CLEARANCE = 0.2      # blocker is this much smaller than its doorway
+DOOR_H = 1.8                 # 沿 y 方向的开口尺寸 [米]
+DOOR_A_Y = 7.6               # 门 A 占据 [7.6, 9.4]
+DOOR_B_Y = 9.7               # 门 B 占据 [9.7, 11.5]
+TRAVEL_Y = 9.55              # 走廊轴线，位于 A、B 中间
+BLOCKER_CLEARANCE = 0.2      # 阻塞物比门洞窄的尺寸
 
-WORKSPACE_W = FIRST_GATE_X * 2 + GATE_SPACING * (N_GATES - 1)   # 55.0 m
+WORKSPACE_W = FIRST_GATE_X * 2 + GATE_SPACING * (N_GATES - 1)   # 55.0 米
 
-A_OID_BASE = 100             # door A of gate i is oid 100 + 2i, door B is +1
+A_OID_BASE = 100             # 第 i 个门的 A 门 ID 为 100 + 2i，B 门 ID 加 1
 
-# Gate rows: bypass position, materials, and true difficulties.
+# 门组数据：绕行位置、材料和真实难度。
 GATES = (
-    (4.0,  "wooden_crate",    1600.0, "wooden_crate",    2600.0),  # near break-even
-    (13.6, "wooden_crate",     400.0, "wooden_crate",    3000.0),  # cheap control
-    (3.0,  "wooden_crate",    2200.0, "wooden_crate",    1800.0),  # near break-even
-    (14.6, "wooden_crate",    3400.0, "wooden_crate",    2900.0),  # near break-even
-    (4.4,  "glassware_crate",  800.0, "wooden_crate",    2400.0),  # risk-sensitive
-    (15.6, "wooden_crate",    1200.0, "glassware_crate",  900.0),  # risk-sensitive
-    (2.2,  "wooden_crate",    2600.0, "wooden_crate",    2000.0),  # near break-even
-    (13.0, "wooden_crate",    5000.0, "wooden_crate",    4500.0),  # expensive control
-    (1.2,  "glassware_crate", 1000.0, "wooden_crate",    2600.0),  # risk-sensitive
-    (15.8, "wooden_crate",    2000.0, "glassware_crate", 1500.0),  # risk-sensitive
+    (4.0,  "wooden_crate",    1600.0, "wooden_crate",    2600.0),  # 接近平衡
+    (13.6, "wooden_crate",     400.0, "wooden_crate",    3000.0),  # 低价对照
+    (3.0,  "wooden_crate",    2200.0, "wooden_crate",    1800.0),  # 接近平衡
+    (14.6, "wooden_crate",    3400.0, "wooden_crate",    2900.0),  # 接近平衡
+    (4.4,  "glassware_crate",  800.0, "wooden_crate",    2400.0),  # 风险敏感
+    (15.6, "wooden_crate",    1200.0, "glassware_crate",  900.0),  # 风险敏感
+    (2.2,  "wooden_crate",    2600.0, "wooden_crate",    2000.0),  # 接近平衡
+    (13.0, "wooden_crate",    5000.0, "wooden_crate",    4500.0),  # 高价对照
+    (1.2,  "glassware_crate", 1000.0, "wooden_crate",    2600.0),  # 风险敏感
+    (15.8, "wooden_crate",    2000.0, "glassware_crate", 1500.0),  # 风险敏感
 )
 
-# Per-gate bypass distance in metres.
+# 每个门组的绕行距离，单位为米。
 DETOUR_M = tuple(round(2.0 * abs(y0 + DOOR_H / 2.0 - TRAVEL_Y), 2)
                  for y0, *_ in GATES)
 
 
 def gate_x(i: int) -> float:
-    """x of the near face of gate i's wall."""
+    """返回第 i 个门墙近侧面的 x 坐标。"""
     return FIRST_GATE_X + GATE_SPACING * i
 
 
 def _blocker(oid: int, x: float, door_y: float, material: str,
              difficulty: float) -> MovableObstacle:
-    """Create a doorway plug that leaves less than robot-width clearance."""
+    """创建使剩余净空小于机器人宽度的门洞阻塞物。"""
     return MovableObstacle(
         x=x + WALL_T / 2.0,
         y=door_y + DOOR_H / 2.0,
@@ -66,7 +66,7 @@ def _blocker(oid: int, x: float, door_y: float, material: str,
 
 
 def gate_table() -> list:
-    """Return ground-truth gate records for the gap study."""
+    """返回估计误差研究所需的门洞真实记录。"""
     rows = []
     for i, (bypass_y0, mat_a, diff_a, mat_b, diff_b) in enumerate(GATES):
         for side, material, difficulty in (("A", mat_a, diff_a),
@@ -85,7 +85,7 @@ def gate_table() -> list:
 
 
 def _wall_segments(bypass_y0: float):
-    """The wall left over once the three openings are cut out of it."""
+    """从墙上切出三个开口后剩余的墙段。"""
     openings = sorted([(DOOR_A_Y, DOOR_A_Y + DOOR_H),
                        (DOOR_B_Y, DOOR_B_Y + DOOR_H),
                        (bypass_y0, bypass_y0 + DOOR_H)])
@@ -97,7 +97,7 @@ def _wall_segments(bypass_y0: float):
 
 
 def create():
-    """Build the ten-gate corridor."""
+    """构建十门走廊。"""
     workspace = box(0.0, 0.0, WORKSPACE_W, CORRIDOR_H)
 
     walls = [
@@ -126,6 +126,6 @@ def create():
         "start": (2.2, TRAVEL_Y),
         "goal": (WORKSPACE_W - 2.2, TRAVEL_Y),
         "cfg": Config(),
-        # Ground truth used by the estimator-gap study.
+        # 估计误差研究使用的真实数据。
         "gates": gate_table(),
     }

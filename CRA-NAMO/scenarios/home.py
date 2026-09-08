@@ -1,4 +1,4 @@
-"""House scenario with heterogeneous furniture blocking interior doorways."""
+"""不同家具堵塞室内门洞的住宅场景。"""
 
 from __future__ import annotations
 from shapely.geometry import box
@@ -12,13 +12,12 @@ from scenarios._realism import (
 DOOR_OID_BASE = 900
 
 _WALL_T = 0.45
-# Trim the long side so blockers fit between wall stubs.
+# 缩短长边，使阻塞物能放入墙垛之间。
 DOOR_CLEARANCE = 0.2
 
-# Doorway furniture: material, height, packed density [kg/m^3], floor grip.
-# Density rather than mass, so the same piece is heavier in a 2.0 m opening
-# than in a 1.5 m one. Depth is the doorway's, so these are the slim cases:
-# a flat-pack wardrobe carcass, a table on its side, a 0.45 m bookcase.
+# 门洞家具：材料、高度、堆积密度 [千克/米^3] 和地面抓地系数。
+# 使用密度而不是质量，因此同一家具在 2.0 米门洞中比 1.5 米门洞中更重。
+# 深度取门洞深度，表示扁平衣柜框架、侧放桌子和 0.45 米书柜等情况。
 _DOOR_KINDS = {
     "drawers":   ("chest_of_drawers",     0.82,   121.0, MU_FELT_PADS),
     "wardrobe":  ("flat_packed_wardrobe", 2.02,    56.0, MU_WOOD),
@@ -32,7 +31,7 @@ _DOOR_KINDS = {
     "safe":      ("steel_safe",           1.45,   731.0, MU_STEEL),
 }
 
-# Doorway rows contain label, centre, opening dimensions, and furniture kind.
+# 门洞行包含标签、中心、开口尺寸和家具类型。
 _DOORWAYS = (
     ("d1",  5.5 + _WALL_T / 2, 27.75, _WALL_T, 1.5, "mattress"),
     ("d2",  20 + _WALL_T / 2,  27.5,  _WALL_T, 2.0, "wardrobe"),
@@ -58,7 +57,7 @@ _DOORWAYS = (
     ("d19", 20 + _WALL_T / 2, 3.75, _WALL_T, 1.5, "drawers"),
     ("d20", 5.0 + _WALL_T / 2, 2.75, _WALL_T, 1.5, "mattress"),
     ("d21", 10.025, 2.75, 0.45, 1.5, "cartons"),
-    # The floor safe is intentionally impractical to move.
+    # 地面保险柜特意设置为不适合搬移。
     ("d22", 25 + _WALL_T / 2, 2.75, _WALL_T, 1.5, "safe"),
 
     ("d23", 2.5,  12.0 + _WALL_T / 2, 2.0, _WALL_T, "bookcase"),
@@ -73,7 +72,7 @@ _DOORWAYS = (
 
 def _door_blocker(label: str, x: float, y: float, l: float, d: float,
                   kind: str) -> MovableObstacle:
-    """Stand one piece of furniture in a doorway, trimmed to fit the frame."""
+    """在门洞中放置一件家具，并裁剪到适合门框的尺寸。"""
     material, h, density, mu = _DOOR_KINDS[kind]
     if l > d:
         l -= DOOR_CLEARANCE
@@ -96,7 +95,7 @@ def _door_blocker(label: str, x: float, y: float, l: float, d: float,
 def _furniture(oid: str, x: float, y: float, l: float, d: float, h: float,
                theta: float, material: str, *, mass: float,
                mu: float) -> MovableObstacle:
-    """Place one piece of furniture from its real size, mass and floor grip."""
+    """按真实尺寸、质量和地面抓地系数放置一件家具。"""
     return MovableObstacle(
         x=x, y=y, l=l, d=d, h=h, theta=theta, material=material,
         difficulty=push_force(mass, mu), oid=oid,
@@ -104,7 +103,7 @@ def _furniture(oid: str, x: float, y: float, l: float, d: float, h: float,
 
 
 def create():
-    """Create the complex maze scenario."""
+    """创建复杂住宅场景。"""
     workspace = box(0, 0, 30, 30)
     t = 0.45
 
@@ -175,24 +174,24 @@ def create():
     start = (28, 2)
     goal = (2,27)
 
-    # Furniture is grouped by room; mass and friction determine difficulty.
+    # 家具按房间分组；质量和摩擦决定难度。
     manual_obstacles = [
-        # Home office: loaded steel shelving.
+        # 家庭办公室：载物钢货架。
         _furniture("homeOffice1", 1.5, 13.5, 2.0, 1.9, 2.0, 0.0,
                    "steel_shelf", mass=640.0, mu=MU_STEEL),
         _furniture("homeOffice2", 3.8, 13.5, 1.8, 0.9, 0.75, 0.0,
                    "desk", mass=65.0, mu=MU_WOOD),
-        # Angled loaded shelving unit.
+        # 倾斜的载物货架。
         _furniture("homeOffice3", 7.5, 14.6, 2.0, 0.42, 1.95, -0.91,
                    "loaded_bookcase", mass=130.0, mu=MU_WOOD),
 
-        # Living room: sectional sofa.
+        # 客厅：组合沙发。
         _furniture("livingRoom1", 12.8, 11.0, 3.3, 2.6, 0.85, 0.0,
                    "sofa", mass=155.0, mu=MU_UPHOLSTERY),
         _furniture("livingRoom2", 17.7, 11.5, 2.4, 0.55, 2.0, 0.0,
                    "media_wall_unit", mass=120.0, mu=MU_WOOD),
 
-        # Kitchen: island on locked castors.
+        # 厨房：脚轮锁定的中岛。
         _furniture("kitchen1", 12.0, 6.65, 1.6, 0.9, 0.92, 0.0,
                    "kitchen_island", mass=110.0, mu=MU_FELT_PADS),
         _furniture("kitchen2", 12.0, 3.25, 0.92, 0.75, 1.78, 0.0,
@@ -203,45 +202,45 @@ def create():
                    "range_cooker", mass=85.0, mu=MU_STEEL),
         _furniture("kitchen5", 18.9, 3.4, 1.1, 0.65, 0.85, 0.0,
                    "chest_freezer", mass=95.0, mu=MU_WOOD),
-        # Unbolted worktop run.
+        # 未固定的台面段。
         _furniture("kitchen6", 15.0, 2.0, 2.6, 0.65, 0.9, -0.45,
                    "counter_run", mass=90.0, mu=MU_WOOD),
 
-        # Dining room.
+        # 餐厅。
         _furniture("diningRoom1", 6.6, 7.4, 2.4, 1.1, 0.76, 0.53,
                    "dining_table", mass=75.0, mu=MU_FELT_PADS),
         _furniture("diningRoom2", 3.8, 9.5, 1.8, 0.5, 0.9, -1.05,
                    "sideboard", mass=70.0, mu=MU_FELT_PADS),
 
-        # Utility rooms.
+        # 功能房。
         _furniture("powderRoom1", 2.6, 3.1, 1.0, 0.55, 0.85, 0.0,
                    "vanity_unit", mass=48.0, mu=MU_FELT_PADS),
-        # Plumbed washer and dryer.
+        # 接入管线的洗衣机和烘干机。
         _furniture("laundryRoom1", 6.9, 1.5, 1.24, 0.65, 0.9, 0.0,
                    "washing_machine", mass=145.0, mu=MU_STEEL),
 
-        # Entry and storage.
+        # 入口和储物区。
         _furniture("entryway1", 27.75, 6.7, 1.2, 0.8, 1.1, 0.0,
                    "cardboard_box", mass=42.0, mu=MU_WOOD),
         _furniture("storageRoom1", 23.0, 4.0, 1.8, 0.5, 1.95, -0.7,
                    "steel_shelf", mass=180.0, mu=MU_STEEL),
-        # Rolled hall carpet.
+        # 卷起的走廊地毯。
         _furniture("hallway1", 22.5, 12.3, 3.2, 0.45, 0.45, 1.07,
                    "rolled_carpet", mass=45.0, mu=MU_UPHOLSTERY),
 
-        # Family room and bathrooms.
+        # 家庭活动室和卫生间。
         _furniture("familyRoom1", 14.0, 18.7, 2.2, 0.95, 0.85, 0.0,
                    "sofa", mass=85.0, mu=MU_UPHOLSTERY),
-        # Empty cast-iron bathtub.
+        # 空的铸铁浴缸。
         _furniture("bathroom1", 28.0, 16.75, 1.75, 0.8, 0.6, 0.0,
                    "cast_iron_bathtub", mass=130.0, mu=MU_STEEL),
         _furniture("ensuiteBathroom1", 17.2, 22.8, 1.2, 0.6, 0.85, -0.82,
                    "vanity_unit", mass=58.0, mu=MU_FELT_PADS),
 
-        # Bedrooms.
+        # 卧室。
         _furniture("masterBedroom1", 10.25, 24.3, 2.15, 2.0, 0.6, 0.0,
                    "king_bed", mass=145.0, mu=MU_WOOD),
-        # Empty bookcase tipped onto its back.
+        # 翻倒后平放的空书柜。
         _furniture("masterBedroom2", 6.4, 23.7, 2.4, 1.0, 0.6, -0.65,
                    "flat_packed_wardrobe", mass=95.0, mu=MU_WOOD),
         _furniture("guestBedroom1", 13.05, 27.7, 1.2, 0.55, 1.1, 0.0,
@@ -254,7 +253,7 @@ def create():
                    "flat_packed_wardrobe", mass=88.0, mu=MU_WOOD),
     ]
 
-    # Children's room contains a dense cluster of light cartons.
+    # 儿童房中有一组密集的轻质纸箱。
     toy_cartons = (
         (28.1, 23.2, 0.00), (26.2, 23.2, 0.17), (27.0, 23.2, 0.35),
         (26.5, 22.0, 0.52), (27.3, 22.2, 0.70), (27.9, 22.0, 0.87),

@@ -14,32 +14,30 @@ from scenarios import _realism
 from scenarios._realism import MU_BRAKED_WHEELS, MU_CASTORS, push_force
 
 
-# Compact hospital footprint.
+# 紧凑医院平面。
 _WIDTH = 42.0
 _HEIGHT = 28.0
 _WALL_T = 0.35
 
-# Clearance dimensions for temporary equipment.
+# 临时设备所需净空尺寸。
 _DOOR_W = 2.4
-_MAIN_CORRIDOR = (10.5, 17.5)   # 7 m wide
-_SOUTH_BYPASS = (0.35, 5.0)     # 4.65 m wide
-_NORTH_BYPASS = (23.0, 27.65)   # 4.65 m wide
+_MAIN_CORRIDOR = (10.5, 17.5)   # 宽 7 米
+_SOUTH_BYPASS = (0.35, 5.0)     # 宽 4.65 米
+_NORTH_BYPASS = (23.0, 27.65)   # 宽 4.65 米
 
-# A ward bed is 2.20 m long over the headboard and 1.00 m across the rails,
-# and weighs 160 kg with its mattress. Parked with the brakes off it rolls, so
-# what resists the robot is castor rolling resistance, not friction.
+# 病床含床头长 2.20 米、护栏宽 1.00 米，含床垫重 160 千克。刹车松开时可滚动，
+# 因此机器人克服的是脚轮滚动阻力，而不是滑动摩擦。
 _BED_LENGTH = 2.20
 _BED_WIDTH = 1.00
 _BED_HEIGHT = 1.05
 _BED_MASS = 160.0
 _BED_DIFFICULTY = push_force(_BED_MASS, MU_CASTORS)
 
-# Two double-opening walls create explicit routing decisions.
+# 两面双开口墙形成明确的路线决策。
 _CENTRAL_GATE_X = 20.8
 _ICU_GATE_X = 33.2
-# The two service doors are 1.5 m single-leaf openings; the ICU's upper one is
-# a 2.4 m ward entrance, because that is the only opening a 2.20 m bed can be
-# parked across without either end going into a wall.
+# 两个服务门是 1.5 米单扇开口；ICU 上方开口为 2.4 米病区入口，只有它能让
+# 2.20 米病床横放而不使两端撞墙。
 _CENTRAL_GATE_GAPS = ((11.4, 13.4), (14.9, 16.9))
 _ICU_GATE_GAPS = ((11.4, 13.4), (14.5, 16.9))
 
@@ -52,23 +50,17 @@ _CLEANING_CART_ID = "cleaningCartC"
 _EMERGENCY_END_X = 19.5
 _INPATIENT_START_X = 22.5
 
-_START = (2.0, 25.5)            # upper-left red circle
-_GOAL = (40.0, 2.5)             # lower-right red circle
+_START = (2.0, 25.5)            # 左上红色圆点
+_GOAL = (40.0, 2.5)             # 右下红色圆点
 
 
-# A blocker parked hard against a doorway, not wedged inside it. The SE(2)
-# planner snaps a goal pose to its own grid, so an object sized to plug an
-# opening exactly loses half its clearance to rounding and the mover gives up
-# before it arrives -- which is what used to happen to the X-ray and the
-# cleaning cart. Parking it in the open corridor a hand's width off the wall
-# leaves the route in easy, and still shuts the door: the leftover slot is
-# under 0.12 m, and the robot needs 0.20 m.
-# Every opening that should be shut is shut from t=0, and the events only ever
-# clear one. That is not a stylistic choice: `se2_planner.plan_path` waives
-# collision on the start pose (_START_COLLISION_EPS, then _unstick_start) but
-# tests the goal cell strictly against `free`, so a blocker can be driven out
-# of an opening it fills and can never be driven into one. Closing events on
-# these doors silently failed for exactly that reason.
+# 阻塞物停在门洞旁而不是嵌入门洞。SE(2) 规划器会将目标姿态吸附到网格，
+# 正好堵住开口的物体会因舍入损失一半净空，移动器可能在到达前放弃；X 光机和
+# 清洁车曾因此失败。将其停在距墙略有间隙的走廊中，既保留路线也能关门：
+# 剩余空隙小于 0.12 米，而机器人需要 0.20 米。
+# 需要关闭的开口从 t=0 起全部关闭，事件只负责清除其中一个。这是规划约束：
+# plan_path 对起点允许有限碰撞豁免，但严格检查目标格，因此阻塞物可被移出开口，
+# 却不能再被移入开口。之前的关门事件正是因此无声失败。
 
 
 def _wall(p: tuple[float, float], q: tuple[float, float],
@@ -78,7 +70,7 @@ def _wall(p: tuple[float, float], q: tuple[float, float],
 
 def _cut_wall(axis: str, fixed: float, start: float, end: float,
               gaps: Sequence[tuple[float, float]], name: str):
-    """Build one wall while leaving the requested door openings."""
+    """构建墙体，同时保留指定门洞。"""
     pieces = []
     cursor = start
     for index, (gap_start, gap_end) in enumerate(sorted(gaps)):
@@ -124,7 +116,7 @@ def _outer_shell():
 
 def _department_rooms(x0: float, x1: float, partitions: Sequence[float],
                       door_centers: Sequence[float], prefix: str):
-    """Create upper/lower rooms with access to both route alternatives."""
+    """创建可通往两条替代路线的上下房间。"""
     main_south, main_north = _MAIN_CORRIDOR
     south_bypass_top = _SOUTH_BYPASS[1]
     north_bypass_bottom = _NORTH_BYPASS[0]
@@ -132,7 +124,7 @@ def _department_rooms(x0: float, x1: float, partitions: Sequence[float],
 
     walls = []
 
-    # Upper rooms connect the corridor to the northern bypass.
+    # 上方房间连接主走廊和北侧绕行通道。
     walls.extend(_hwall(main_north, x0, x1, doors,
                         f"{prefix}_upper_main_doors"))
     walls.extend(_hwall(north_bypass_bottom, x0, x1, doors,
@@ -140,7 +132,7 @@ def _department_rooms(x0: float, x1: float, partitions: Sequence[float],
     walls.extend(_partitions(partitions, main_north, north_bypass_bottom,
                              f"{prefix}_upper_partition"))
 
-    # Lower rooms connect the corridor to the southern bypass.
+    # 下方房间连接主走廊和南侧绕行通道。
     walls.extend(_hwall(main_south, x0, x1, doors,
                         f"{prefix}_lower_main_doors"))
     walls.extend(_hwall(south_bypass_top, x0, x1, doors,
@@ -148,7 +140,7 @@ def _department_rooms(x0: float, x1: float, partitions: Sequence[float],
     walls.extend(_partitions(partitions, south_bypass_top, main_south,
                              f"{prefix}_lower_partition"))
 
-    # Keep the inter-department opening free for temporary objects.
+    # 保留部门之间的开口供临时物体使用。
     walls.extend([
         _wall((x0, main_north), (x0, north_bypass_bottom),
               f"{prefix}_upper_west"),
@@ -163,7 +155,7 @@ def _department_rooms(x0: float, x1: float, partitions: Sequence[float],
 
 
 def _emergency_department():
-    """Triage, resuscitation, treatment, and observation rooms."""
+    """分诊、复苏、治疗和观察房间。"""
     return _department_rooms(
         x0=0.35,
         x1=_EMERGENCY_END_X,
@@ -174,7 +166,7 @@ def _emergency_department():
 
 
 def _inpatient_ward():
-    """Six inpatient rooms around the same three-route circulation system."""
+    """围绕同一三路线循环系统布置六个住院病房。"""
     return _department_rooms(
         x0=_INPATIENT_START_X,
         x1=_WIDTH - 0.35,
@@ -185,7 +177,7 @@ def _inpatient_ward():
 
 
 def _decision_walls():
-    """Add two double-opening gates without changing the three route levels."""
+    """增加两个双开口门组，不改变三层路线。"""
     main_south, main_north = _MAIN_CORRIDOR
     return [
         *_cut_wall(
@@ -200,7 +192,7 @@ def _decision_walls():
 
 
 def _department_beds(edges: Sequence[float], oid_start: int):
-    """Place two beds in every upper and lower room, matching the blue marks."""
+    """按蓝色标记在每个上下房间放置两张病床。"""
     beds = []
     row_heights = (
         ("upper", 19.1, 21.4),
@@ -242,10 +234,9 @@ def _hospital_beds():
 
 
 def _temporary_obstacles():
-    """Objects whose locations make waiting, detouring, and work comparable."""
+    """位置使等待、绕行和搬移可比较的物体。"""
     return [
-        # E1: a made-up ward bed, brakes off, left across the nearest exit from
-        # the first upper treatment room.
+        # E1：虚构的病床，刹车松开，横在第一个上方治疗室最近出口。
         MovableObstacle(
             x=3.3,
             y=_MAIN_CORRIDOR[1],
@@ -257,11 +248,9 @@ def _temporary_obstacles():
             difficulty=_BED_DIFFICULTY,
             oid=_TRIAGE_BED_ID,
         ),
-        # E2: a 450 kg mobile radiography unit left in the central lower door.
-        # It is called mobile and it has
-        # castors, but it is parked with the brakes set: the robot cannot
-        # release them, so it drags 2.6 kN of rubber across vinyl or it goes
-        # the long way. Contact is what tells it which.
+        # E2：450 千克移动 X 光机停在中央下门洞。它有脚轮但刹车锁定，机器人
+        # 无法释放，只能在乙烯基地面上拖动 2.6 千牛橡胶，或选择长路；接触后
+        # 才能确定真实情况。
         MovableObstacle(
             x=_CENTRAL_GATE_X,
             y=12.40,
@@ -274,9 +263,8 @@ def _temporary_obstacles():
             contact_reveals="parked_xray_unit_with_brakes_set",
             oid=_XRAY_ID,
         ),
-        # A loaded linen trolley on free castors holds the central upper door:
-        # 28 N, cheaper to shift than a metre of driving. The alternative is to
-        # wait for the linen round to take it away.
+        # 载物布草车用自由脚轮堵住中央上门洞：阻力 28 牛，比行驶一米便宜；
+        # 另一选择是等待布草车自行离开。
         MovableObstacle(
             x=_CENTRAL_GATE_X,
             y=15.90,
@@ -288,9 +276,8 @@ def _temporary_obstacles():
             difficulty=push_force(95.0, MU_CASTORS),
             oid=_LINEN_CART_ID,
         ),
-        # The ICU ward entrance is held by a bed with a patient in it, brakes
-        # set: 1.4 kN and a high-risk label. Physically movable, and the whole
-        # point is that it should not be moved.
+        # ICU 病区入口被载人的病床堵住，刹车锁定：阻力 1.4 千牛且风险高。
+        # 它物理上可移动，但设计意图是不要搬动。
         MovableObstacle(
             x=_ICU_GATE_X,
             y=15.70,
@@ -303,9 +290,8 @@ def _temporary_obstacles():
             contact_reveals="patient_in_bed",
             oid=_OCCUPIED_BED_ID,
         ),
-        # E4/E5: a cleaning trolley holds the ICU service door until its round
-        # takes it away, leaving the ward entrance and its patient as the only
-        # other way through that wall.
+        # E4/E5：清洁车在清洁班次前堵住 ICU 服务门；离开后，病区入口及其病床
+        # 成为穿过该墙的唯一其他路线。
         MovableObstacle(
             x=_ICU_GATE_X,
             y=12.40,
@@ -323,7 +309,7 @@ def _temporary_obstacles():
 def _option_costs(cfg: Config, obstacle: MovableObstacle, *,
                   move_distance: float, contact_distance: float,
                   detour_distance: float, wait_seconds: float) -> dict:
-    """Estimate local move, detour, and wait costs for scenario reporting."""
+    """估计局部搬移、绕行和等待代价，用于场景报告。"""
     move_work = cost.manipulation_work(obstacle.difficulty, move_distance)
     move_motion = cost.motion_cost(
         cfg, contact_distance + move_distance)
@@ -356,7 +342,7 @@ def _option_costs(cfg: Config, obstacle: MovableObstacle, *,
 
 
 def create():
-    """Build the compact hospital map and its deterministic moving events."""
+    """构建紧凑医院地图及其确定性移动事件。"""
     workspace = box(0.0, 0.0, _WIDTH, _HEIGHT)
     walls = [
         *_outer_shell(),

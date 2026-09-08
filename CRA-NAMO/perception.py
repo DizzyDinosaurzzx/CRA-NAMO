@@ -1,4 +1,4 @@
-"""Maintain the robot's partially observed world model."""
+"""维护机器人的部分可观测世界模型。"""
 
 from __future__ import annotations
 import math
@@ -11,7 +11,7 @@ from config import Config
 
 
 class Belief:
-    """Store only information the robot has perceived or discovered by contact."""
+    """只保存机器人通过感知或接触获得的信息。"""
 
     def __init__(self, roadmap: Roadmap, cfg: Config, risk_estimator=None,
                  estimator=None):
@@ -29,7 +29,7 @@ class Belief:
         self.disturbed: Set[int] = set()
         self.seen_moving: Set[int] = set()
         self.move_dir: Dict[int, Tuple[float, float]] = {}
-        # Planner caches include this version to prevent stale route reuse.
+        # 规划器缓存包含此版本号，防止复用过期路线。
         self.version = 0
 
     def _bump(self):
@@ -37,7 +37,7 @@ class Belief:
 
     def perceive(self, world_obstacles: List[MovableObstacle],
                  robot_pos: Tuple[float, float]) -> List[int]:
-        """Reveal visible obstacles and synchronize known ones."""
+        """揭示可见障碍物，并同步已知障碍物。"""
         self.newly_revealed = []
         self.updated = []
         new_observations = []
@@ -67,36 +67,36 @@ class Belief:
         return self.newly_revealed
 
     def is_stale(self, world_obs: MovableObstacle) -> bool:
-        """Return whether a perceived body no longer matches reality."""
+        """返回感知到的物体是否已与真实状态不符。"""
         known = self.perceived.get(world_obs.oid)
         return known is not None and not self._matches(known, world_obs)
 
     @property
     def changed(self) -> bool:
-        """Has anything the planner cached its work against moved or changed?"""
+        """规划器依赖的对象是否发生了移动或变化？"""
         return bool(self.newly_revealed or self.updated)
 
     def _assess_risk(self, obs: MovableObstacle):
-        """Assess risk from the visually observed label."""
+        """根据视觉观察到的标签评估风险。"""
         if self.risk is not None:
             self.risk.assess(obs.observation())
 
     def _reassess_risk(self, world_obs: MovableObstacle):
-        """Reassess risk using properties revealed by physical contact."""
+        """根据接触揭示的属性重新评估风险。"""
         if self.risk is not None:
             self.risk.reassess(world_obs.contact_observation(),
                                world_obs.difficulty)
 
     @staticmethod
     def _matches(a: MovableObstacle, b: MovableObstacle) -> bool:
-        """Is the remembered obstacle still what a look at the real one shows?"""
+        """记忆中的障碍物是否仍与当前视觉观察一致？"""
         return (abs(a.x - b.x) < 1e-9 and abs(a.y - b.y) < 1e-9
                 and abs(a.theta - b.theta) < 1e-9
                 and a.l == b.l and a.d == b.d and a.h == b.h
                 and a.material == b.material)
 
     def _sync(self, known: MovableObstacle, world_obs: MovableObstacle):
-        """Update a remembered obstacle from what the robot can now see."""
+        """根据当前视觉信息更新记忆中的障碍物。"""
         old_footprint = known.polygon
         old_x, old_y, old_theta = known.x, known.y, known.theta
         reshaped = (known.l != world_obs.l or known.d != world_obs.d
@@ -112,13 +112,13 @@ class Belief:
         self.updated.append(known.oid)
         if (abs(known.x - old_x) > 1e-9 or abs(known.y - old_y) > 1e-9
                 or abs(known.theta - old_theta) > 1e-9):
-            # A moved obstacle invalidates the remembered pose unless relocated by the robot.
+            # 障碍物移动后记忆姿态失效，除非该移动由机器人完成。
             self.seen_moving.add(known.oid)
         if reshaped:
             self._reconsider(known)
 
     def _reconsider(self, obs: MovableObstacle):
-        """Clear estimates whose visible shape or label no longer matches."""
+        """清除可见形状或标签已不匹配的估计结果。"""
         self.touched.discard(obs.oid)
         self.touched_difficulty.pop(obs.oid, None)
         self.disturbed.discard(obs.oid)
@@ -130,7 +130,7 @@ class Belief:
             self.risk.assess(obs.observation())
 
     def _forget_vacated(self, world_obstacles: List[MovableObstacle], robot_pos):
-        """Remove visible memories whose stored footprint is gone."""
+        """删除实际占地已经消失的可见记忆。"""
         real = {w.oid: w for w in world_obstacles}
         rp = Point(robot_pos)
         gone = [oid for oid, known in self.perceived.items()
@@ -162,10 +162,10 @@ class Belief:
         seg = LineString([robot_pos, p])
         width = self.cfg.sight_width
         sight = seg.buffer(width / 2.0, cap_style=2) if width > 0 else seg
-        # Static free space handles wall occlusion.
+        # 静态自由空间负责处理墙体遮挡。
         if not self.roadmap.static_free_prep.contains(sight):
             return False
-        # A short blocker leaves the target's upper half visible.
+        # 较矮的阻挡物仍会露出目标的上半部分。
         for w in world_obstacles:
             if w.oid == target.oid or w.h <= target.h / 2.0 + 1e-9:
                 continue
@@ -228,7 +228,7 @@ class Belief:
             blockers.discard(oid)
 
     def record_move_direction(self, oid: int, from_xy, to_xy):
-        """Store the latest non-zero movement direction."""
+        """保存最近一次非零移动方向。"""
         dx, dy = to_xy[0] - from_xy[0], to_xy[1] - from_xy[1]
         n = math.hypot(dx, dy)
         if n > 1e-3:
@@ -244,7 +244,7 @@ class Belief:
         self._bump()
 
     def invalidate_contact(self, oid: int):
-        """Forget contact measurements invalidated by hidden world changes."""
+        """忘记被隐藏世界变化使其失效的接触测量。"""
         self.touched.discard(oid)
         self.disturbed.discard(oid)
         self._bump()
@@ -320,7 +320,7 @@ class Belief:
 
     def reveal_by_interaction(self, oid: int,
                               world_obstacles: List[MovableObstacle]) -> bool:
-        """Reveal true difficulty whenever the robot physically interacts."""
+        """机器人发生物理交互时揭示真实难度。"""
         if oid in self.touched:
             return False
         for w in world_obstacles:
@@ -332,13 +332,13 @@ class Belief:
                 return True
         return False
 
-    def get_difficulty(self, oid: int, estimator) -> float:  # Return true contact difficulty when known.
+    def get_difficulty(self, oid: int, estimator) -> float:  # 已知时返回真实接触难度。
         if oid in self.touched_difficulty:
             return self.touched_difficulty[oid]
         return estimator.estimate(self.perceived[oid].observation())
 
     def others_union(self, oid: int, relocated=None):
-        """Return known exclusions for an obstacle, including planned relocations."""
+        """返回障碍物的已知禁行区，包括计划搬移产生的区域。"""
         relocated = relocated or {}
         body = self.perceived[oid].polygon if oid in self.perceived else None
         polys = [(ob.polygon_at(*relocated[other]) if other in relocated
@@ -351,7 +351,7 @@ class Belief:
         return unary_union(polys) if polys else None
 
     def partners_of(self, oid: int) -> Tuple[int, ...]:
-        """Return visible obstacles coupled to this one."""
+        """返回与该障碍物耦合的可见障碍物。"""
         known = self.perceived.get(oid)
         if known is None:
             return ()
