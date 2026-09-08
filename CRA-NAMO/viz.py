@@ -246,7 +246,7 @@ _PLOT_BOX = (8.0, 7.0)     # 图像区域最大尺寸（宽、高），单位为
 _MARGIN = 0.5              # 左右及底部刻度标签边距，单位为英寸
 _TOP_PAD = 0.12            # 标题上方留白，单位为英寸
 _TITLE_LINE = 0.30         # 每行标题高度，单位为英寸
-_TITLE_LINES = 4           # 每个动画帧上方预留的高度
+_TITLE_LINES = 5           # 每个动画帧上方预留的高度
 _LEGEND_H = 0.58           # 底部图例条高度，单位为英寸
 _CBAR_H = 0.52             # 图例上方难度色条高度，单位为英寸
 _TITLE_FS = 11             # 标题字号
@@ -313,10 +313,20 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
                          ncol=min(len(handles), _LEGEND_NCOL), fontsize=_LEGEND_FS,
                          framealpha=0.9, borderaxespad=0.0)
 
+def _strategy_line(sim: OnlineNAMO) -> tuple:
+    """返回标注本次运行策略的标题行，用于区分各 arm 的输出。"""
+    if sim.cfg.shortest_path_mode:
+        detail = ["baseline: shortest path, obstacle cost ignored"]
+    else:
+        detail = [f"cost={sim.estimator.mode}", f"risk={sim.risk.mode}"]
+    return ("strategy", [sim.cfg.strategy] + detail)
+
+
 def _summary_title(sim: OnlineNAMO, res) -> list:
     moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
              else (str(res.removed) if res.removed else "none"))
     return [
+        _strategy_line(sim),
         ("", [res.message]),
         ("cost", [f"J={res.J:,}",
                   f"lambda*D={res.walk_cost:,}",
@@ -418,6 +428,7 @@ def render_frame(sim: OnlineNAMO, frame, original_poses,
 
     # 为每个帧预留相同的标题高度。
     title = _lay_out_title([
+        _strategy_line(sim),
         ("", [f"step {idx}/{total - 1}", frame["label"]]),
         ("cost", [f"J={frame['J']:,}"]),
         ("time", [f"plan {frame.get('plan_t', 0.0):,g}s",

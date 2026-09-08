@@ -173,7 +173,9 @@ class Planner:
         if not blockers:
             return base, []
 
-        wait = self._wait_option(key, blockers)
+        # 最短路基线只按几何长度选路：沿途障碍物照样清除，但不计入搜索代价。
+        shortest = self.cfg.shortest_path_mode
+        wait = None if shortest else self._wait_option(key, blockers)
         removals = []
         extra = 0.0
         # 按序规划清除动作，保证依赖关系确定。
@@ -189,10 +191,11 @@ class Planner:
                                       "oids": sorted(blockers)}]
             if drop is not None:
                 moved_ahead[oid] = tuple(drop)
-            seconds = cost.manipulation_time(self.cfg, cplan, len(move_path or []),
-                                             move_dist)
-            extra += cost.removal_cost(self.cfg, work, cplan.travel, seconds,
-                                       self._risk_to_charge(oid))
+            if not shortest:
+                seconds = cost.manipulation_time(self.cfg, cplan,
+                                                 len(move_path or []), move_dist)
+                extra += cost.removal_cost(self.cfg, work, cplan.travel, seconds,
+                                           self._risk_to_charge(oid))
             removals.append((oid, drop, move_dist, work, move_path, cplan))
         if wait is not None and wait <= extra:
             return base + wait, [{"type": "wait", "key": key,
@@ -216,15 +219,16 @@ class Planner:
         return cost.combine(self.cfg, 0.0, self.cfg.dynamic_wait_step)
 
     def _risk_to_charge(self, oid: int):
-        """返回风险附加等级；若已支付则不再计入。"""
-        if self.risk is None or oid in self.belief.disturbed:
+        """返回风险附加等级；若已支付或走最短路基线则不再计入。"""
+        if (self.risk is None or self.cfg.shortest_path_mode
+                or oid in self.belief.disturbed):
             return None
         return self.risk.level_of(oid, self.belief.partners_of(oid))
 
     def _off_limits(self, oid: int, obs) -> str:
         """返回该障碍物因物理或语义原因被禁止搬移的理由。"""
         cfg = self.cfg
-        if self.risk is not None:
+        if self.risk is not None and not cfg.shortest_path_mode:
             level = self.risk.level_of(oid, self.belief.partners_of(oid))
             if self.risk.forbids(level):
                 return f"{level} risk is not something to be priced"
@@ -372,7 +376,8 @@ class Planner:
         return penalty
 
     def _llm_bias(self, acts) -> float:
-        if not self.cfg.use_llm_ordering or not acts:
+        if (not self.cfg.use_llm_ordering or self.cfg.shortest_path_mode
+                or not acts):
             return 0.0
         s = 0.0
         for act in acts:

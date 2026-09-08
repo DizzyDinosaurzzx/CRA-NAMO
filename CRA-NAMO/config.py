@@ -4,6 +4,24 @@ from typing import Callable
 
 import kinematics
 
+STRATEGIES: dict[str, tuple[bool, bool, bool]] = {
+    "llm-cost-risk": (True, True, False),   # LLM 同时估计代价与风险。
+    "llm-cost": (True, False, False),       # LLM 估计代价，风险用启发式。
+    "llm-risk": (False, True, False),       # 代价用启发式，LLM 估计风险。
+    "no-llm": (False, False, False),        # 两项都用启发式，不调用 LLM。
+    "shortest": (False, False, True),       # 忽略搬移代价，直取最短路。
+}
+DEFAULT_STRATEGY = "shortest"
+
+
+def validate_strategy(value: str) -> str:
+    name = str(value).strip().lower().replace("_", "-")
+    if name not in STRATEGIES:
+        raise ValueError(
+            f"unknown strategy {value!r}; available: {', '.join(STRATEGIES)}")
+    return name
+
+
 def validate_time_importance(value: float) -> float:
     value = float(value)
     if not 0.0 <= value <= 1.0:
@@ -91,6 +109,8 @@ class Config:
     grid_step: float = 0.3          # 路线图节点间距 [米]
     conn_radius: float = 0.6        # 路线图连接半径 [米]
 
+    # 五选一的规划策略；决定 LLM 是否参与代价/风险估计，见 STRATEGIES。
+    strategy: str = DEFAULT_STRATEGY
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
@@ -121,6 +141,22 @@ class Config:
     def __post_init__(self):
         self.lambda_distance = validate_lambda(self.lambda_distance)
         self.time_importance = validate_time_importance(self.time_importance)
+        self.strategy = validate_strategy(self.strategy)
+
+    @property
+    def use_llm_cost(self) -> bool:
+        """LLM 是否估计搬移代价（mu*rho）？否则使用材料表启发式。"""
+        return STRATEGIES[self.strategy][0]
+
+    @property
+    def use_llm_risk(self) -> bool:
+        """LLM 是否评估搬移风险等级？否则使用关键词启发式。"""
+        return STRATEGIES[self.strategy][1]
+
+    @property
+    def shortest_path_mode(self) -> bool:
+        """是否忽略搬移代价，只按最短路径前进并清除沿途障碍物？"""
+        return STRATEGIES[self.strategy][2]
 
     def free_profile(self) -> kinematics.MotionProfile:
         """返回空载运动参数。"""

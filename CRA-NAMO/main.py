@@ -47,13 +47,25 @@ def main():
                     type=float, default=None,
                     help="w in [0, 1] for C = (1-w)J + w*(time_value*T): 0 minimises "
                          "energy alone (default), 1 minimises time alone")
+    ap.add_argument("--strategy", default=None,
+                    choices=sorted(config.STRATEGIES),
+                    help="What the LLM is asked to estimate. "
+                         "llm-cost-risk: LLM estimates both push cost and risk; "
+                         "llm-cost: LLM estimates cost, risk falls back to the "
+                         "offline keyword table; "
+                         "llm-risk: LLM estimates risk, cost falls back to the "
+                         "offline material table; "
+                         "no-llm: both from the offline heuristics; "
+                         "shortest: no LLM and no NAMO trade-off at all — take the "
+                         "shortest path to the goal and clear whatever stands on it "
+                         "(J, R and T are still measured normally)")
     ap.add_argument("--no-llm-order", action="store_true",
                     help="Disable LLM-based intelligent ordering of obstacle processing")
     frames = ap.add_mutually_exclusive_group()
     frames.add_argument("--frames", dest="save_frames", action="store_true",
                     default=None,
                     help="Save the per-step robot motion as an animated GIF: "
-                         "img/frames_<map_name>.gif")
+                         "img/frames_<map_name>_<strategy>.gif")
     frames.add_argument("--no-frames", dest="save_frames", action="store_false",
                         help="Do not save per-step frames or an animated GIF")
     ap.add_argument("--no-contact", action="store_true",
@@ -81,6 +93,12 @@ def main():
         except ValueError as e:
             ap.error(str(e))
 
+    if args.strategy is not None:
+        try:
+            cfg.strategy = config.validate_strategy(args.strategy)
+        except ValueError as e:
+            ap.error(str(e))
+
     if args.no_llm_order:
         cfg.use_llm_ordering = False
 
@@ -100,9 +118,16 @@ def main():
     
     original_poses = {w.oid: w.polygon for w in s["movable"]}
 
+    def _mode(estimator) -> str:
+        return (estimator.mode
+                + ("" if estimator.mode == "heuristic" else " (DeepSeek)"))
+
     print(f"Scenario: {s['name']}   {sim.roadmap}")
-    print(f"Difficulty estimator: {sim.estimator.mode}"
-          + ("" if sim.estimator.mode == "heuristic" else " (DeepSeek)"))
+    print(f"Strategy: {cfg.strategy}"
+          + ("   (shortest path, obstacle cost ignored while planning)"
+             if cfg.shortest_path_mode else ""))
+    print(f"Difficulty estimator: {_mode(sim.estimator)}"
+          f"   Risk estimator: {_mode(sim.risk)}")
     print("-" * 60)
 
     res = sim.run()
@@ -140,12 +165,13 @@ def main():
         for line in res.world_events:
             print(f"{'':<{W}}   {line}")
 
-    out = os.path.join(cfg.out_dir, f"summary_{s['name']}.png")
+    stem = f"{s['name']}_{cfg.strategy}"
+    out = os.path.join(cfg.out_dir, f"summary_{stem}.png")
     viz.visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
 
     if cfg.save_frames:
-        gif_path = os.path.join(cfg.out_dir, f"frames_{s['name']}.gif")
+        gif_path = os.path.join(cfg.out_dir, f"frames_{stem}.gif")
         n, step = viz.render_sequence(sim, res, original_poses, gif_path)
         print(f"Saved {n:,}-frame animation ({step:g}s of simulated time per frame, "
               f"{cfg.gif_fps:g} fps) -> {gif_path}")

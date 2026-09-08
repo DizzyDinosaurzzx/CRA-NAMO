@@ -166,7 +166,10 @@ def friction_force(mu_rho: float, volume: float) -> float:
 class DifficultyEstimator:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.api_key = cfg.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        # 策略关闭本项 LLM 估计时不持有密钥，从而全程走启发式路径。
+        self.api_key = ((cfg.deepseek_api_key
+                         or os.getenv("DEEPSEEK_API_KEY", ""))
+                        if cfg.use_llm_cost else "")
         self.cache: Dict[int, float] = {}
         self.mu_rho_cache: Dict[int, float] = {}
         self.material_mu_rho_cache: Dict[str, float] = {}
