@@ -189,6 +189,7 @@ class OnlineNAMO:
 
             moves_done = 0
             reached_goal = False
+            planned_at = self.belief.version     # 本计划所依据的信念。
             for step, act in enumerate(plan.actions):
                 if act["type"] == "remove":
                     obs = self.belief.obstacle(act["oid"])
@@ -213,6 +214,8 @@ class OnlineNAMO:
                             self._handle_move_collision(res, node, act["oid"], hits)
                         break
                     if new_node is not None or self.stranded:
+                        break
+                    if self._needs_replan(planned_at, moves_done):
                         break
                     if any(a["type"] == "remove"
                            for a in plan.actions[step + 1:]):
@@ -253,7 +256,7 @@ class OnlineNAMO:
                     if node == self.goal_node:
                         reached_goal = True
                         break
-                    if moves_done >= cfg.step_execute_edges:
+                    if self._needs_replan(planned_at, moves_done):
                         break
 
             if self._world_hit is not None:
@@ -267,6 +270,13 @@ class OnlineNAMO:
                 break
 
         return self._finalize(res, node)
+
+    def _needs_replan(self, planned_at: int, moves_done: int) -> bool:
+        """信念变了才重新规划；边数上限只作为兜底。"""
+        if self.belief.version != planned_at:
+            return True
+        limit = self.cfg.step_execute_edges
+        return limit > 0 and moves_done >= limit
 
     def _choose_plan(self, res: RunResult, planner: Planner, node: int):
         """枚举几何层已验证的候选，交由 LLM 选择；无 LLM 时按代价取最优。"""

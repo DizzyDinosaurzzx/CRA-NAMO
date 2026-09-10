@@ -17,7 +17,6 @@ import requests
 
 from config import Config
 
-
 def geometry_bearing(reference: float, course: float) -> float:
     """返回 course 相对 reference 的夹角，落在 [-pi, pi]。"""
     return (course - reference + math.pi) % (2.0 * math.pi) - math.pi

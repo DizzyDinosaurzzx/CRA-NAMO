@@ -100,6 +100,8 @@ class Config:
     R_manip: float = 5.0             # 搬移搜索半径 [米]
     # 轻度偏好前向放置姿态；设为零可关闭。
     manip_forward_penalty: float = 2.0
+    # 按放下之后机器人还要走的路来挑落点；关掉则只看搬移本身的代价。
+    manip_lookahead: bool = True
     manip_max_frames_per_action: int = 30
     # 因降低路线图净空而增加的惩罚，单位为障碍物移动距离。
     manip_blocked_edge_penalty_m: float = 0.0
@@ -144,14 +146,14 @@ class Config:
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
-    step_execute_edges: int = 1     # 重新感知前执行的边数
+    # belief 没有更新时最多连续执行的边数；0 表示不限，只在 belief 更新时重规划。
+    step_execute_edges: int = 0
     max_replans: int = 10000
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4.1-flash-expires-on-0910"
     deepseek_thinking: bool = True
-    # 请求里不带 reasoning_effort 时服务端按 high 处理，这里显式降到 low。
     deepseek_reasoning_effort: str = "low"
     llm_max_tokens: int | None = None
     llm_timeout: float = 300.0
@@ -160,7 +162,7 @@ class Config:
     perception_llm_max_calls: int = 8
 
     # llm-choice：每次决策最多给 LLM 看几个候选，按离机器人的距离取近的。
-    llm_choice_max_options: int = 6
+    llm_choice_max_options: int = 10
     # 候选集合不变时沿用上次决定，避免每条 0.3 m 边都重新提问。
     llm_choice_reuse_decision: bool = True
 

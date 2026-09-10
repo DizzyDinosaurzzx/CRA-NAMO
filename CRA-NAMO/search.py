@@ -84,6 +84,12 @@ class Planner:
         self._allowed: Optional[set] = None
         # 枚举候选时同一 belief 只清一次缓存，让各候选复用搬移规划结果。
         self._suppress_flush = False
+        # 落点前瞻：按 (belief 版本, 目标节点) 整体作废。
+        self._goal_node: Optional[int] = None
+        self._reach_at: tuple = ()
+        self._reach_cache: Dict[int, tuple] = {}
+        self._reroute_cache: Dict[tuple, float] = {}
+        self._blocked_cache: Dict[tuple, frozenset] = {}
 
     def plan(self, start_node: int, goal_node: int,
              start_heading: Optional[float] = None,
@@ -100,6 +106,7 @@ class Planner:
         rm = self.roadmap
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
+        self._goal_node = goal_node     # 落点前瞻要知道机器人接下来去哪。
 
         # 只有目标函数计入时间时才跟踪航向。
         track = cfg.time_importance > 0.0
@@ -337,7 +344,7 @@ class Planner:
         # 失败搬移按姿态和边记录，与代价 belief 无关。
         fail_key = (move_signature(obs), key)
         # 只复用与当前 belief、难度和风险绑定的结果。
-        cache_key = (fail_key, self.belief.version,
+        cache_key = (fail_key, self.belief.version, self._goal_node,
                      round(estimated_diff, 6), self._risk_to_charge(oid),
                      tuple(sorted(moved_ahead.items())))
         # 不恢复执行器已经拒绝的搬移。
@@ -397,6 +404,9 @@ class Planner:
                 return plan.feasible
         # 按完整搬移代价评估候选，而不是只看推动距离。
         best = math.inf
+        shut_in = 0             # 因为放下之后过不去而作废的落点数。
+        best_shut = math.inf    # 落点全都挡路时的退路。
+        shut_pick = None
         for path, push_cost, goal in manipulation.move_se2_options(
                 obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
                 robot_pos, self.cfg, others_polys=others,
@@ -415,10 +425,28 @@ class Planner:
             total = cost.removal_cost(
                 self.cfg, cost.manipulation_work(estimated_diff, push_cost),
                 plan.travel, seconds, self._risk_to_charge(oid))
+            # 搬完之后机器人还要走的路，也算进这个落点的账里。
+            onward = self._placement_extra(oid, obs, key, goal)
+            if onward == math.inf:
+                shut_in += 1
+                if best == math.inf and total < best_shut:
+                    best_shut = total
+                    shut_pick = (path, goal, push_cost, plan)
+                continue
+            total += onward
             if total < best:
                 best = total
                 feasible = True
                 move_path, drop, move_dist, cplan = path, goal, push_cost, plan
+        if not feasible and shut_pick is not None:
+            # 每个落点都会挡住去路：还是得先把它搬开，之后再重新规划。
+            move_path, drop, move_dist, cplan = shut_pick
+            feasible = True
+            self.cfg.log(f"[lookahead] oid={oid} has nowhere to go that keeps the "
+                         "way open; moving it anyway")
+        elif shut_in:
+            self.cfg.log(f"[lookahead] oid={oid} dropped {shut_in:,} pose(s) that "
+                         "would shut the robot out of the goal")
         if not feasible and rejected:
             # 汇总其他条件有效的障碍物路径被拒绝的原因。
             counts = Counter(rejected).most_common(2)
@@ -433,6 +461,162 @@ class Planner:
         res = (feasible, work, drop, move_dist, move_path, cplan)
         self._persistent_removal_cache[cache_key] = res
         return res
+
+    # ---- 落点前瞻：放下之后机器人还走不走得动，还要多走多远。----
+
+    def _refresh_lookahead(self):
+        """belief 或目标一变，之前算的到达代价就作废。"""
+        at = (self.belief.version, self._goal_node)
+        if at == self._reach_at:
+            return
+        self._reach_at = at
+        self._reach_cache.clear()
+        self._reroute_cache.clear()
+        self._blocked_cache.clear()
+
+    def _clearance_lb(self, obs) -> float:
+        """把障碍物推出一条机器人通道所需位移的下界。"""
+        return 0.5 * min(obs.l, obs.d) + self.cfg.robot_radius
+
+    def _pass_cost(self, skip: int, blockers) -> float:
+        """穿过一条被挡边的附加代价下界；无穷大表示这条边走不通。"""
+        extra = 0.0
+        for oid in blockers:
+            if oid == skip:
+                continue
+            obs = self.belief.obstacle(oid)
+            if self._off_limits(oid, obs):
+                return math.inf
+            work = cost.manipulation_work(
+                self.belief.get_difficulty(oid, self.est), self._clearance_lb(obs))
+            extra += cost.removal_cost(self.cfg, work, 0.0, 0.0,
+                                       self._risk_to_charge(oid))
+        return extra
+
+    def _edge_pass_cost(self, oid: int, key: EdgeKey, length: float,
+                        step: Dict[EdgeKey, float]) -> float:
+        w = step.get(key)
+        if w is None:
+            w = (cost.edge_cost(self.cfg, length)
+                 + self._pass_cost(oid, self.belief.blockers_of(key)))
+            step[key] = w
+        return w
+
+    def _reach_tables(self, oid: int) -> tuple:
+        """返回把 oid 搬开之后，各节点到目标的代价、朝目标的下一跳和边代价。
+
+        其余已知障碍物按「搬走它至少要花多少」计价而不是直接封死，这样前瞻
+        仍然看得见「再搬一个就能过去」这类路线，同时保持代价是个下界。
+        """
+        self._refresh_lookahead()
+        hit = self._reach_cache.get(oid)
+        if hit is not None:
+            return hit
+        rm = self.roadmap
+        goal = self._goal_node
+        dist: Dict[int, float] = {goal: 0.0}
+        nxt: Dict[int, Tuple[int, EdgeKey]] = {}
+        step: Dict[EdgeKey, float] = {}
+        heap = [(0.0, goal)]
+        while heap:
+            d, n = heapq.heappop(heap)
+            if d > dist.get(n, math.inf) + 1e-12:
+                continue
+            for v, key, length in rm.neighbors(n):
+                w = self._edge_pass_cost(oid, key, length, step)
+                if w == math.inf:
+                    continue
+                nd = d + w
+                if nd < dist.get(v, math.inf) - 1e-12:
+                    dist[v] = nd
+                    nxt[v] = (n, key)
+                    heapq.heappush(heap, (nd, v))
+        tables = (dist, nxt, step)
+        self._reach_cache[oid] = tables
+        return tables
+
+    def _blocked_edges(self, obs, goal_pose) -> frozenset:
+        """返回障碍物放到 goal_pose 后会挡住的路线图边。"""
+        ck = (obs.oid, round(goal_pose[0], 4), round(goal_pose[1], 4),
+              round(goal_pose[2], 4))
+        hit = self._blocked_cache.get(ck)
+        if hit is None:
+            hit = frozenset(
+                self.roadmap.corridors_intersecting(obs.polygon_at(*goal_pose)))
+            self._blocked_cache[ck] = hit
+        return hit
+
+    def _route_is_clear(self, here: int, nxt, blocked) -> bool:
+        """当前最优路线是否完全避开这些新被挡住的边？"""
+        n = here
+        while n != self._goal_node:
+            hop = nxt.get(n)
+            if hop is None:
+                return False
+            n, key = hop
+            if key in blocked:
+                return False
+        return True
+
+    def _reroute(self, oid: int, here: int, blocked: frozenset,
+                 dist, step) -> float:
+        """返回这些边被挡住之后，从 here 到目标的代价。"""
+        ck = (oid, here, blocked)
+        hit = self._reroute_cache.get(ck)
+        if hit is not None:
+            return hit
+        rm = self.roadmap
+        counter = itertools.count()
+        best: Dict[int, float] = {here: 0.0}
+        # dist 是同一张图去掉这些边之前的代价，因此是可采纳的启发。
+        heap = [(dist.get(here, math.inf), 0.0, next(counter), here)]
+        out = math.inf
+        while heap:
+            _f, g, _c, n = heapq.heappop(heap)
+            if g > best.get(n, math.inf) + 1e-12:
+                continue
+            if n == self._goal_node:
+                out = g
+                break
+            for v, key, length in rm.neighbors(n):
+                if key in blocked:
+                    continue
+                w = self._edge_pass_cost(oid, key, length, step)
+                if w == math.inf:
+                    continue
+                ng = g + w
+                if ng >= best.get(v, math.inf) - 1e-12:
+                    continue
+                h = dist.get(v, math.inf)
+                if h == math.inf:
+                    continue    # 本来就到不了目标，堵上之后更到不了。
+                best[v] = ng
+                heapq.heappush(heap, (ng + h, ng, next(counter), v))
+        self._reroute_cache[ck] = out
+        return out
+
+    def _placement_extra(self, oid: int, obs, key: EdgeKey, goal_pose) -> float:
+        """返回把 obs 放到 goal_pose 之后，机器人剩下的路要多付多少。
+
+        无穷大表示放下之后机器人过不去，这个落点作废。
+        """
+        if (not self.cfg.manip_lookahead or self.cfg.shortest_path_mode
+                or self._goal_node is None):
+            return 0.0
+        dist, nxt, step = self._reach_tables(oid)
+        # 机器人是要沿这条边继续朝目标走的，取更靠近目标的那一端。
+        u, v = key
+        here = u if dist.get(u, math.inf) <= dist.get(v, math.inf) else v
+        base = dist.get(here, math.inf)
+        if base == math.inf:
+            return 0.0      # 本来就到不了目标，各个落点无从比较。
+        blocked = self._blocked_edges(obs, goal_pose)
+        if not blocked or self._route_is_clear(here, nxt, blocked):
+            return 0.0
+        after = self._reroute(oid, here, blocked, dist, step)
+        if after == math.inf:
+            return math.inf
+        return max(0.0, after - base)
 
     def _goal_filter(self, obs):
         """返回一个过滤器，防止立即反向搬移。"""

@@ -72,6 +72,10 @@ def main():
                     help="Drop the requirement that the robot stays in contact with "
                          "an obstacle while moving it (obstacles then move while the "
                          "robot waits on its node, and its escort travel is not charged)")
+    ap.add_argument("--no-lookahead", action="store_true",
+                    help="Score a drop pose by the move alone, without asking what "
+                         "the robot's remaining route costs once the obstacle sits "
+                         "there (and without refusing poses that shut the way)")
     ap.add_argument("--forward-penalty", type=float, default=None,
                     help="Soft bias towards dropping obstacles ahead of the robot "
                          "rather than behind it; 0 removes the bias entirely")
@@ -104,6 +108,8 @@ def main():
 
     if args.no_contact:
         cfg.contact_required = False
+    if args.no_lookahead:
+        cfg.manip_lookahead = False
     if args.forward_penalty is not None:
         cfg.manip_forward_penalty = max(0.0, args.forward_penalty)
 
