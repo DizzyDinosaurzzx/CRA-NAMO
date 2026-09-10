@@ -1,4 +1,20 @@
-"""包含三组耦合障碍物决策的地震救援地图。"""
+"""Earthquake-rescue floor plan with three coupled-obstacle decisions.
+
+The 24 m x 20 m footprint, entrance, survivor goal, planner configuration and
+the thirteen movable-obstacle budget are retained from the supplied map.  The
+damaged upper hall is reorganised into three non-parallel breached dividers.
+Each divider offers several passages and therefore a genuine route decision:
+
+1. a cart that appears harmless is actually bracing a cracked beam above gas
+   cylinders;
+2. a second cart is tethered to a damaged pressurised cylinder; and
+3. a light filing cabinet is coupled to a damaged water/electrical assembly.
+
+The coupled hazards are placed as visible obstacle groups.  ``contact_reveals``
+lets the existing online risk estimator revise the apparently low-risk blocker
+when the robot interacts with it, while ``decision_points`` and
+``interacts_with`` retain the authored causal relationships for inspection.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +23,8 @@ import math
 from shapely.geometry import box
 
 from config import Config
+from llm_difficulty import friction_force, material_mu_rho
 from obstacle import MovableObstacle, StaticObstacle
-from scenarios import _realism
-from scenarios._realism import (
-    MU_CASTORS, MU_CASTORS_FOULED, MU_CONCRETE, MU_RUBBER_WHEELS,
-    MU_STEEL, MU_UPHOLSTERY, MU_WOOD, push_force,
-)
 
 
 _WIDTH = 24.0
@@ -20,9 +32,8 @@ _HEIGHT = 20.0
 _WALL_T = 0.32
 
 _START = (1.35, 11.25)
-_GOAL = (18.0, 16.0)
-# 幸存者所在的区域，必须包含目标点；当前目标不在其中。
-_SURVIVOR_REGION = box(17.3, 15.2, 18.7, 16.8)
+_SURVIVOR_REGION = box(18.80, 15, 19, 17)
+_GOAL = (18,16)
 
 
 def _wall(p, q, name: str) -> StaticObstacle:
@@ -43,11 +54,10 @@ def _fixed(x: float, y: float, l: float, d: float,
 
 def _movable(x: float, y: float, l: float, d: float, h: float,
              angle_deg: float, material: str, oid: int,
-             *, mass: float, mu: float, difficulty: float | None = None,
+             *, difficulty: float | None = None,
              contact_reveals: str = "") -> MovableObstacle:
-    """按质量和地面摩擦放置障碍物，并支持覆盖难度。"""
     if difficulty is None:
-        difficulty = push_force(mass, mu)
+        difficulty = friction_force(material_mu_rho(material), l * d * h)
     return MovableObstacle(
         x=x,
         y=y,
@@ -63,57 +73,57 @@ def _movable(x: float, y: float, l: float, d: float, h: float,
 
 
 def _couple(primary: MovableObstacle, partners, description: str) -> None:
-    """为高风险阻塞物附加显式障碍物交互图。"""
+    """Attach the explicit obstacle-interaction graph to a risky blocker."""
     primary.interacts_with = tuple(obs.oid for obs in partners)
     primary.interaction_risk = description
 
 
 def _walls():
-    """返回深色结构墙段，包括地震损坏的碎片。"""
+    """Dark structural strokes, including the earthquake-damaged fragments."""
     segments = (
-        # 损坏的上边界。
+        # Broken upper boundary (the five clear spans match the reference).
         ((0.00, 20.00), (3.05, 20.00), "north_01"),
         ((4.00, 20.00), (7.00, 20.00), "north_02"),
         ((8.00, 20.00), (12.20, 20.00), "north_03"),
         ((13.20, 20.00), (21.00, 20.00), "north_04"),
         ((22.00, 20.00), (24.00, 20.00), "north_05"),
 
-        # 房间 1。
+        # Room 1.
         ((0.00, 20.00), (0.00, 15.50), "room1_west"),
         ((0.00, 15.50), (1.65, 15.50), "room1_south_01"),
         ((2.70, 15.50), (5.00, 15.50), "room1_south_02"),
         ((1.85, 16.15), (2.70, 15.50), "room1_fallen_door"),
         ((5.00, 15.50), (5.00, 20.00), "room1_east"),
 
-        # 房间 2。
+        # Room 2.
         ((9.35, 20.00), (9.35, 17.25), "room2_east"),
         ((5.00, 16.75), (8.20, 16.75), "room2_south"),
 
-        # 房间 3 及其损坏的下墙。
+        # Room 3 and the broken wall along its lower side.
         ((13.85, 20.00), (13.85, 16.35), "room3_east"),
         ((9.35, 16.35), (11.35, 15.55), "room3_south_rubble_01"),
         ((11.35, 15.55), (11.50, 16.25), "room3_south_rubble_02"),
         ((12.65, 16.30), (15.55, 16.30), "room3_south_rubble_03"),
 
-        # 房间 4 和 5。
+        # Rooms 4 and 5.
         ((20.00, 20.00), (20.00, 16.25), "room4_east"),
         ((20.00, 16.25), (20.35, 15.55), "room5_west_rubble"),
         ((20.35, 15.55), (24.00, 15.55), "room5_south"),
         ((22.20, 19.25), (23.25, 15.55), "room5_fallen_wall"),
 
-        # 右侧和下侧外边界。
+        # Right and lower outer boundary.
         ((24.00, 20.00), (24.00, 0.00), "outer_east"),
         ((12.20, 0.00), (24.00, 0.00), "outer_south"),
         ((12.20, 0.00), (12.20, 1.55), "south_step"),
         ((7.60, 1.55), (12.20, 1.55), "southwest_02"),
         ((1.00, 1.55), (6.50, 1.55), "southwest_01"),
 
-        # 西侧边界和入口。
+        # West boundary below Room 1; the lower opening is the entrance.
         ((1.00, 15.50), (1.00, 14.20), "west_01"),
         ((1.00, 12.80), (1.00, 11.65), "west_02"),
         ((1.00, 10.30), (1.00, 1.55), "west_03"),
 
-        # 房间 8 和卫生间 2。
+        # Room 8 and Bathroom 2.
         ((20.40, 15.55), (20.40, 14.05), "room8_west_01"),
         ((19.80, 12.75), (20.50, 11.20), "room8_west_02"),
         ((20.50, 11.20), (24.00, 11.20), "room8_south"),
@@ -123,7 +133,9 @@ def _walls():
         ((23.55, 11.20), (23.55, 8.95), "bathroom2_divider_01"),
         ((23.55, 8.10), (23.55, 6.55), "bathroom2_divider_02"),
 
-        # 三组损坏隔墙形成决策带。
+        # Three damaged, non-parallel dividers across the rescue hall.  Each
+        # has three breaches; movable obstacles below turn those breaches into
+        # successive route-versus-risk decisions.
         ((6.50, 10.00), (6.459, 10.55), "decision_a_01"),
         ((6.385, 11.55), (6.333, 12.25), "decision_a_02"),
         ((6.252, 13.35), (6.156, 14.65), "decision_a_03"),
@@ -139,14 +151,15 @@ def _walls():
         ((15.459, 14.00), (15.509, 15.25), "decision_c_03"),
         ((15.547, 16.20), (15.55, 16.30), "decision_c_04"),
 
-        # 次级碎石保留场景的不规则性。
+        # Secondary collapsed members preserve the irregular earthquake scene
+        # without obscuring the three authored decision bands.
         ((2.60, 14.90), (3.55, 14.15), "hall1_secondary_rubble_01"),
         ((11.55, 11.10), (12.55, 10.35), "hall1_secondary_rubble_02"),
         ((17.30, 14.70), (20.00, 16.25), "hall1_secondary_rubble_03"),
         ((15.30, 10.00), (18.60, 6.05), "hall2_rubble_01"),
         ((21.90, 0.15), (23.70, 4.65), "hall2_rubble_02"),
 
-        # 卫生间 1 和房间 9。
+        # Bathroom 1 and Room 9.
         ((1.00, 10.00), (4.10, 10.00), "bathroom1_north"),
         ((4.10, 10.00), (4.45, 8.90), "bathroom1_northeast"),
         ((4.00, 6.55), (4.35, 7.55), "bathroom1_southeast"),
@@ -154,7 +167,7 @@ def _walls():
         ((4.75, 5.45), (5.55, 4.10), "room9_northeast"),
         ((5.20, 4.35), (5.20, 1.55), "room9_east"),
 
-        # 房间 6 和 7。
+        # Rooms 6 and 7.
         ((6.50, 10.00), (15.30, 10.00), "rooms6_7_north"),
         ((6.50, 6.20), (6.50, 10.00), "room6_west"),
         ((10.65, 6.20), (10.65, 10.00), "rooms6_7_divider"),
@@ -163,14 +176,14 @@ def _walls():
         ((9.80, 6.20), (12.30, 6.20), "rooms6_7_south_02"),
         ((13.30, 6.20), (15.30, 6.20), "rooms6_7_south_03"),
 
-        # 房间 9 与大厅 2 之间的损坏墙体。
+        # Damaged wall between Room 9 and Hall 2.
         ((8.95, 1.55), (10.25, 4.25), "hall2_west_rubble"),
     )
     return [_wall(p, q, name) for p, q, name in segments]
 
 
 def _fixed_obstacles():
-    """返回浅灰色固定障碍物和两个固定房间设施。"""
+    """Pale-grey fixed obstacles and the two fixed room fixtures."""
     specs = (
         (0.82, 18.97, 0.65, 0.85, 90.0, "fixed_room1_01"),
         (1.07, 17.29, 0.67, 1.00, 90.0, "fixed_room1_02"),
@@ -197,96 +210,95 @@ def _fixed_obstacles():
         (1.77, 2.18, 0.70, 0.55, 0.0, "fixed_room9_02"),
         (9.05, 3.81, 1.50, 0.65, 65.0, "fixed_hall2_01"),
 
-        # 床和洗手盆是固定设施。
-        (23.14, 13.86, 2.10, 0.95, 90.0, "fixed_room8_bed"),
+        # The bed and plumbed washbasin are fixtures rather than two of the
+        # thirteen movable obstacles stated in the reference note.
+        (23.14, 13.86, 2.10, 0.75, 90.0, "fixed_room8_bed"),
         (22.55, 7.06, 1.15, 0.72, 0.0, "fixed_bathroom2_washbasin"),
     )
     return [_fixed(*spec) for spec in specs]
 
 
 def _movable_obstacles():
-    """创建分为三组耦合决策的十三个障碍物。"""
+    """Thirteen obstacles arranged as three coupled decision groups."""
 
-    # 决策 A 耦合支撑小车、梁、气瓶和轮椅。
+    # Decision A — the central breach is geometrically attractive.  The cart
+    # initially reads as low risk, but contact reveals that it is a structural
+    # brace above a pressurised cylinder.  The low breach is the safe fallback;
+    # the high breach is blocked by an occupied stretcher.
     brace_cart = _movable(
-        6.293, 12.80, 0.95, 0.58, 0.98, 94.2, "empty_cart", 1,
-        mass=34.0 + 160.0, mu=MU_CASTORS_FOULED,
+        6.293, 12.80, 0.82, 0.54, 1.00, 94.2, "empty_cart", 1,
+        difficulty=24.0,
         contact_reveals=(
             "cart_bracing_cracked_load_bearing_beam_above_gas_cylinders"),
     )
-    # 放在破碎混凝土上的钢筋混凝土梁。
     cracked_beam = _movable(
-        8.05, 13.45, 2.10, 0.38, 0.42, 18.0, "collapsed_beam", 2,
-        mass=804.0, mu=MU_CONCRETE,
+        7.72, 13.42, 1.65, 0.38, 1.65, 18.0, "collapsed_beam", 2,
+        difficulty=2800.0,
     )
-    # 装有三个压缩气瓶的钢笼。
     gas_cylinder_a = _movable(
-        7.42, 12.12, 0.80, 0.60, 1.55, 78.0, "gas_cylinder", 3,
-        mass=220.0, mu=MU_STEEL,
+        7.42, 12.12, 0.58, 0.46, 1.35, 78.0, "gas_cylinder", 3,
+        difficulty=180.0,
     )
-    # 轻质救援纸箱。
     safe_boxes_a = _movable(
-        6.422, 11.05, 0.80, 0.52, 0.62, 94.2, "cardboard_box", 4,
-        mass=14.0, mu=MU_WOOD,
+        6.422, 11.05, 0.72, 0.48, 0.72, 94.2, "cardboard_box", 4,
+        difficulty=18.0,
     )
-    # 位于碎石上的载人轮椅。
-    occupied_wheelchair = _movable(
-        6.115, 15.20, 1.05, 0.68, 0.95, 94.2, "occupied_wheelchair", 5,
-        mass=88.0, mu=MU_RUBBER_WHEELS,
+    occupied_stretcher = _movable(
+        6.115, 15.20, 0.82, 0.62, 1.05, 94.2,
+        "occupied_stretcher", 5, difficulty=30.0,
     )
     _couple(
         brace_cart, (cracked_beam, gas_cylinder_a),
-        "moving the cart unloads a cracked beam onto a cage of gas cylinders",
+        "moving the cart unloads a cracked beam onto a gas cylinder",
     )
 
-    # 决策 B 将小车与损坏气瓶耦合。
-    free_cart_resistance = push_force(30.0, MU_CASTORS)
-    dragged_cylinder_resistance = push_force(75.0, MU_WOOD)
+    # Decision B — a second apparently empty cart occupies the middle breach.
+    # Its tether to a damaged cylinder is only identified on interaction.  The
+    # upper cart is a safe alternative; the lower breach contains a collapsed
+    # beam that should never be disturbed.
     tethered_cart = _movable(
-        10.077, 12.85, 0.95, 0.56, 0.98, 101.6, "empty_cart", 6,
-        mass=30.0, mu=MU_CASTORS,
-        difficulty=free_cart_resistance + dragged_cylinder_resistance,
+        10.077, 12.85, 0.82, 0.54, 0.95, 101.6, "empty_cart", 6,
+        difficulty=22.0,
         contact_reveals="cart_tethered_to_damaged_gas_cylinder",
     )
-    # 立在底环上的满气气瓶。
     gas_cylinder_b = _movable(
-        11.25, 13.05, 0.34, 0.34, 1.52, 74.0,
-        "damaged_gas_cylinder", 7, mass=75.0, mu=MU_WOOD,
+        11.25, 13.05, 0.62, 0.48, 1.40, 74.0,
+        "damaged_gas_cylinder", 7, difficulty=220.0,
     )
     safe_cart_b = _movable(
-        9.586, 15.20, 0.92, 0.55, 0.96, 101.6, "empty_cart", 8,
-        mass=28.0, mu=MU_CASTORS,
+        9.586, 15.20, 0.82, 0.52, 0.90, 101.6, "empty_cart", 8,
+        difficulty=20.0,
     )
-    # 混凝土过梁碎片。
     blocked_beam_b = _movable(
-        10.435, 11.05, 0.90, 0.40, 0.38, 101.6,
-        "collapsed_beam", 9, mass=328.0, mu=MU_CONCRETE,
+        10.435, 11.05, 0.78, 0.58, 1.70, 101.6,
+        "collapsed_beam", 9, difficulty=4100.0,
     )
     _couple(
         tethered_cart, (gas_cylinder_b,),
         "the cart is mechanically tethered to a damaged gas cylinder",
     )
 
-    # 决策 C 将电气柜与漏水系统耦合。
+    # Decision C — the direct upper breach looks cheap because the filing
+    # cabinet slides easily.  Interaction exposes its electrical coupling to a
+    # displaced water tank and damaged pipe.  Cardboard boxes in the middle
+    # breach provide the lower-risk route to the survivor.
     electrical_cabinet = _movable(
-        15.528, 15.700, 0.80, 0.45, 1.80, 87.7,
-        "filing_cabinet", 10, mass=105.0, mu=MU_STEEL,
+        15.528, 15.725, 0.70, 0.56, 1.35, 87.7,
+        "filing_cabinet", 10, difficulty=28.0,
         contact_reveals=(
             "live_electrical_cabinet_in_floodwater_beside_damaged_water_pipe"),
     )
-    # 部分装满的分段水箱。
     water_tank = _movable(
-        16.55, 14.78, 1.00, 0.60, 0.80, 12.0,
-        "water_tank", 11, mass=275.0, mu=MU_STEEL,
+        16.65, 14.80, 1.05, 0.62, 1.25, 12.0,
+        "water_tank", 11, difficulty=250.0,
     )
-    # 损坏的铸铁供水立管。
     damaged_pipe = _movable(
-        16.45, 16.95, 1.60, 0.34, 0.34, -22.0,
-        "damaged_water_pipe", 12, mass=120.0, mu=MU_STEEL,
+        16.75, 17.05, 1.45, 0.32, 0.55, -22.0,
+        "damaged_water_pipe", 12, difficulty=300.0,
     )
     safe_boxes_c = _movable(
-        15.437, 13.45, 0.85, 0.50, 0.65, 87.7,
-        "cardboard_box", 13, mass=16.0, mu=MU_WOOD,
+        15.437, 13.45, 0.82, 0.48, 0.70, 87.7,
+        "cardboard_box", 13, difficulty=20.0,
     )
     _couple(
         electrical_cabinet, (water_tank, damaged_pipe),
@@ -295,106 +307,29 @@ def _movable_obstacles():
 
     return [
         brace_cart, cracked_beam, gas_cylinder_a, safe_boxes_a,
-        occupied_wheelchair, tethered_cart, gas_cylinder_b, safe_cart_b,
+        occupied_stretcher, tethered_cart, gas_cylinder_b, safe_cart_b,
         blocked_beam_b, electrical_cabinet, water_tank, damaged_pipe,
         safe_boxes_c,
     ]
 
 
-def _scene_obstacles():
-    """返回三组决策之间的其他震倒物品。"""
-    specs = (
-        # 大厅 1，第一道隔墙以西：机器人最先遇到的区域。
-        (14, 3.30, 12.30, 1.30, 0.95, 0.55,   0.0, "debris_pile",
-         950.0, MU_CONCRETE),
-        (15, 4.90, 13.60, 1.60, 0.80, 0.75,  15.0, "office_desk",
-         55.0, MU_WOOD),
-        (16, 4.90, 11.60, 0.62, 0.55, 1.05, -25.0, "evacuation_chair",
-         22.0, MU_RUBBER_WHEELS),
-
-        # 大厅 1，第一和第二道隔墙之间。
-        (17, 8.20, 10.95, 1.60, 1.00, 0.35,   8.0, "ceiling_panel_stack",
-         95.0, MU_WOOD),
-        (18, 7.10, 16.10, 0.42, 0.42, 1.30,   0.0, "water_cooler",
-         55.0, MU_WOOD),
-
-        # 大厅 1，第二和第三道隔墙之间。
-        (19, 12.20, 14.30, 1.80, 0.50, 0.90, -12.0, "toppled_locker_bank",
-         130.0, MU_STEEL),
-        (20, 14.10, 12.90, 1.20, 0.80, 1.00,  20.0, "supply_pallet",
-         320.0, MU_WOOD),
-
-        # 房间 1，位于入口大厅旁。
-        (21, 3.60, 18.40, 1.32, 0.62, 0.47, 100.0, "filing_cabinet",
-         65.0, MU_STEEL),
-        (22, 2.30, 17.10, 0.60, 0.60, 1.05,  40.0, "office_chair",
-         14.0, MU_RUBBER_WHEELS),
-
-        # 房间 2 和 3。
-        (23, 7.30, 18.60, 0.80, 0.60, 1.90,   0.0, "server_rack",
-         180.0, MU_STEEL),
-        (24, 12.30, 18.70, 1.60, 0.55, 1.85,  0.0, "steel_shelf",
-         150.0, MU_STEEL),
-
-        # 房间 4 和 5，位于幸存者两侧。
-        (25, 15.30, 18.10, 2.00, 0.70, 0.45,  5.0, "folding_cot",
-         18.0, MU_WOOD),
-        (26, 19.10, 18.60, 1.00, 0.80, 1.85,  0.0, "vending_machine",
-         260.0, MU_STEEL),
-        (27, 21.20, 18.30, 0.90, 0.70, 0.80, 12.0, "wooden_crate",
-         110.0, MU_STEEL),
-
-        # 房间 6 和 7，位于大厅南侧。
-        (28, 8.90, 7.60, 1.10, 0.90, 1.00,  -8.0, "wooden_crate",
-         180.0, MU_STEEL),
-        (29, 12.90, 8.20, 0.62, 0.62, 0.92,  20.0, "chemical_drum",
-         200.0, MU_STEEL),
-
-        # 大厅 2，南侧大厅。
-        (30, 14.50, 3.20, 1.40, 1.40, 1.40,   0.0, "cable_drum",
-         480.0, MU_WOOD),
-
-        # 东侧的房间 8 和卫生间 2。
-        (31, 21.80, 14.10, 1.50, 0.85, 0.30,  8.0, "mattress",
-         30.0, MU_UPHOLSTERY),
-        (32, 22.10, 9.30, 0.60, 0.60, 1.45,   0.0, "water_heater",
-         45.0, MU_STEEL),
-
-        # 西侧的卫生间 1 和房间 9。
-        (33, 2.90, 8.30, 1.00, 0.80, 0.45, -15.0, "debris_pile",
-         520.0, MU_CONCRETE),
-        (34, 3.60, 3.40, 0.80, 0.60, 0.70,  30.0, "wooden_crate",
-         75.0, MU_STEEL),
-    )
-    return [
-        _movable(x, y, l, d, h, angle, material, oid, mass=mass, mu=mu)
-        for oid, x, y, l, d, h, angle, material, mass, mu in specs
-    ]
-
-
 def create():
-    """构建参考地震救援场景。"""
-    workspace = box(0.0, 0.0, _WIDTH, _HEIGHT)
-    static = [*_walls(), *_fixed_obstacles()]
-    movable = [*_movable_obstacles(), *_scene_obstacles()]
-    cfg = Config(
-        grid_step=0.30,
-        conn_radius=0.70,
-        se2_cell=0.15,
-        R_perc=8.0,
-        R_manip=4.0,
-    )
-    _realism.check_layout(
-        "earthquake", workspace=workspace, static=static, movable=movable,
-        start=_START, goal=_GOAL, cfg=cfg,
-    )
+    """Build the reference earthquake-rescue scenario."""
+    movable = _movable_obstacles()
     return {
-        "workspace": workspace,
-        "static": static,
+        "workspace": box(0.0, 0.0, _WIDTH, _HEIGHT),
+        "static": [*_walls(), *_fixed_obstacles()],
         "movable": movable,
         "start": _START,
         "goal": _GOAL,
-        "cfg": cfg,
+        "cfg": Config(
+            grid_step=0.30,
+            conn_radius=0.70,
+            se2_cell=0.15,
+            R_perc=8.0,
+            R_manip=4.0,
+            save_frames=False,
+        ),
         "entrance": _START,
         "survivor_region": _SURVIVOR_REGION,
         "decision_points": [
