@@ -792,5 +792,6 @@ def create():
             grid_step=0.5,
             conn_radius=0.75,
             se2_cell=0.5,
+            show_global_obstacles=True,
         ),
     }

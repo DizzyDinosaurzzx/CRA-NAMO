@@ -34,12 +34,26 @@ import config
 import scenarios
 import viz
 from executor import OnlineNAMO
+from scenario_generation.naming import map_stem, run_stem
+from scenario_generation.profiles import PROFILES
+from scenario_generation.serialization import save_manifest
 
 def main():
     """解析命令行选项并运行一个场景。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default=scenarios.DEFAULT_SCENARIO,
                     choices=scenarios.names())
+    ap.add_argument("--seed", type=int, default=0,
+                    help="Seed used by --scenario seeded_random")
+    ap.add_argument("--map-profile", choices=sorted(PROFILES), default="balanced",
+                    help="Generation profile used by --scenario seeded_random")
+    ap.add_argument("--map-manifest", default=None,
+                    help="Replay a previously saved seeded-random JSON manifest")
+    ap.add_argument("--save-map-manifest", nargs="?", const="auto", default=None,
+                    metavar="PATH", help="Save the generated map manifest; an omitted "
+                    "PATH writes it under the output directory")
+    ap.add_argument("--generation-attempts", type=int, default=40,
+                    help="Maximum deterministic candidates tried for a random map")
     ap.add_argument("--lambda", "--lambda_distance", dest="lambda_distance",
                     type=float, default=None,
                     help="Motion cost λ weight (larger values favour moving obstacles rather than detouring)")
@@ -65,7 +79,7 @@ def main():
     frames.add_argument("--frames", dest="save_frames", action="store_true",
                     default=None,
                     help="Save the per-step robot motion as an animated GIF: "
-                         "img/frames_<map_name>_<strategy>.gif")
+                         "img/experiment_<number>_<profile>_<strategy>_<id>_animation.gif")
     frames.add_argument("--no-frames", dest="save_frames", action="store_false",
                         help="Do not save per-step frames or an animated GIF")
     ap.add_argument("--no-contact", action="store_true",
@@ -81,7 +95,17 @@ def main():
                          "rather than behind it; 0 removes the bias entirely")
     args = ap.parse_args()
 
-    s = scenarios.load(args.scenario)
+    if args.map_manifest and args.scenario != "seeded_random":
+        ap.error("--map-manifest requires --scenario seeded_random")
+    scenario_options = {}
+    if args.scenario == "seeded_random":
+        scenario_options = {
+            "seed": args.seed,
+            "profile": args.map_profile,
+            "manifest_path": args.map_manifest,
+            "generation_attempts": args.generation_attempts,
+        }
+    s = scenarios.load(args.scenario, **scenario_options)
     cfg = s["cfg"]
     cfg.set_logger(emit_log, flush_log)
 
@@ -117,6 +141,17 @@ def main():
         cfg.save_frames = args.save_frames
 
     os.makedirs(cfg.out_dir, exist_ok=True)
+
+    if args.save_map_manifest is not None:
+        if "manifest" not in s:
+            ap.error("--save-map-manifest requires --scenario seeded_random")
+        manifest_path = args.save_map_manifest
+        if manifest_path == "auto":
+            manifest_path = os.path.join(
+                cfg.out_dir, "maps",
+                f"{map_stem(s['manifest'])}.json")
+        saved = save_manifest(s["manifest"], manifest_path)
+        print(f"Saved map manifest -> {saved}")
 
     sim = OnlineNAMO(s["workspace"], s["static"], s["movable"],
                      s["start"], s["goal"], cfg, events=s.get("dynamics"),
@@ -183,13 +218,14 @@ def main():
         for line in res.world_events:
             print(f"{'':<{W}}   {line}")
 
-    stem = f"{s['name']}_{cfg.strategy}"
-    out = os.path.join(cfg.out_dir, f"summary_{stem}.png")
+    stem = (run_stem(s["manifest"], cfg.strategy)
+            if "manifest" in s else f"{s['name']}_{cfg.strategy}")
+    out = os.path.join(cfg.out_dir, f"{stem}_summary.png")
     viz.visualize(sim, res, original_poses, out)
     print(f"\nSaved visualisation -> {out}")
 
     if cfg.save_frames:
-        gif_path = os.path.join(cfg.out_dir, f"frames_{stem}.gif")
+        gif_path = os.path.join(cfg.out_dir, f"{stem}_animation.gif")
         n, step = viz.render_sequence(sim, res, original_poses, gif_path)
         print(f"Saved {n:,}-frame animation ({step:g}s of simulated time per frame, "
               f"{cfg.gif_fps:g} fps) -> {gif_path}")

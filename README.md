@@ -157,6 +157,46 @@ python CRA-NAMO/main.py --scenario corridor --frames
 
 新场景放在 `CRA-NAMO/scenarios/` 中，并提供无参数的 `create()` 函数。场景模块会被自动发现，文件名就是 `--scenario` 使用的名称；以下划线开头的模块不会被当作场景。
 
+### 可复现随机地图
+
+`seeded_random` 使用“房间连接图 → 墙体与门洞 → 决策点挖掘 → 背景障碍物 → 动态事件 → 决策难度校准 → 分级校验”的流水线生成地图。随机性按墙体、障碍物几何、物理属性、隐藏状态、事件和校准分别派生，因此同一 seed 可以稳定重放，也不会因某个采样器增加一次随机调用而改变整张地图。
+
+随机地图和批量实验的常用选项统一在 `CRA-NAMO/config.py` 中调整：`random_map_obstacle_count` 是每张地图的可移动障碍物总数，`random_map_dynamic_obstacle_count` 是其中的动态障碍物数，`random_map_experiment_count` 是批量脚本未传 `--seeds` 时生成的地图数，`random_map_generate_images` 控制批量运行是否生成每种策略的 summary PNG（默认 `True`）。这些数量按 config 原值生效；显式传入 `--seeds` 仍会覆盖实验地图数量。
+
+默认拓扑会随机生成 3–4 行、4–5 列的不等尺寸房间，然后从网格邻接关系中删除部分连接，同时保留整体连通性。不同 seed 会产生不同的环路、死路、岔路和最短路径长度。决策障碍物不是绑定在固定编号墙上，而是放到最短路线中具有反事实绕行路径的门边；验证器会确认每个关键门边被移除后仍有替代路线。房间内部还会生成不占用图通道的随机斜墙。
+
+```bash
+# 生成并运行一张均衡随机地图
+python CRA-NAMO/main.py --scenario seeded_random --seed 42 \
+  --map-profile balanced --strategy no-llm
+
+# 保存完整地图描述
+python CRA-NAMO/main.py --scenario seeded_random --seed 42 \
+  --map-profile showcase --save-map-manifest --no-frames
+
+# 从 manifest 精确重放
+python CRA-NAMO/main.py --scenario seeded_random \
+  --map-manifest img/maps/experiment_0042_showcase_map_<id>.json \
+  --no-frames
+```
+
+可用 profile 包括 `balanced`、`dynamic`、`risk`、`manipulation`、`adversarial`、`showcase` 和 `benchmark`。动态事件会在临时门洞封锁、搬移后响应和物体属性突变之间采样；`benchmark` 只排除几何非法、静态不可达、事件关闭全部路线或缺少反事实决策的地图，不按算法输赢筛选 seed。
+
+校准阶段保持房间图和墙体不变，根据门边的反事实绕行长度调节关键障碍物的真实推动阻力，并根据替代路线代价调节临时封路的等待窗口。定量决策的最优与次优代价差控制在 5%–30%，且由独立随机流决定是搬移、绕行、安全搬移、等待还是重规划占优，避免所有 seed 都给出同一种答案。隐藏难度决策同时保存接触前 belief 与接触后真值标签，用来检查算法能否因新信息改变选择。
+
+批量生成种子语料；加 `--run` 会进一步执行 `no-llm` 与 `shortest` 两个对照策略：
+
+```bash
+python CRA-NAMO/benchmarks/random_maps.py \
+  --seeds 0:99 --profile benchmark --out img/random_benchmark
+```
+
+批量输出除了逐 seed 的 `results.json`、`results.csv` 和地图 manifest，还包含 `coverage.json`，汇总拓扑族、唯一拓扑签名、决策类型、事件模板、oracle 动作分布和决策差距范围。加 `--run` 后，每个策略还会输出 `oracle_accuracy`、`oracle_regret` 和禁止动作选择次数。
+
+随机地图默认按实验编号命名产物。例如 seed 42 的运行会生成 `experiment_0042_showcase_no-llm_<id>_animation.gif`、`experiment_0042_showcase_no-llm_<id>_summary.png` 和 `maps/experiment_0042_showcase_map_<id>.json`。末尾保留 8 位内容 ID 防止同一实验编号在生成规则变化后被静默覆盖。批量跑实验或只需要统计结果时可以显式传入 `--no-frames`；`random_maps.py` 的 benchmark runner 始终关闭动画以避免批量实验被渲染耗时主导。
+
+每张 manifest 保存墙体多边形、障碍物真实物理属性、动态事件、决策点、校准摘要、配置、校验指标和内容指纹；每个决策点的 `metadata.oracle` 保存候选代价、最优动作、相对差距，以及可用时的接触前 belief。随机生成器实现位于 `CRA-NAMO/scenario_generation/`。
+
 ### 障碍物数据约定
 
 `scenarios/_realism.py` 提供两个工具：

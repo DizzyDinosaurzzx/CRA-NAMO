@@ -6,7 +6,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SCENARIO = "corridor"
+DEFAULT_SCENARIO = "warehouse"
 REQUIRED_FIELDS = {
     "workspace",
     "static",
@@ -55,8 +55,8 @@ def _checked_decisions(name: str, points, movable) -> list[dict]:
     return checked
 
 
-def load(name: str | None = None) -> dict[str, Any]:
-    """按名称加载并校验场景。"""
+def load(name: str | None = None, **options) -> dict[str, Any]:
+    """按名称加载并校验场景；生成型场景可以接收显式选项。"""
     selected = name or DEFAULT_SCENARIO
     available = names()
     if selected not in available:
@@ -67,7 +67,7 @@ def load(name: str | None = None) -> dict[str, Any]:
     if not callable(create):
         raise TypeError(f"Map module {selected!r} must provide a parameterless create() function")
 
-    scenario = create()
+    scenario = create(**options)
     if not isinstance(scenario, dict):
         raise TypeError(f"{selected}.create() must return a dict")
 

@@ -1,0 +1,1 @@
+"""Repeatable benchmark entry points."""

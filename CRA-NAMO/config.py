@@ -2,9 +2,49 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import kinematics
+
+
+class StrategyFlags(NamedTuple):
+    llm_cost: bool
+    llm_risk: bool
+    shortest: bool
+    llm_choice: bool
+
+
+STRATEGIES: dict[str, StrategyFlags] = {
+    "llm-cost-risk": StrategyFlags(True, True, False, False),
+    "llm-cost": StrategyFlags(True, False, False, False),
+    "llm-risk": StrategyFlags(False, True, False, False),
+    "no-llm": StrategyFlags(False, False, False, False),
+    "shortest": StrategyFlags(False, False, True, False),
+    "llm-choice": StrategyFlags(True, True, False, True),
+}
+DEFAULT_STRATEGY = "shortest"
+
+
+def validate_strategy(value: str) -> str:
+    name = str(value).strip().lower().replace("_", "-")
+    if name not in STRATEGIES:
+        raise ValueError(
+            f"unknown strategy {value!r}; available: {', '.join(STRATEGIES)}")
+    return name
+
+
+REASONING_EFFORTS = ("low", "high", "max")
+_EFFORT_ALIASES = {"medium": "high", "xhigh": "high"}
+
+
+def validate_reasoning_effort(value: str) -> str:
+    name = _EFFORT_ALIASES.get(str(value).strip().lower(),
+                               str(value).strip().lower())
+    if name not in REASONING_EFFORTS:
+        raise ValueError(
+            f"unknown reasoning effort {value!r}; available: "
+            + ", ".join(REASONING_EFFORTS))
+    return name
 
 def validate_time_importance(value: float) -> float:
     value = float(value)
@@ -25,6 +65,16 @@ class Config:
     """Configuration shared by planning, execution, and visualization."""
 
     robot_radius: float = 0.1
+
+    # Seeded-random map generation. obstacle_count is the total number of
+    # movable obstacles (decision, dynamic, and background obstacles combined).
+    random_map_obstacle_count: int = 10
+    # Number of independently moving obstacles on each generated map.
+    random_map_dynamic_obstacle_count: int = 5
+    # Number of maps produced by benchmarks/random_maps.py when --seeds is omitted.
+    random_map_experiment_count: int = 10
+    # Whether the batch benchmark writes a summary PNG for each strategy run.
+    random_map_generate_images: bool = True
 
     # Motion limits for unloaded and loaded driving.
     robot_v_max: float = 0.6         # [m/s]
@@ -54,6 +104,8 @@ class Config:
     R_manip: float = 5.0             # relocation search radius [m]
     # Soft preference for forward drop poses; zero disables it.
     manip_forward_penalty: float = 2.0
+    # Score candidate drop poses using the remaining robot route.
+    manip_lookahead: bool = True
     manip_max_frames_per_action: int = 30
     # Penalty, in metres of obstacle travel, for reducing roadmap clearance.
     manip_blocked_edge_penalty_m: float = 0.0
@@ -93,21 +145,26 @@ class Config:
     grid_step: float = 0.3          # roadmap node spacing [m]
     conn_radius: float = 0.6        # roadmap connection radius [m]
 
+    strategy: str = DEFAULT_STRATEGY
     use_llm_ordering: bool = True
     max_expansions: int = 100000
 
     step_execute_edges: int = 1     # edges executed before re-perception
     max_replans: int = 10000
 
-    deepseek_api_key: str = "sk-2c5fc50b67184b348a49a538c017a21d"
+    deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_thinking: bool = True
+    deepseek_reasoning_effort: str = "low"
     llm_max_tokens: int | None = None
     llm_timeout: float = 300.0
     llm_max_retries: int = 2
     perception_llm_timeout: float = 60.0
     perception_llm_max_calls: int = 8
+
+    llm_choice_max_options: int = 10
+    llm_choice_reuse_decision: bool = True
 
     out_dir: str = "img"
     save_frames: bool = True
@@ -124,8 +181,41 @@ class Config:
     _log_flush: Callable[[], None] = field(default=lambda: None, repr=False)
 
     def __post_init__(self):
+        if self.random_map_obstacle_count < 4:
+            raise ValueError(
+                "random_map_obstacle_count must be at least 4")
+        if self.random_map_dynamic_obstacle_count < 0:
+            raise ValueError(
+                "random_map_dynamic_obstacle_count must be non-negative")
+        if (self.random_map_obstacle_count
+                < 4 + self.random_map_dynamic_obstacle_count):
+            raise ValueError(
+                "random_map_obstacle_count must leave room for the four "
+                "decision obstacles and configured dynamic obstacle")
+        if self.random_map_experiment_count < 1:
+            raise ValueError(
+                "random_map_experiment_count must be positive")
         self.lambda_distance = validate_lambda(self.lambda_distance)
         self.time_importance = validate_time_importance(self.time_importance)
+        self.strategy = validate_strategy(self.strategy)
+        self.deepseek_reasoning_effort = validate_reasoning_effort(
+            self.deepseek_reasoning_effort)
+
+    @property
+    def use_llm_cost(self) -> bool:
+        return STRATEGIES[self.strategy].llm_cost
+
+    @property
+    def use_llm_risk(self) -> bool:
+        return STRATEGIES[self.strategy].llm_risk
+
+    @property
+    def shortest_path_mode(self) -> bool:
+        return STRATEGIES[self.strategy].shortest
+
+    @property
+    def llm_choice(self) -> bool:
+        return STRATEGIES[self.strategy].llm_choice
 
     def free_profile(self) -> kinematics.MotionProfile:
         """Return the unloaded motion profile."""
