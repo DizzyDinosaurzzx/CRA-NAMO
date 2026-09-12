@@ -323,7 +323,7 @@ def create():
     cfg = Config(
         # A 0.8 m courier cannot squeeze through the 0.35 m gaps beside
         # corridor beds; this footprint also applies to execution and contact.
-        robot_radius=0.4,
+        robot_radius=0.3,
         grid_step=0.3,
         conn_radius=0.65,
         R_perc=7.5,

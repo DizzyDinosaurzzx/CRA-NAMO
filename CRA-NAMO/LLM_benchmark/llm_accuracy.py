@@ -154,6 +154,19 @@ def _load(name: str):
     return payload
 
 
+def _load_saved(name: str):
+    """读取已有 benchmark 快照，不用当前源码哈希将它判为过期。
+
+    仅供 ``replot`` 使用：该阶段明确要求复用旧数据，不把旧数据冒充成
+    当前代码重新运行的结果，也不会发出任何 API 请求。
+    """
+    path = os.path.join(OUT_DIR, name)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _preflight(cfg: Config) -> None:
     """启动并行请求前校验 API 连通性。"""
     import requests
@@ -1071,15 +1084,15 @@ def _repeatability(rows) -> dict:
 # 图表。
 
 def _chart_accuracy(rows, path: str):
-    """左图是估计值对参考值，右图是误差倍数的分布。"""
+    """把估计散点和误差 CDF 分别保存为两张论文图。"""
     plt = _plt()
-
-    fig, (ax, ax_cdf) = plt.subplots(
-        1, 2, figsize=(12.2, 6.0), gridspec_kw={"width_ratios": [1.35, 1.0]})
+    folder = os.path.dirname(path)
 
     # 按观测数据设置坐标轴范围，避免裁剪点。
     seen = [v for r in rows for v in (r["mu_rho_true"], r.get("pred")) if v]
     lo, hi = min(0.2, min(seen) / 1.6), max(3000.0, max(seen) * 1.6)
+
+    fig, ax = plt.subplots(figsize=(7.6, 6.1))
     ax.plot([lo, hi], [lo, hi], color=INK, lw=1.2, zorder=2)
     for band, alpha in ((2.0, 0.10), (1.5, 0.14)):
         ax.fill_between([lo, hi], [lo / band, hi / band], [lo * band, hi * band],
@@ -1116,9 +1129,13 @@ def _chart_accuracy(rows, path: str):
     ax.grid(True, which="major", color=GRID, lw=0.6, zorder=0)
     ax.text(0.02, 0.98, "shaded bands are 1.5x and 2x", transform=ax.transAxes,
             ha="left", va="top", fontsize=8.5, color=MUTED)
-    ax.legend(frameon=False, loc="lower right", fontsize=9)
+    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0),
+              borderaxespad=0, fontsize=9)
+    fig.subplots_adjust(right=0.75)
+    _save_fig(fig, path)
 
-    # 右图把误差换算成十门实验横轴上的「Gap 比例」。
+    # 误差 CDF 单独成图，并换算到十门实验的 Gap 比例横轴。
+    fig, ax_cdf = plt.subplots(figsize=(7.6, 5.5))
     arms = (("LLM", "pred", "#2a78d6", 14), ("offline heuristic", "heuristic",
                                              MUTED, -16))
     limit = 1.0
@@ -1157,14 +1174,14 @@ def _chart_accuracy(rows, path: str):
                 "vertical guides are the Gap ladder rungs in doors_gap.png",
                 transform=ax_cdf.transAxes, ha="left", va="top",
                 fontsize=8, color=MUTED)
-    ax_cdf.legend(frameon=False, loc="lower right", fontsize=9)
-
-    fig.tight_layout()
-    _save_fig(fig, path)
+    ax_cdf.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                  borderaxespad=0, fontsize=9)
+    fig.subplots_adjust(right=0.72, bottom=0.20)
+    _save_fig(fig, os.path.join(folder, "cost_error_cdf.png"))
 
 
 def _chart_risk(risk: dict, path: str):
-    """上排是每个阶段的混淆矩阵，下排是折算成米的代价。"""
+    """把三个混淆矩阵和风险误差代价分别保存为独立图片。"""
     plt = _plt()
     from matplotlib.colors import LinearSegmentedColormap
     from matplotlib.patches import Rectangle
@@ -1180,14 +1197,17 @@ def _chart_risk(risk: dict, path: str):
     short = {"medium_high": "med-high"}
     ticks = [short.get(name, name) for name in LEVELS]
     n = len(LEVELS)
+    folder = os.path.dirname(path)
+    file_by_key = {
+        "keyword": os.path.join(folder, "risk_confusion_keyword.png"),
+        "sight": path,
+        "contact": os.path.join(folder, "risk_confusion_contact.png"),
+    }
 
-    fig = plt.figure(figsize=(3.9 * len(grids) + 1.4, 7.0),
-                     constrained_layout=True)
-    spec = fig.add_gridspec(2, len(grids), height_ratios=[2.6, 1.0])
-    axes = [fig.add_subplot(spec[0, i]) for i in range(len(grids))]
-    ax_cost = fig.add_subplot(spec[1, :])
-
-    for ax, (name, grid, stat) in zip(axes, grids):
+    for name, key in arms:
+        grid = _risk_confusion(rows, key)
+        stat = _risk_stats(rows, key)
+        fig, ax = plt.subplots(figsize=(5.8, 5.2))
         ax.set_facecolor(SURFACE)
         for i in range(n):
             for j in range(n):
@@ -1217,16 +1237,19 @@ def _chart_risk(risk: dict, path: str):
         ax.tick_params(colors=MUTED, length=0)
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.set_title(f"{name}\n{stat['exact']:.0%} exact, "
-                     f"{stat['under']:.0%} too safe\n"
-                     f"{stat['mean_abs_levels']:.2f} levels off on average",
-                     color=INK, fontsize=9.5, loc="left", pad=8)
-
-    for ax in axes[1:]:
-        ax.set_yticklabels([])
-    axes[0].set_ylabel("reference risk level", color=INK, fontsize=9.5)
+        _style(ax, xlabel="predicted risk level",
+               ylabel="reference risk level", grid=None)
+        fig.suptitle(f"{name}: risk classification", x=0.19, y=0.98,
+                     ha="left", color=INK, fontsize=11)
+        fig.text(0.19, 0.915,
+                 f"{stat['exact']:.0%} exact  |  {stat['under']:.0%} too safe  |  "
+                 f"{stat['mean_abs_levels']:.2f} levels off on average",
+                 ha="left", va="top", fontsize=9, color=MUTED)
+        fig.subplots_adjust(left=0.19, right=0.96, bottom=0.20, top=0.82)
+        _save_fig(fig, file_by_key[key])
 
     # 把每个阶段的误判折算成米：缺失的保护和凭空多走的路。
+    fig, ax_cost = plt.subplots(figsize=(8.2, 4.8))
     names = [name for name, _, _ in grids]
     spots = list(range(len(names)))
     width = 0.36
@@ -1247,16 +1270,13 @@ def _chart_risk(risk: dict, path: str):
     ax_cost.invert_yaxis()
     ax_cost.margins(x=0.18)
     _style(ax_cost, xlabel="mean detour-equivalent error per object  [m]",
-           title="What each mistake is worth in the planner's own units",
            grid="x")
-    # 图例放到标题行右侧，否则会压住最长的那根柱子。
-    ax_cost.legend(frameon=False, fontsize=8.5, loc="lower right", ncol=2,
-                   bbox_to_anchor=(1.0, 1.0))
-
-    fig.supxlabel("level the estimator returned - left of the outline in the "
-                  "matrices is an obstacle called safer than it is",
-                  color=MUTED, fontsize=9)
-    _save_fig(fig, path)
+    fig.suptitle("What each mistake is worth in the planner's own units",
+                 x=0.30, y=0.98, ha="left", color=INK, fontsize=11)
+    ax_cost.legend(frameon=False, fontsize=9, loc="lower center", ncol=2,
+                   bbox_to_anchor=(0.5, 1.08), borderaxespad=0)
+    fig.subplots_adjust(left=0.30, right=0.95, bottom=0.17, top=0.72)
+    _save_fig(fig, os.path.join(folder, "risk_error_cost.png"))
 
 
 # 十门结果的汇总与导出。
@@ -1399,6 +1419,16 @@ def _plt():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # 论文图统一使用 Times New Roman；STIX 让数学符号与正文字体协调。
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman"],
+        "mathtext.fontset": "stix",
+        "axes.unicode_minus": False,
+        "figure.facecolor": SURFACE,
+        "axes.facecolor": SURFACE,
+        "savefig.facecolor": SURFACE,
+    })
     return plt
 
 
@@ -1425,7 +1455,8 @@ def _save_fig(fig, path: str):
     folder = os.path.dirname(path)
     if folder:
         os.makedirs(folder, exist_ok=True)
-    fig.savefig(path, dpi=160, facecolor=SURFACE)
+    fig.savefig(path, dpi=200, facecolor=SURFACE,
+                bbox_inches="tight", pad_inches=0.16)
     _plt().close(fig)
     log(f"wrote {path}")
 
@@ -1461,18 +1492,17 @@ def _measured_risk_gap(risk: Optional[dict]) -> Optional[float]:
 
 def _chart_doors_gap(doors: dict, accuracy: Optional[dict],
                      risk: Optional[dict], path: str):
-    """四格图：Gap 比例分别换来多少 C、多少决策改动和多少危险搬移。"""
+    """把四项路线敏感性指标分别保存为独立图片。"""
     plt = _plt()
     runs = doors["runs"]
     cost_ladder = doors["ladders"]["cost"]
     risk_ladder = doors["ladders"]["risk"]
     joint_ladder = doors["ladders"]["joint"]
     measured = _measured_accuracy(accuracy)
-
-    fig, axes = plt.subplots(2, 2, figsize=(12.4, 8.4))
-    ax_c, ax_d, ax_r, ax_s = axes[0][0], axes[0][1], axes[1][0], axes[1][1]
+    folder = os.path.dirname(path)
 
     # 1. ΔC 随代价 Gap 比例的变化。
+    fig_c, ax_c = plt.subplots(figsize=(8.2, 5.7))
     ratios = [1.0] + [r["cost_ratio"] for r in cost_ladder]
     for direction in DOORS_DIRECTIONS:
         colour, marker = DIRECTION_STYLE[direction]
@@ -1503,20 +1533,28 @@ def _chart_doors_gap(doors: dict, accuracy: Optional[dict],
             ax_c.axvline(x, color=INK, lw=1.0, ls=style, zorder=2)
             # 靠近右边界时改成向左标注，否则文字会跑出坐标区。
             right = x > mid
+            dy = 29 if key == "median" else -25
             ax_c.annotate(f"measured {key} miss {x:.1f}x -> {y:+.1f}% C",
-                          xy=(x, y), xytext=(-8 if right else 8, 10),
+                          xy=(x, y), xytext=(-8 if right else 8, dy),
                           textcoords="offset points", fontsize=8.5, color=INK,
-                          ha="right" if right else "left")
+                          ha="right" if right else "left",
+                          va="bottom" if dy > 0 else "top",
+                          arrowprops={"arrowstyle": "-", "color": MUTED,
+                                      "lw": 0.7})
             ax_c.scatter([x], [y], s=44, color=INK, zorder=5)
 
     ax_c.axhline(0, color=INK, lw=0.9, zorder=2)
     _ratio_axis(ax_c, ratios)
     _style(ax_c, xlabel="cost Gap ratio F = estimate / truth",
            ylabel="change from exact C  [%]",
-           title="1. What an estimate that is off by F costs the route")
-    ax_c.legend(frameon=False, fontsize=8.5, loc="upper left")
+           title="What an estimate that is off by F costs the route")
+    ax_c.legend(frameon=False, fontsize=9, loc="upper left",
+                bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+    fig_c.subplots_adjust(right=0.69, bottom=0.18)
+    _save_fig(fig_c, path)
 
     # 2. 改变的决策数。
+    fig_d, ax_d = plt.subplots(figsize=(7.7, 5.3))
     for direction in DOORS_DIRECTIONS:
         colour, marker = DIRECTION_STYLE[direction]
         points = _doors_curve(runs, "cost", direction, cost_ladder)
@@ -1527,14 +1565,23 @@ def _chart_doors_gap(doors: dict, accuracy: Optional[dict],
                   color=colour, marker=marker, lw=1.9, ms=5,
                   label=DIRECTION_LABEL[direction], zorder=3)
     n_gates = len(doors["gate_summary"])
-    ax_d.set_ylim(0, n_gates)
+    visible_max = max(
+        [s["mean_changed"]
+         for direction in DOORS_DIRECTIONS
+         for _, s in _doors_curve(runs, "cost", direction, cost_ladder)]
+        or [0.0])
+    ax_d.set_ylim(-0.05, max(1.2, visible_max * 1.25))
     _ratio_axis(ax_d, ratios)
     _style(ax_d, xlabel="cost Gap ratio F = estimate / truth",
            ylabel=f"gates decided differently  [of {n_gates}]",
-           title="2. How many of the ten decisions the error moves")
-    ax_d.legend(frameon=False, fontsize=8.5, loc="upper left")
+           title="How many of the ten decisions the error moves")
+    ax_d.legend(frameon=False, fontsize=9, loc="upper left",
+                bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+    fig_d.subplots_adjust(right=0.73, bottom=0.19)
+    _save_fig(fig_d, os.path.join(folder, "doors_gate_changes.png"))
 
     # 3. 风险等级偏差和联合梯度。
+    fig_r, ax_r = plt.subplots(figsize=(8.0, 5.3))
     width = 0.26
     shifts = [0] + [r["risk_shift"] for r in risk_ladder]
     for i, direction in enumerate(DOORS_DIRECTIONS):
@@ -1560,10 +1607,14 @@ def _chart_doors_gap(doors: dict, accuracy: Optional[dict],
     ax_r.set_xticks(shifts)
     _style(ax_r, xlabel="risk Gap K = levels between estimate and reference",
            ylabel="change from exact C  [%]",
-           title="3. What a mis-rated risk level costs")
-    ax_r.legend(frameon=False, fontsize=8.5, loc="upper left")
+           title="What a mis-rated risk level costs")
+    ax_r.legend(frameon=False, fontsize=9, loc="upper left",
+                bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+    fig_r.subplots_adjust(right=0.70, bottom=0.18)
+    _save_fig(fig_r, os.path.join(folder, "doors_risk_gap.png"))
 
     # 4. 多出来的 C 花在了哪里。
+    fig_s, ax_s = plt.subplots(figsize=(7.7, 5.1))
     parts = (("delta_walk", "driving", "#9ec5f4"),
              ("delta_work", "pushing", "#2a78d6"),
              ("delta_risk", "risk surcharge", "#eb6834"))
@@ -1592,22 +1643,19 @@ def _chart_doors_gap(doors: dict, accuracy: Optional[dict],
                          fontsize=8)
     _style(ax_s, xlabel="cost Gap ratio F  (random-direction arm)",
            ylabel="change from exact  [J]",
-           title="4. Where the extra cost is spent")
-    ax_s.legend(frameon=False, fontsize=8.5, loc="upper left")
-
-    subtitle = ("C is re-priced at the reference risk level, so a run that "
-                "called a hazard safe pays for it here")
-    if measured:
-        subtitle = f"model {measured['model']} - " + subtitle
-    fig.suptitle("Estimate error on the ten-gate corridor", x=0.012, ha="left",
-                 color=INK, fontsize=13)
-    fig.supxlabel(subtitle, color=MUTED, fontsize=9)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.965))
-    _save_fig(fig, path)
+           title="Where the extra cost is spent")
+    ax_s.legend(frameon=False, fontsize=9, loc="upper left",
+                bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+    ax_s.text(0.0, -0.24,
+              "C is re-priced at the reference risk level.",
+              transform=ax_s.transAxes, ha="left", va="top",
+              fontsize=8.5, color=MUTED)
+    fig_s.subplots_adjust(right=0.74, bottom=0.25)
+    _save_fig(fig_s, os.path.join(folder, "doors_cost_breakdown.png"))
 
 
 def _chart_doors_gates(doors: dict, path: str):
-    """逐门热力图：哪一道门在多大的 Gap 上开始改主意。"""
+    """把 cost 与 risk 的逐门翻转热力图分别保存。"""
     plt = _plt()
     from matplotlib.colors import LinearSegmentedColormap
 
@@ -1619,15 +1667,12 @@ def _chart_doors_gates(doors: dict, path: str):
     cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUE)
     base = doors["runs"][0]
     summary = {g["gate"]: g for g in doors["gate_summary"]}
+    folder = os.path.dirname(path)
 
-    fig, axes = plt.subplots(
-        1, len(panels), figsize=(5.6 * len(panels) + 1.6, 5.2),
-        gridspec_kw={"width_ratios": [len(doors["ladders"][p[0]])
-                                      for p in panels]})
-    axes = list(axes) if len(panels) > 1 else [axes]
-
-    for ax, (family, axis, xlabel) in zip(axes, panels):
+    for family, axis, xlabel in panels:
         gate_ids, ticks, grid = _doors_flip_grid(doors, family, axis)
+        width = 8.9 if family == "cost" else 7.2
+        fig, ax = plt.subplots(figsize=(width, 5.7))
         ax.set_facecolor(SURFACE)
         for i, row in enumerate(grid):
             for j, share in enumerate(row):
@@ -1658,14 +1703,90 @@ def _chart_doors_gates(doors: dict, path: str):
             spine.set_visible(False)
         _style(ax, xlabel=xlabel, grid=None,
                title=f"{FAMILY_LABEL[family]} Gap")
+        ax.set_ylabel("gate, its design margin, and what exact chose",
+                      color=INK, fontsize=9.5)
+        ax.text(0.0, -0.18,
+                "Cell value: share of runs choosing differently from exact.",
+                transform=ax.transAxes, ha="left", va="top",
+                color=MUTED, fontsize=8.5)
+        fig.subplots_adjust(left=0.37 if family == "cost" else 0.46,
+                            right=0.97, bottom=0.23, top=0.90)
+        out = path if family == "cost" else os.path.join(
+            folder, "doors_gates_risk.png")
+        _save_fig(fig, out)
 
-    for ax in axes[1:]:
-        ax.set_yticklabels([])
-    axes[0].set_ylabel("gate, its design margin, and what exact chose",
-                       color=INK, fontsize=9.5)
-    fig.supxlabel("share of runs at that Gap that decided the gate differently "
-                  "from the exact run", color=MUTED, fontsize=9)
-    fig.tight_layout()
+
+def _chart_size(size: dict, path: str):
+    """用每个物体的最大/最小输出比显示尺寸泄漏。"""
+    plt = _plt()
+    rows = []
+    for row in size["rows"]:
+        values = [v for v in row["by_scale"].values() if v and v > 0]
+        if len(values) >= 2:
+            rows.append((max(values) / min(values), row["label"]))
+    rows.sort()
+    if not rows:
+        return
+
+    fig, ax = plt.subplots(figsize=(8.5, 6.1))
+    spreads = [spread for spread, _ in rows]
+    labels = [label for _, label in rows]
+    colours = ["#2a78d6" if spread <= 1.0001 else "#9ec5f4"
+               for spread in spreads]
+    spots = list(range(len(rows)))
+    ax.barh(spots, [spread - 1.0 for spread in spreads], left=1.0,
+            color=colours, height=0.66, zorder=3)
+    for y, spread in zip(spots, spreads):
+        ax.text(spread + 0.025, y, f"{spread:.2f}x", va="center",
+                fontsize=8.5, color=INK)
+    ax.axvline(1.0, color=INK, lw=1.0, zorder=4)
+    ax.set_yticks(spots)
+    ax.set_yticklabels(labels, fontsize=8.5)
+    ax.set_xlim(0.98, max(spreads) * 1.12)
+    _style(ax, xlabel="spread = maximum estimate / minimum estimate",
+           grid="x")
+    fig.suptitle("Size leakage in the estimated mu*rho", x=0.43, y=0.98,
+                 ha="left", color=INK, fontsize=11)
+    fig.text(0.43, 0.925,
+             "Ideal size-independent estimate = 1.00x across 0.5x, 1x and 2x scale",
+             ha="left", va="top", fontsize=9, color=MUTED)
+    fig.subplots_adjust(left=0.43, right=0.95, bottom=0.13, top=0.84)
+    _save_fig(fig, path)
+
+
+def _chart_order(order: dict, path: str):
+    """显示 anchor 顺序变化后的输出集中与复制比例。"""
+    plt = _plt()
+    variants = order["variants"]
+    names = [v["tag"] for v in variants]
+    spots = np.arange(len(variants), dtype=float)
+    width = 0.24
+    series = (
+        ("modal answer share", "modal_share", "#2a78d6"),
+        ("equals first row", "on_first_row", "#9ec5f4"),
+        ("equals largest anchor", "on_max", "#eb6834"),
+    )
+
+    fig, ax = plt.subplots(figsize=(7.8, 5.1))
+    for i, (label, key, colour) in enumerate(series):
+        values = [100.0 * (v.get(key) or 0.0) for v in variants]
+        ax.bar(spots + (i - 1) * width, values, width=width,
+               color=colour, label=label, zorder=3)
+    for x, variant in zip(spots, variants):
+        y = 100.0 * (variant.get("modal_share") or 0.0)
+        ax.text(x - width, y + 0.35,
+                f"mode = {variant['modal_value']:g}", ha="center",
+                va="bottom", fontsize=8, color=INK, rotation=20)
+    ax.set_xticks(spots)
+    ax.set_xticklabels(names)
+    ax.set_ylim(0, max(10.0, ax.get_ylim()[1] * 1.12))
+    _style(ax, xlabel="anchor-table order", ylabel="share of valid replies  [%]",
+           grid="y")
+    fig.suptitle("Prompt-order sensitivity of off-table estimates",
+                 x=0.13, y=0.98, ha="left", color=INK, fontsize=11)
+    ax.legend(frameon=False, fontsize=9, loc="lower center", ncol=3,
+              bbox_to_anchor=(0.5, 1.08), borderaxespad=0)
+    fig.subplots_adjust(left=0.13, right=0.97, bottom=0.15, top=0.72)
     _save_fig(fig, path)
 
 
@@ -2245,6 +2366,11 @@ def stage_report() -> str:
     _chart_accuracy(rows, os.path.join(OUT_DIR, "cost_accuracy.png"))
     if risk:
         _chart_risk(risk, os.path.join(OUT_DIR, "risk.png"))
+    if size:
+        _chart_size(size, os.path.join(OUT_DIR, "size_independence.png"))
+    if order:
+        _chart_order(order, os.path.join(
+            OUT_DIR, "prompt_order_sensitivity.png"))
     if doors:
         _write_doors_csv(doors)
         _chart_doors_gap(doors, acc, risk,
@@ -2253,8 +2379,47 @@ def stage_report() -> str:
     return path
 
 
+def stage_replot() -> List[str]:
+    """只用磁盘中已有的 JSON 快照重绘所有统计图，不调用 API。"""
+    acc = _load_saved("accuracy.json")
+    risk = _load_saved("risk.json")
+    size = _load_saved("size.json")
+    order = _load_saved("order.json")
+    doors = _load_saved("doors.json")
+    if not acc:
+        raise SystemExit("replot: no saved accuracy.json")
+
+    log("replot: using saved snapshots; no API calls and no planner runs")
+    _chart_accuracy(acc["rows"], os.path.join(OUT_DIR, "cost_accuracy.png"))
+    if risk and _risk_measured(risk):
+        _chart_risk(risk, os.path.join(OUT_DIR, "risk.png"))
+    if size:
+        _chart_size(size, os.path.join(OUT_DIR, "size_independence.png"))
+    if order:
+        _chart_order(order, os.path.join(
+            OUT_DIR, "prompt_order_sensitivity.png"))
+    if doors:
+        _chart_doors_gap(doors, acc, risk,
+                         os.path.join(OUT_DIR, "doors_gap.png"))
+        _chart_doors_gates(doors, os.path.join(OUT_DIR, "doors_gates.png"))
+
+    names = (
+        "cost_accuracy.png", "cost_error_cdf.png", "risk.png",
+        "risk_confusion_keyword.png", "risk_confusion_contact.png",
+        "risk_error_cost.png", "size_independence.png",
+        "prompt_order_sensitivity.png", "doors_gap.png",
+        "doors_gate_changes.png", "doors_risk_gap.png",
+        "doors_cost_breakdown.png", "doors_gates.png",
+        "doors_gates_risk.png",
+    )
+    made = [os.path.join(OUT_DIR, name) for name in names
+            if os.path.exists(os.path.join(OUT_DIR, name))]
+    log(f"replot: wrote {len(made)} single-chart images")
+    return made
+
+
 STAGES = ("accuracy", "risk", "size", "order", "doors", "doors-calibrate",
-          "report", "all")
+          "report", "replot", "all")
 # `all` 不包含 doors-calibrate：它只在改过地图之后需要重跑一次。
 ALL_STAGES = ("accuracy", "risk", "size", "order", "doors", "report")
 
@@ -2300,6 +2465,8 @@ def main():
                     not args.no_doors_shots)
     if "report" in wanted:
         stage_report()
+    if "replot" in wanted:
+        stage_replot()
 
 
 if __name__ == "__main__":

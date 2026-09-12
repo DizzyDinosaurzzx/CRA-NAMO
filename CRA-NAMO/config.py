@@ -74,7 +74,7 @@ def validate_lambda(value: float) -> float:
 class Config:
     """Configuration shared by planning, execution, and visualization."""
 
-    robot_radius: float = 0.1
+    robot_radius: float = 0.3
 
     # Seeded-random map generation. obstacle_count is the total number of
     # movable obstacles (decision, dynamic, and background obstacles combined).

@@ -245,28 +245,37 @@ def plan_contact(obs,
     parent = np.full((t_total, k), -1, dtype=np.int64)
     idx = np.arange(k)
     shifts = range(-max_shift, max_shift + 1)
+    # 环形移位改用预先算好的下标做花式索引。np.roll 的固定开销（展平、归一化
+    # 轴、再递归调用自己）远大于这里的实际搬运量，而这两层循环要移位上百万次。
+    take = {s: (idx + s) % k for s in shifts}       # 等价于 np.roll(a, -s)
+    give = {s: (idx - s) % k for s in shifts}       # 等价于 np.roll(a,  s)
+    lever_take = {s: has_lever[take[s]] for s in shifts}    # 循环不变量。
     for t in range(t_total - 1):
         feas_next = feas[t + 1]
         # 转向步要求两端抓握点都能提供所需力矩。
         turning = turns[t]
         src_cost = np.where(has_lever, cost, _INF) if turning else cost
+        # 滑移经过的每个站点在下一姿态都必须空闲。相邻 shift 的窗口只差一个
+        # 站点，于是按 |shift| 递推，把逐个重算的 O(max_shift^2) 降到 O(max_shift)。
+        slide = {0: feas_next}
+        for s in range(1, max_shift + 1):
+            slide[s] = slide[s - 1] & feas_next[take[s]]
+            slide[-s] = slide[1 - s] & feas_next[take[-s]]
         best = np.full(k, _INF)
         best_src = np.full(k, -1, dtype=np.int64)
+        cur, nxt = world[t], world[t + 1]
         for shift in shifts:
-            # 滑移经过的每个站点在下一姿态都必须空闲。
-            slide_ok = np.ones(k, dtype=bool)
-            span = range(0, shift + 1) if shift >= 0 else range(shift, 1)
-            for e in span:
-                slide_ok &= np.roll(feas_next, -e)
+            slide_ok = slide[shift]
             if turning:
-                slide_ok &= np.roll(has_lever, -shift)
-            step = np.linalg.norm(np.roll(world[t + 1], -shift, axis=0) - world[t],
-                                  axis=1)
+                slide_ok = slide_ok & lever_take[shift]
+            d = nxt[take[shift]] - cur
+            step = np.sqrt(d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1])
             cand = np.where(slide_ok, src_cost + step, _INF)
-            cand = np.roll(cand, shift)          # 将源站点 s 分散到目标 s+shift
+            back = give[shift]
+            cand = cand[back]                # 将源站点 s 分散到目标 s+shift
             upd = cand < best
             best[upd] = cand[upd]
-            best_src[upd] = (idx[upd] - shift) % k
+            best_src[upd] = back[upd]
         cost, parent[t + 1] = best, best_src
         if not np.isfinite(cost).any():
             return ContactPlan(
