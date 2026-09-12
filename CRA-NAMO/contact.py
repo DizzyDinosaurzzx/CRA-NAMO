@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -64,8 +65,13 @@ def idle_plan(robot_pos: XY, n_poses: int) -> ContactPlan:
     return ContactPlan(True, "", [tuple(robot_pos)] * (max(1, n_poses) + 2), 1, 0.0)
 
 
+@lru_cache(maxsize=256)
 def contact_stations(l: float, d: float, r: float, spacing: float) -> np.ndarray:
-    """返回矩形周围等间距的接触中心。"""
+    """返回矩形周围等间距的接触中心。
+
+    只取决于这四个数，而每验证一条搬移路径就要算一遍，所以记住。返回的数组
+    各调用方都只读不写。
+    """
     hl, hd = l / 2.0, d / 2.0
     quarter = 0.5 * math.pi * r
     # 各段沿矩形边界逆时针排列。
@@ -155,6 +161,65 @@ def _clear_line(a: XY, b: XY, free_geom, blocked_geom, trim: float) -> bool:
     return not shapely.intersects(blocked_geom, inner)
 
 
+_BODY_CACHE: Dict[tuple, tuple] = {}
+_BODY_CACHE_MAX = 4096
+
+
+def _with_body(obs, pose: Pose, others_inflated, grow: float):
+    """返回把物体本体并进禁行区之后的接近/离开障碍几何。
+
+    一次搬移的首尾两个姿态会被反复问到，而这里要做一次缓冲、一次并集和一次
+    预处理，是接触规划里最贵的几笔几何运算之一。缓存的值里一并留着 others
+    的强引用，这样拿它的 id 当键不会因为对象被回收、地址被复用而串味。
+    """
+    key = (id(others_inflated), obs.l, obs.d, tuple(pose), grow)
+    hit = _BODY_CACHE.get(key)
+    if hit is not None:
+        return hit[1]
+    body = obs.polygon_at(pose[0], pose[1], pose[2]).buffer(grow)
+    merged = body if others_inflated is None else others_inflated.union(body)
+    shapely.prepare(merged)
+    if len(_BODY_CACHE) >= _BODY_CACHE_MAX:
+        _BODY_CACHE.clear()
+    _BODY_CACHE[key] = (others_inflated, merged)
+    return merged
+
+
+def _clear_lines(starts, ends: np.ndarray, free_geom, blocked_geom,
+                 trim: float) -> np.ndarray:
+    """批量版 `_clear_line`：一次判定一组直线段。
+
+    `starts` 可以是单个点，此时对每条线段广播。逐条去问 shapely 要新建两个
+    几何对象、再过一层 Python 装饰器，而接近和释放两段都要把抓握点挨个试一
+    遍，一轮下来是几十万次。这里换成整数组一次调用，底下用的仍是同一批 GEOS
+    函数，判据和先后顺序都没有变。
+    """
+    ends = np.asarray(ends, dtype=float)
+    n = len(ends)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    start = np.asarray(starts, dtype=float)
+    if start.ndim == 1:
+        start = np.broadcast_to(start, ends.shape)
+    segs = shapely.linestrings(np.stack([start, ends], axis=1))
+    ok = shapely.contains(free_geom, segs)
+    if blocked_geom is None:
+        return ok
+    length = shapely.length(segs)
+    # 太短的线段整条都在两端的裁剪长度以内，原判据直接放行。
+    long = ok & (length > 2.0 * trim)
+    if not long.any():
+        return ok
+    sub = segs[long]
+    head = shapely.line_interpolate_point(sub, trim)
+    tail = shapely.line_interpolate_point(sub, length[long] - trim)
+    inner = shapely.linestrings(
+        np.stack([shapely.get_coordinates(head),
+                  shapely.get_coordinates(tail)], axis=1))
+    ok[long] = ~shapely.intersects(blocked_geom, inner)
+    return ok
+
+
 def _standable(p: XY, blockers, free_geom) -> Optional[XY]:
     """返回路线图参考点附近最近的可行机器人位置。"""
     if not shapely.intersects_xy(blockers, *p):
@@ -215,14 +280,9 @@ def plan_contact(obs,
         return ContactPlan(False, "no reachable grip point on this obstacle")
 
     # 物体本体阻挡接近和离开路径，但不阻挡自身接触站点。
-    def _with_body(pose: Pose):
-        body = obs.polygon_at(pose[0], pose[1], pose[2]).buffer(max(r - tol, 0.0))
-        merged = body if others_inflated is None else others_inflated.union(body)
-        shapely.prepare(merged)
-        return merged
-
-    approach_blockers = _with_body(poses[0])
-    exit_blockers = approach_blockers if len(poses) == 1 else _with_body(poses[-1])
+    approach_blockers = _with_body(obs, poses[0], others_inflated, max(r - tol, 0.0))
+    exit_blockers = (approach_blockers if len(poses) == 1 else
+                     _with_body(obs, poses[-1], others_inflated, max(r - tol, 0.0)))
 
     # 路线图参考点可能位于物体内部，因此直线检查使用可站立点。
     start_ref = _standable(robot_start, approach_blockers, free_geom)
@@ -232,10 +292,13 @@ def plan_contact(obs,
                  for p in exit_pts]
 
     cost = np.full(k, _INF)
-    for s in np.flatnonzero(feas[0]):
-        p = (float(world[0, s, 0]), float(world[0, s, 1]))
-        if start_ref is not None and _clear_line(start_ref, p, free_geom,
-                                                 approach_blockers, r):
+    reachable = np.flatnonzero(feas[0])
+    if start_ref is not None and len(reachable):
+        clear = _clear_lines(start_ref, world[0][reachable], free_geom,
+                             approach_blockers, r)
+        for s in reachable[clear]:
+            s = int(s)
+            p = (float(world[0, s, 0]), float(world[0, s, 1]))
             cost[s] = math.dist(robot_start, p)
     if not np.isfinite(cost).any():
         return ContactPlan(
@@ -247,9 +310,15 @@ def plan_contact(obs,
     shifts = range(-max_shift, max_shift + 1)
     # 环形移位改用预先算好的下标做花式索引。np.roll 的固定开销（展平、归一化
     # 轴、再递归调用自己）远大于这里的实际搬运量，而这两层循环要移位上百万次。
-    take = {s: (idx + s) % k for s in shifts}       # 等价于 np.roll(a, -s)
-    give = {s: (idx - s) % k for s in shifts}       # 等价于 np.roll(a,  s)
-    lever_take = {s: has_lever[take[s]] for s in shifts}    # 循环不变量。
+    # 所有 shift 叠成一根轴：每步的数组都只有几十个元素，numpy 的每次调用固定
+    # 开销比算术本身还贵，逐个 shift 循环等于把这份开销乘上七八遍。
+    n_shift = 2 * max_shift + 1
+    zero = max_shift                               # shift=0 在这根轴上的下标
+    TAKE = np.stack([(idx + s) % k for s in shifts])        # 等价于 np.roll(a, -s)
+    GIVE = np.stack([(idx - s) % k for s in shifts])        # 等价于 np.roll(a,  s)
+    ROWS = np.arange(n_shift)[:, None]                      # 花式索引用的行下标
+    LEVER = has_lever[TAKE]                                 # 循环不变量。
+    slide = np.empty((n_shift, k), dtype=bool)
     for t in range(t_total - 1):
         feas_next = feas[t + 1]
         # 转向步要求两端抓握点都能提供所需力矩。
@@ -257,25 +326,21 @@ def plan_contact(obs,
         src_cost = np.where(has_lever, cost, _INF) if turning else cost
         # 滑移经过的每个站点在下一姿态都必须空闲。相邻 shift 的窗口只差一个
         # 站点，于是按 |shift| 递推，把逐个重算的 O(max_shift^2) 降到 O(max_shift)。
-        slide = {0: feas_next}
+        slide[zero] = feas_next
         for s in range(1, max_shift + 1):
-            slide[s] = slide[s - 1] & feas_next[take[s]]
-            slide[-s] = slide[1 - s] & feas_next[take[-s]]
-        best = np.full(k, _INF)
-        best_src = np.full(k, -1, dtype=np.int64)
+            slide[zero + s] = slide[zero + s - 1] & feas_next[TAKE[zero + s]]
+            slide[zero - s] = slide[zero - s + 1] & feas_next[TAKE[zero - s]]
+        ok = slide & LEVER if turning else slide
         cur, nxt = world[t], world[t + 1]
-        for shift in shifts:
-            slide_ok = slide[shift]
-            if turning:
-                slide_ok = slide_ok & lever_take[shift]
-            d = nxt[take[shift]] - cur
-            step = np.sqrt(d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1])
-            cand = np.where(slide_ok, src_cost + step, _INF)
-            back = give[shift]
-            cand = cand[back]                # 将源站点 s 分散到目标 s+shift
-            upd = cand < best
-            best[upd] = cand[upd]
-            best_src[upd] = back[upd]
+        d = nxt[TAKE] - cur
+        step = np.sqrt(d[:, :, 0] * d[:, :, 0] + d[:, :, 1] * d[:, :, 1])
+        cand = np.where(ok, src_cost + step, _INF)
+        # 将源站点 s 分散到目标 s+shift，再在各 shift 之间取最优。
+        cand = cand[ROWS, GIVE]
+        pick = np.argmin(cand, axis=0)         # 并列时取靠前的 shift，与逐个比较一致
+        best = cand[pick, idx]
+        # 一个可行来源都没有时保持 -1，对应原来「严格小于才更新」的写法。
+        best_src = np.where(best < _INF, GIVE[pick, idx], -1)
         cost, parent[t + 1] = best, best_src
         if not np.isfinite(cost).any():
             return ContactPlan(
@@ -285,14 +350,34 @@ def plan_contact(obs,
     exit_dist = np.linalg.norm(world[-1][:, None, :] - exit_pts[None, :, :], axis=2)
     total = cost[:, None] + exit_dist + exit_detour[None, :]
     chosen, chosen_exit = -1, -1
-    for flat in np.argsort(total, axis=None):
-        st, ex = divmod(int(flat), len(exits))
-        if not np.isfinite(total[st, ex]):
-            break
-        p = (float(world[-1, st, 0]), float(world[-1, st, 1]))
-        ref = exit_refs[ex]
-        if ref is not None and _clear_line(p, ref, free_geom, exit_blockers, r):
-            chosen, chosen_exit = st, ex
+    n_exit = len(exits)
+    order = np.argsort(total, axis=None)
+    flat_total = total.ravel()
+    # 仍然按原顺序取第一个可行的释放点，只是每次成批地问，而不是一条一条问。
+    # 实测平均要试二十来个才成功，一次问一批远比逐条便宜。
+    step_size = 32
+    for i0 in range(0, len(order), step_size):
+        chunk = order[i0:i0 + step_size]
+        finite = np.isfinite(flat_total[chunk])
+        exhausted = not finite.all()
+        if exhausted:                    # 升序排过，后面只会更差，就此打住
+            chunk = chunk[:int(np.argmin(finite))]
+        if len(chunk):
+            sts, exs = np.divmod(chunk.astype(np.int64), n_exit)
+            usable = np.array([exit_refs[int(e)] is not None for e in exs])
+            ok = np.zeros(len(chunk), dtype=bool)
+            if usable.any():
+                sel = np.flatnonzero(usable)
+                refs = np.array([exit_refs[int(exs[j])] for j in sel],
+                                dtype=float)
+                ok[sel] = _clear_lines(world[-1][sts[sel]], refs, free_geom,
+                                       exit_blockers, r)
+            hit = np.flatnonzero(ok)
+            if len(hit):
+                j = int(hit[0])
+                chosen, chosen_exit = int(sts[j]), int(exs[j])
+                break
+        if exhausted:
             break
     if chosen < 0:
         return ContactPlan(False, "robot cannot leave the obstacle after moving it")

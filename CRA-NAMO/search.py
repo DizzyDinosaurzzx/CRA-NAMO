@@ -84,6 +84,13 @@ class Planner:
         self._allowed: Optional[set] = None
         # 枚举候选时同一 belief 只清一次缓存，让各候选复用搬移规划结果。
         self._suppress_flush = False
+        # 落点可行性：按 (belief 版本, 目标节点) 整体作废。
+        self._goal_node: Optional[int] = None
+        self._reach_at: tuple = ()
+        self._reach_witness: Dict[tuple, frozenset] = {}
+        self._stuck_cache: Dict[EdgeKey, frozenset] = {}
+        self._blocked_cache: Dict[tuple, frozenset] = {}
+        self._reach_cache: Dict[tuple, bool] = {}
 
     def plan(self, start_node: int, goal_node: int,
              start_heading: Optional[float] = None,
@@ -100,8 +107,7 @@ class Planner:
         rm = self.roadmap
         cfg = self.cfg
         gx, gy = rm.nodes[goal_node]
-
-        # 只有目标函数计入时间时才跟踪航向。
+        self._goal_node = goal_node
         track = cfg.time_importance > 0.0
         profile = cfg.free_profile()
 
@@ -114,6 +120,7 @@ class Planner:
         # 新观测会使缓存的清除计划失效。
         if self.belief.changed and not self._suppress_flush:
             self.forget_removals()
+        self._refresh_reach()
 
         def h(node):
             x, y = rm.nodes[node]
@@ -337,7 +344,7 @@ class Planner:
         # 失败搬移按姿态和边记录，与代价 belief 无关。
         fail_key = (move_signature(obs), key)
         # 只复用与当前 belief、难度和风险绑定的结果。
-        cache_key = (fail_key, self.belief.version,
+        cache_key = (fail_key, self.belief.version, self._goal_node,
                      round(estimated_diff, 6), self._risk_to_charge(oid),
                      tuple(sorted(moved_ahead.items())))
         # 不恢复执行器已经拒绝的搬移。
@@ -397,6 +404,7 @@ class Planner:
                 return plan.feasible
         # 按完整搬移代价评估候选，而不是只看推动距离。
         best = math.inf
+        shut_in = 0             # 因为放下之后路不通而作废的落点数。
         for path, push_cost, goal in manipulation.move_se2_options(
                 obs, clear_polys, self.roadmap.static_obstacles, bounds_xy,
                 robot_pos, self.cfg, others_polys=others,
@@ -406,6 +414,12 @@ class Planner:
                 self.cfg, cost.manipulation_work(estimated_diff, push_cost), 0.0)
             if floor >= best:
                 break
+            # 落点判据排在接触验证之前。单次判定并不比接触规划便宜，但它的
+            # 否决率高得多，挡下来的每一个落点都省掉一整次接触规划；实测挪到
+            # 后面会让多障碍物的场景慢两成。
+            if not self._drop_allowed(oid, obs, key, goal):
+                shut_in += 1
+                continue
             plan = (_contact_for(path) if self.cfg.contact_required
                     else contact.idle_plan(mid, len(path)))
             if not plan.feasible:
@@ -419,6 +433,9 @@ class Planner:
                 best = total
                 feasible = True
                 move_path, drop, move_dist, cplan = path, goal, push_cost, plan
+        if shut_in:
+            self.cfg.log(f"[drop] oid={oid} refused {shut_in:,} pose(s) that "
+                         "would leave no way on")
         if not feasible and rejected:
             # 汇总其他条件有效的障碍物路径被拒绝的原因。
             counts = Counter(rejected).most_common(2)
@@ -433,6 +450,106 @@ class Planner:
         res = (feasible, work, drop, move_dist, move_path, cplan)
         self._persistent_removal_cache[cache_key] = res
         return res
+
+    # ---- 落点可行性：搬完之后路还通不通。----
+
+    def _refresh_reach(self):
+        """belief 或目标一变，之前判过的落点就得重判。"""
+        at = (self.belief.version, self._goal_node)
+        if at == self._reach_at:
+            return
+        self._reach_at = at
+        self._blocked_cache.clear()
+        self._reach_cache.clear()
+        self._reach_witness.clear()
+        self._stuck_cache.clear()
+
+    def _edge_passable(self, skip: Optional[int], key: EdgeKey) -> bool:
+        """这条边上除 skip 以外的阻挡物是否都还允许搬走。
+
+        宽度优先搜索一轮要问上百万次，而一条边上到底有哪些搬不动的东西只取决
+        于 belief，所以按边记下来，只在第一次问到时才去逐个判定。
+        """
+        stuck = self._stuck_cache.get(key)
+        if stuck is None:
+            stuck = frozenset(
+                oid for oid in self.belief.blockers_of(key)
+                if self._off_limits(oid, self.belief.obstacle(oid)))
+            self._stuck_cache[key] = stuck
+        return not stuck or not (stuck - {skip})
+
+    def _blocked_edges(self, obs, goal_pose) -> frozenset:
+        """返回障碍物放到 goal_pose 之后会挡住的路线图边。"""
+        ck = (obs.oid, round(goal_pose[0], 4), round(goal_pose[1], 4),
+              round(goal_pose[2], 4))
+        hit = self._blocked_cache.get(ck)
+        if hit is None:
+            hit = frozenset(
+                self.roadmap.corridors_intersecting(obs.polygon_at(*goal_pose)))
+            self._blocked_cache[ck] = hit
+        return hit
+
+    def _goal_reachable(self, oid: int, key: EdgeKey,
+                        blocked: frozenset) -> bool:
+        """挡住这些边之后，这条边的两端还有没有一端通得到目标。
+
+        只问通不通，所以一次宽度优先就够，不累计代价。还压着别的障碍物的边
+        照走不误：那是下一轮重新规划的事，只有搬不动的障碍物才封死一条边。
+
+        同一条边的几十个候选落点大多只挡住彼此重叠的那几条边，所以记下上次
+        判通时走的那条路当见证：新落点没碰到它，就不必再搜一遍。
+        """
+        ck = (oid, key, blocked)
+        hit = self._reach_cache.get(ck)
+        if hit is not None:
+            return hit
+        witness = self._reach_witness.get((oid, key))
+        if witness is not None and not (blocked & witness):
+            self._reach_cache[ck] = True
+            return True
+        rm = self.roadmap
+        goal = self._goal_node
+        parent: Dict[int, Tuple[int, EdgeKey]] = {}
+        seen = set(key)
+        queue = list(key)
+        found = False
+        while queue:
+            n = queue.pop()
+            if n == goal:
+                found = True
+                break
+            # 直接走邻接表：这里一轮要转上千万次，生成器那点开销也是钱。
+            for v in rm.adj[n]:
+                if v in seen:
+                    continue
+                nkey = (n, v) if n < v else (v, n)
+                if nkey in blocked or not self._edge_passable(oid, nkey):
+                    continue
+                seen.add(v)
+                parent[v] = (n, nkey)
+                queue.append(v)
+        if found:
+            trail: List[EdgeKey] = []
+            n = goal
+            while n in parent:
+                n, nkey = parent[n]
+                trail.append(nkey)
+            self._reach_witness[(oid, key)] = frozenset(trail)
+        self._reach_cache[ck] = found
+        return found
+
+    def _drop_allowed(self, oid: int, obs, key: EdgeKey, goal_pose) -> bool:
+        """搬完之后路还通不通。只判可行，不折算成代价，各策略一视同仁。
+
+        最宽松的一档：落点只要还留得下任意一条通到目标的路就行，具体走哪条
+        由下一轮重新规划自己决定。
+        """
+        if self._goal_node is None:
+            return True
+        blocked = self._blocked_edges(obs, goal_pose)
+        if not blocked:
+            return True
+        return self._goal_reachable(oid, key, blocked)
 
     def _goal_filter(self, obs):
         """返回一个过滤器，防止立即反向搬移。"""

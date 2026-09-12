@@ -26,20 +26,28 @@ def convex_hull(pts: np.ndarray) -> np.ndarray:
     if len(pts) <= 2:
         return pts
     pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
-
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    # 转成 Python 浮点再推：这是逐点串行的算法，numpy 的标量索引和每步一次
+    # 函数调用比算术本身贵得多，而取值和运算顺序与原来一模一样。
+    seq = [(float(x), float(y)) for x, y in pts]
 
     lower = []
-    for p in pts:
-        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+    for px, py in seq:
+        while len(lower) >= 2:
+            ox, oy = lower[-2]
+            ax, ay = lower[-1]
+            if (ax - ox) * (py - oy) - (ay - oy) * (px - ox) > 0:
+                break
             lower.pop()
-        lower.append(p)
+        lower.append((px, py))
     upper = []
-    for p in pts[::-1]:
-        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+    for px, py in reversed(seq):
+        while len(upper) >= 2:
+            ox, oy = upper[-2]
+            ax, ay = upper[-1]
+            if (ax - ox) * (py - oy) - (ay - oy) * (px - ox) > 0:
+                break
             upper.pop()
-        upper.append(p)
+        upper.append((px, py))
     return np.array(lower[:-1] + upper[:-1])
 
 

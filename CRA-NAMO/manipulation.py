@@ -16,8 +16,29 @@ from obstacle import MovableObstacle
 _SWEPT_MAX_DTHETA = math.pi / 12.0  # 约 1 平方米障碍物的基准值（半对角线约 0.5 米）
 _SWEPT_REF_HALF_DIAG = 0.5
 
+_SWEPT_CACHE: Dict[tuple, Polygon] = {}
+_SWEPT_CACHE_MAX = 200_000
+
+
 def swept_between(obs: MovableObstacle, a, b) -> Polygon:
-    """返回两个障碍物姿态之间插值得到的扫掠区域。"""
+    """返回两个障碍物姿态之间插值得到的扫掠区域。
+
+    扫掠体只取决于障碍物的长宽和首尾两个姿态，而同一段搬移会在逐边评估和
+    逐轮重规划里被反复问到，实测重复率超过九成九，所以按这四样东西记住。
+    键用原始浮点，不做取整，免得把两段不同的位移并成一段。
+    """
+    key = (obs.l, obs.d, tuple(a), tuple(b))
+    hit = _SWEPT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    poly = _swept_between(obs, a, b)
+    if len(_SWEPT_CACHE) >= _SWEPT_CACHE_MAX:
+        _SWEPT_CACHE.clear()
+    _SWEPT_CACHE[key] = poly
+    return poly
+
+
+def _swept_between(obs: MovableObstacle, a, b) -> Polygon:
     ax, ay, ath = a
     bx, by, bth = b
     dtheta = geometry.wrap_dtheta(ath, bth)
