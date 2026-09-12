@@ -149,7 +149,7 @@ python CRA-NAMO/main.py --scenario corridor --frames
 | `strategy_demo` | 展示绕行/搬移权衡、风险评估和隐藏信息 |
 | `moving_depot` | 展示自主移动障碍物和事件触发 |
 | `maze` | 自助仓储迷宫：外观相同的纸箱内容物差别极大，只有接触后测到的力才能区分 |
-| `ten_doors` | 十道门，每道给出「搬 A / 搬 B / 绕行」三选一；用于量化 LLM 估计误差对决策的影响 |
+| `ten_doors` | 十道门，每道给出「搬 A / 搬 B / 绕行」三选一；`LLM_benchmark` 的 Gap 扫描用它量化估计误差对决策和 C 的影响 |
 | `earthquake` | 震后救援：三组耦合危险物，看似无害的推车实际支撑着开裂的梁 |
 | `home` | 搬家中的大型住宅：门口堵着衣柜、书架、床垫和纸箱，推动难度相差一个数量级 |
 | `hospital` | 医院：可推的病床与推车、上了刹车的移动 X 光机，配合定时发生的运送事件 |
@@ -164,11 +164,12 @@ python CRA-NAMO/main.py --scenario corridor --frames
 随机地图批量实验的全部选项统一在 `CRA-NAMO/config.py` 中调整：
 
 ```python
-random_map_obstacle_count = 10
-random_map_dynamic_obstacle_count = 5
+random_map_obstacle_count = 16
+random_map_dynamic_obstacle_count = 1
 random_map_experiment_count = 10
 random_map_generate_images = True
 random_map_run_strategies = ("no-llm", "shortest", "llm-cost-risk", "llm-choice")
+random_map_profiles = ("depot", "home", "hospital", "earthquake")
 random_map_timeout_seconds = 300
 random_map_resume = True
 random_map_seed_start = 0
@@ -177,7 +178,11 @@ random_map_output_dir = "img/random_experiments"
 
 批量入口不再接收 `--run`、`--seeds` 或 `--out` 等实验参数，运行时只读取以上配置。默认四组分别是启发式 CRA-NAMO（`no-llm`）、最短路径基线（`shortest`）、同时使用 LLM 成本与风险估计的完整方法（`llm-cost-risk`），以及由 LLM 直接在候选方案中选择的 `llm-choice`。后两组需要 DeepSeek key，否则会退化成启发式；`llm-choice` 每个决策要多跑 k+2 次 A\*，明显更慢，可能需要调大 `random_map_timeout_seconds`。
 
-默认拓扑会随机生成 3–4 行、4–5 列的不等尺寸房间，然后从网格邻接关系中删除部分连接，同时保留整体连通性。不同 seed 会产生不同的环路、死路、岔路和最短路径长度。决策障碍物不是绑定在固定编号墙上，而是放到最短路线中具有反事实绕行路径的门边；验证器会确认每个关键门边被移除后仍有替代路线。房间内部还会生成不占用图通道的随机斜墙。
+默认拓扑会随机生成 4–5 行、6–7 列的不等尺寸房间，然后从网格邻接关系中删除部分连接，同时保留整体连通性。不同 seed 会产生不同的环路、死路、岔路和最短路径长度。决策障碍物不是绑定在固定编号墙上，而是放到最短路线中具有反事实绕行路径的门边；验证器会确认每个关键门边被移除后仍有替代路线。房间内部还会生成不占用图通道的随机斜墙。
+
+每张地图安排 6 个门决策加最多 1 个动态决策。只堵一扇门的决策类型，其所在墙只开一个门洞，否则机器人从旁边那扇门径直走过去，这个门就不构成选择。验证器另外要求"一次性绕开全部决策"的代价不低于直达路线的 35%，避免六个决策被同一条免费走廊全部绕过。
+
+`scenario_generation/profiles.py` 里的 profile 按主题划分，障碍物标签取自对应的手写场景：`depot` 对应 moving_depot 和 warehouse，`home` 对应 home 和 maze，`hospital` 对应 hospital，`earthquake` 对应 earthquake，`benchmark` 混合四套词表。批量实验按 seed 轮换 `random_map_profiles` 里的主题。
 
 ```bash
 # 生成并运行一张均衡随机地图
@@ -194,9 +199,20 @@ python CRA-NAMO/main.py --scenario seeded_random \
   --no-frames
 ```
 
-可用 profile 包括 `balanced`、`dynamic`、`risk`、`manipulation`、`adversarial`、`showcase` 和 `benchmark`。动态事件会在临时门洞封锁、搬移后响应和物体属性突变之间采样；`benchmark` 只排除几何非法、静态不可达、事件关闭全部路线或缺少反事实决策的地图，不按算法输赢筛选 seed。
+可用 profile 包括 `depot`、`home`、`hospital`、`earthquake` 和 `benchmark`。动态事件会在临时门洞封锁、搬移后响应和物体属性突变之间采样；验证器只排除几何非法、静态不可达、事件关闭全部路线、缺少反事实决策或决策可被免费绕过的地图，不按算法输赢筛选 seed。
 
-校准阶段保持房间图和墙体不变，根据门边的反事实绕行长度调节关键障碍物的真实推动阻力，并根据替代路线代价调节临时封路的等待窗口。定量决策的最优与次优代价差控制在 5%–30%，且由独立随机流决定是搬移、绕行、安全搬移、等待还是重规划占优，避免所有 seed 都给出同一种答案。隐藏难度决策同时保存接触前 belief 与接触后真值标签，用来检查算法能否因新信息改变选择。
+七种门决策里有四种专门用来拉开 LLM 与离线启发式的差距，依据是两张启发式表都只做词法匹配：`risk.keyword_level` 匹配不上就返回 low，`llm_difficulty` 匹配不上就回落到 unknown（mu*rho = 40），匹配上任一个词则取最大值。
+
+- `blind_risk`：标签在词表里读作无害，实际不能碰。例如 `crash_cart` 被读成 cart，估成 mu*rho=4.5 的免费一推，实际是抢救车。接触时通过 `contact_reveals` 交出一个词表读得懂的标签，于是盲推的一方照样被记上风险附加项。
+- `blind_weight`：标签读着轻，实际很重。例如 `lead_shielding_screen` 估成 40，真实接近 900，执行器按真值计费。
+- `false_alarm`：反向陷阱。`beam_offcut_carton` 只是一箱木料边角料，但 beam 是 extreme 关键词，离线一方会为了躲一个纸箱去绕路。没有这一类，"什么都不推"就能拿高分。
+- `risk_or_risk`：两扇门都堵着，一边词法上危险，一边只有语义上危险。
+
+标签目录在 `scenario_generation/materials.py`，`tests/scenario_generation/test_materials.py` 会在任何一张启发式表的改动让陷阱重新可见时失败。
+
+校准阶段保持房间图和墙体不变，根据门边的反事实绕行长度调节关键障碍物的真实推动阻力，并根据替代路线代价调节临时封路的等待窗口。定量决策的最优与次优代价差控制在 5%–30%，且由独立随机流决定是搬移、绕行、安全搬移、等待还是重规划占优，避免所有 seed 都给出同一种答案。风险陷阱的推动代价会被压到刚好比绕行便宜，只有算上真实风险附加项之后绕行才占优，所以读不懂标签的一方确实会被引诱过去。
+
+每个决策同时保存两套代价：`option_costs` 是世界会真正收取的真值，`belief_option_costs` 是只看标签、只查离线表能算出来的那一套。两者给出不同最优动作的次数记在校验指标 `belief_flip_decisions` 里，当前配置下平均每张图有 4.5 个。这个数字就是一张地图能测出多少语义理解。
 
 一键生成随机地图并运行配置的全部对照策略：
 
@@ -243,6 +259,75 @@ cfg.use_llm_ordering = False
 模拟时钟只由行驶、转向和等待推进；规划耗时会被测量并报告（`plan_time`），
 但不推进世界，所以动态场景不会因为机器负载不同而给出不同结果。
 
+## LLM 估计实验
+
+`CRA-NAMO/LLM_benchmark/llm_accuracy.py` 单独评估两个估计器：难度（`mu*rho`）和风险等级。
+它既量估计器有多准，也量这份误差换算成路线代价是多少。
+
+```bash
+cd CRA-NAMO/LLM_benchmark
+python3 llm_accuracy.py accuracy          # 估计值 vs 参考值，需要 API Key
+python3 llm_accuracy.py risk              # 风险等级，视觉与接触两种观测
+python3 llm_accuracy.py size              # 尺寸无关性检查
+python3 llm_accuracy.py order             # 锚点顺序检查：是估计还是抄表
+python3 llm_accuracy.py doors             # 十门 Gap 扫描，离线，不调 API
+python3 llm_accuracy.py doors-calibrate   # 逐门测出三个选项各自的真实代价
+python3 llm_accuracy.py report            # 汇总成 report.md 和全部图表
+python3 llm_accuracy.py all               # 除 doors-calibrate 外的全部阶段
+```
+
+结果写在 `LLM_benchmark/llm_test_out/`。
+
+### 十门 Gap 扫描
+
+`doors` 阶段不调 API，而是把「估计值 / 真实值 = F」直接写进 belief，再看规划器的
+选择和真实代价怎么变。比例是构造出来的而不是采样出来的，所以横轴上的 `F` 就是
+真实的 Gap，「多大的误差换来多少 C」可以直接读。
+
+| 轴 | 含义 |
+| --- | --- |
+| 代价梯度 `F` | 1.15x 到 10x，belief 中的难度是真实值的 `F` 倍或 `1/F` 倍 |
+| 风险梯度 `K` | 0 到 4 级，belief 中的等级相对真实等级偏移 `K` 级后截断 |
+| `under` | 每个估计都更便宜、更安全（乐观），确定性 |
+| `over` | 每个估计都更贵、更危险（悲观），确定性 |
+| `mixed` | 每个障碍物一个固定随机方向，方向在整条梯度上保持不变，因此各梯级是配对样本 |
+
+**C 按真实风险等级重新计价。** 执行器按 belief 的等级收风险附加项，低估风险的运行
+本来会因此白拿一笔折扣、看上去比 `exact` 还便宜。报告里的每一个 C 都是 `J` 加上被
+搬走的障碍物真正值那么多的附加项，所以错误决策显示为代价而不是节省。
+
+常用开关：
+
+```bash
+python3 llm_accuracy.py doors --doors-seeds 5 --doors-workers 6
+python3 llm_accuracy.py doors --doors-quick --no-doors-shots   # 冒烟测试
+```
+
+`--doors-workers` 只影响耗时：每次运行独立且带种子，并行不改变任何一个结果。
+
+输出：
+
+| 文件 | 内容 |
+| --- | --- |
+| `doors.json` | 每次运行的完整记录，含 `C_true`、`C_believed`、逐门选择 |
+| `doors_gap_vs_cost.csv` | Gap 比例 → C 差别比例的表格，可直接引用 |
+| `doors_gap.png` | 四格图：C 的变化、决策改动数、风险梯度、多出来的代价花在哪 |
+| `doors_gates.png` | 逐门热力图：哪一道门在多大的 Gap 上开始改主意 |
+| `ten_doors_*.png` | `exact` 和几个极端 Gap 点的路线截图 |
+
+### 先校准，再扫描
+
+`doors-calibrate` 把一道门的绕行开口砌死、再把其中一扇门的 belief 抬到机器人推不动，
+于是规划器只剩一个选项，三次运行（共 30 次）就测出「搬 A」「搬 B」「绕行」各自的真实
+代价。一次搬移的计价里只有「难度 x 移动距离」随 belief 变化，所以每道门的翻转比例可以
+解析求出，正好对照扫描里实测的首次翻转点；它还会给出每扇门正好与绕行持平所需的难度。
+
+**当前的 `ten_doors` 需要按这一列重新配平。** 用 exact belief 跑一次的结果是十道门里
+九道绕行、只搬走一扇 400 N 的门，W 只占 C 的 0.9%。决策这样一边倒时没有第二个选项可换，
+Gap 扫描量到的会接近平坦。`doors` 阶段会在 exact 运行过于一边倒时直接告警。
+
+改过 `scenarios/ten_doors.py` 里的难度之后才需要重跑校准阶段。
+
 ## 代码结构
 
 ```text
@@ -258,7 +343,7 @@ CRA-NAMO/
 ├── cost.py             # 成本函数
 ├── risk.py             # 风险评估
 ├── scenarios/          # 仿真场景
-└── LLM_benchmark/      # LLM 估计实验
+└── LLM_benchmark/      # LLM 估计实验与十门 Gap 扫描
 ```
 
 ## 当前阶段

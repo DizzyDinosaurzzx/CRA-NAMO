@@ -5,7 +5,6 @@ from __future__ import annotations
 import heapq
 import math
 from collections import deque
-from itertools import combinations
 
 from shapely.geometry import LineString, Point, box
 
@@ -92,7 +91,8 @@ def _all_edges(cols: int, rows: int) -> list[Edge]:
 
 
 def _random_graph(cols: int, rows: int, start: Node, goal: Node,
-                  rng, removal_probability: float) -> tuple[set[Edge], list[Node]]:
+                  rng, removal_probability: float,
+                  decision_count: int) -> tuple[set[Edge], list[Node]]:
     """Remove grid edges while retaining a multi-route start/goal problem."""
     complete = _all_edges(cols, rows)
     edges = set(complete)
@@ -103,12 +103,13 @@ def _random_graph(cols: int, rows: int, start: Node, goal: Node,
             continue
         trial = edges - {candidate}
         route = _path(trial, start, goal)
-        if len(route) < 4:
+        # Keep the route long enough to carry one gate per decision.
+        if len(route) < decision_count + 1:
             continue
         edges = trial
 
-    # At least three shortest-route edges must be non-bridges. Restore random
-    # omitted edges until that counterfactual condition holds.
+    # Every decision needs its own non-bridge shortest-route edge. Restore
+    # random omitted edges until that counterfactual condition holds.
     omitted = [edge for edge in complete if edge not in edges]
     rng.shuffle(omitted)
     while True:
@@ -116,16 +117,16 @@ def _random_graph(cols: int, rows: int, start: Node, goal: Node,
         route_edges = [_edge(a, b) for a, b in zip(route, route[1:])]
         nonbridges = [edge for edge in route_edges
                       if _path(edges, start, goal, {edge})]
-        if len(nonbridges) >= 3:
+        if len(nonbridges) >= decision_count:
             return edges, route
         if not omitted:
             return set(complete), _path(set(complete), start, goal)
         edges.add(omitted.pop())
 
 
-def _decision_edges(edges: set[Edge], route: list[Node],
-                    start: Node, goal: Node) -> tuple[list[Edge], list[int], int]:
-    """Mine three central edges whose individual detours preserve each other."""
+def _decision_edges(edges: set[Edge], route: list[Node], start: Node,
+                    goal: Node, count: int) -> tuple[list[Edge], list[int], int]:
+    """Mine ``count`` route edges whose individual detours preserve each other."""
     route_edges = [_edge(a, b) for a, b in zip(route, route[1:])]
     candidates = []
     base_hops = len(route_edges)
@@ -134,24 +135,36 @@ def _decision_edges(edges: set[Edge], route: list[Node],
         if alternate:
             alt_edges = {_edge(a, b) for a, b in zip(alternate, alternate[1:])}
             candidates.append((edge, index, len(alternate) - 1, alt_edges))
-    if len(candidates) < 3:
-        raise ValueError("room graph lacks three non-bridge decision edges")
+    if len(candidates) < count:
+        raise ValueError(
+            f"room graph lacks {count} non-bridge decision edges")
 
-    best = None
-    for chosen in combinations(candidates, 3):
-        chosen_edges = {item[0] for item in chosen}
-        # A good counterfactual bypasses one decision while rejoining before
-        # the others, rather than making all three decisions disappear at once.
-        preserved = sum(len((chosen_edges - {item[0]}) & item[3])
-                        for item in chosen)
-        detour_gain = sum(max(0, item[2] - base_hops) for item in chosen)
-        spread = max(item[1] for item in chosen) - min(item[1] for item in chosen)
-        score = (preserved, detour_gain, spread)
-        if best is None or score > best[0]:
-            best = (score, chosen)
-    selected = sorted(best[1], key=lambda item: item[1])
+    # Enumerating every subset is only cheap for three; grow the set greedily
+    # instead, preferring gates that sit apart along the route and whose
+    # counterfactual route still passes the gates already chosen.
+    def score(item, chosen):
+        _, index, alt_hops, alt_edges = item
+        # Independence first: a gate whose counterfactual route still passes
+        # the gates already chosen cannot be dodged by the same detour, which
+        # is what stops one free corridor from bypassing every decision.
+        preserved = sum(1 for other in chosen if other[0] in alt_edges)
+        spread = min((abs(index - other[1]) for other in chosen),
+                     default=len(route_edges))
+        return (preserved, spread, max(0, alt_hops - base_hops))
+
+    remaining = list(candidates)
+    chosen: list = []
+    while len(chosen) < count and remaining:
+        pick = max(remaining, key=lambda item: score(item, chosen))
+        chosen.append(pick)
+        remaining.remove(pick)
+
+    chosen_edges = {item[0] for item in chosen}
+    independence = sum(len((chosen_edges - {item[0]}) & item[3])
+                       for item in chosen)
+    selected = sorted(chosen, key=lambda item: item[1])
     return ([item[0] for item in selected],
-            [item[2] for item in selected], best[0][0])
+            [item[2] for item in selected], independence)
 
 
 def _cuts(length: float, count: int, rng, jitter: float) -> list[float]:
@@ -207,23 +220,35 @@ def _portal_pose(axis: str, fixed: float, center: float):
             if axis == "vertical" else (center, fixed, 0.0))
 
 
-def build_room_graph(request, rng, profile=None, *, junction_heavy: bool = False):
+def build_room_graph(request, rng, profile=None, *, junction_heavy: bool = False,
+                     door_counts=None):
     width, height = request.width, request.height
-    cols = rng.choice((4, 5))
-    rows = rng.choice((3, 4))
+    decision_count = 3 if profile is None else profile.gate_decisions
+    cols = rng.choice((6, 7))
+    rows = rng.choice((4, 5))
     xs = _cuts(width, cols, rng, min(0.45, width / cols * 0.10))
     ys = _cuts(height, rows, rng, min(0.30, height / rows * 0.09))
-    start_node = (0, rng.randrange(rows))
-    goal_choices = [r for r in range(rows) if r != start_node[1]] or [start_node[1]]
-    goal_node = (cols - 1, rng.choice(goal_choices))
+    # Start and goal sit in opposite corners, far enough apart that the
+    # shortest route can carry one gate per decision even before edges are
+    # removed.  A grid route is (cols - 1) + |row difference| hops long.
+    start_node = (0, rng.randrange(max(1, rows // 2)))
+    goal_node = (cols - 1, rng.randrange((rows + 1) // 2, rows))
+    while (cols - 1) + abs(goal_node[1] - start_node[1]) < decision_count:
+        if start_node[1] > 0:
+            start_node = (0, start_node[1] - 1)
+        elif goal_node[1] < rows - 1:
+            goal_node = (cols - 1, goal_node[1] + 1)
+        else:
+            break
     removal = 0.13 if junction_heavy else rng.uniform(0.24, 0.44)
     edges, shortest = _random_graph(
-        cols, rows, start_node, goal_node, rng, removal)
+        cols, rows, start_node, goal_node, rng, removal, decision_count)
     shortest_edges = [_edge(a, b) for a, b in zip(shortest, shortest[1:])]
-    if len(shortest_edges) < 3:
-        raise ValueError("room graph did not produce three decision edges")
+    if len(shortest_edges) < decision_count:
+        raise ValueError(
+            f"room graph did not produce {decision_count} decision edges")
     decision_edges, detour_hops, independence = _decision_edges(
-        edges, shortest, start_node, goal_node)
+        edges, shortest, start_node, goal_node, decision_count)
 
     wall_t = 0.34
     workspace = box(0.0, 0.0, width, height)
@@ -240,14 +265,25 @@ def build_room_graph(request, rng, profile=None, *, junction_heavy: bool = False
         poses = []
         if edge in edges:
             if edge in decision_edges:
+                gate_index = decision_edges.index(edge)
+                wanted = (2 if door_counts is None
+                          else door_counts[gate_index]
+                          if gate_index < len(door_counts) else 1)
                 door = max(1.05, min(1.35, (span - 0.42) / 2))
-                offset = door / 2 + 0.16
-                centers = [(lo + hi) / 2 - offset, (lo + hi) / 2 + offset]
+                if wanted >= 2:
+                    offset = door / 2 + 0.16
+                    centers = [(lo + hi) / 2 - offset, (lo + hi) / 2 + offset]
+                else:
+                    # One doorway, so the blocker really does close the edge
+                    # and the alternative is a route through another room.
+                    door = min(1.55, max(1.15, span * 0.33))
+                    centers = [(lo + hi) / 2]
                 openings = [(center, door) for center in centers]
                 poses = [_portal_pose(axis, fixed, center) for center in centers]
                 gates.append({
-                    "index": decision_edges.index(edge),
-                    "direct": poses[0], "bypass": poses[1],
+                    "index": gate_index,
+                    "direct": poses[0],
+                    "bypass": poses[1] if len(poses) > 1 else None,
                     "door_height": door, "wall_thickness": wall_t,
                     "tilt": 0.0, "graph_edge": edge,
                 })
@@ -294,6 +330,13 @@ def build_room_graph(request, rng, profile=None, *, junction_heavy: bool = False
         0.0,
         _weighted_distance(edges, start_node, goal_node, centers, {edge})
         - base_distance), 3) for edge in decision_edges]
+    # How much further the robot must travel to dodge *every* decision at once.
+    # Without this the map can carry six gates that a single free corridor
+    # bypasses, so the robot never actually has to choose.
+    full_bypass = _weighted_distance(edges, start_node, goal_node, centers,
+                                     set(decision_edges))
+    full_bypass_detour = (math.inf if not math.isfinite(full_bypass)
+                          else max(0.0, full_bypass - base_distance))
     edge_lengths = [math.dist(centers[a], centers[b]) for a, b in edges]
     metrics = {
         "room_count": cols * rows,
@@ -304,6 +347,9 @@ def build_room_graph(request, rng, profile=None, *, junction_heavy: bool = False
         "shortest_hops": len(shortest_edges),
         "decision_detour_hops": detour_hops,
         "decision_graph_detour_m": detour_metres,
+        "base_route_m": round(base_distance, 3),
+        "full_bypass_detour_m": (None if not math.isfinite(full_bypass_detour)
+                                 else round(full_bypass_detour, 3)),
         "decision_independence_score": independence,
         "graph_diameter": _diameter(edges, nodes),
         "mean_degree": round(2.0 * len(edges) / len(nodes), 3),

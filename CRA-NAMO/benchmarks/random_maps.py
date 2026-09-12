@@ -26,7 +26,9 @@ from scenario_generation.serialization import candidate_from_manifest
 from PIL import Image
 import viz
 
-PROFILE = "benchmark"
+def _profile_for(cfg, index: int) -> str:
+    """Cycle the configured themes so one corpus spans every vocabulary."""
+    return cfg.random_map_profiles[(index - 1) % len(cfg.random_map_profiles)]
 
 
 def _utc_now() -> str:
@@ -280,10 +282,10 @@ def _run_with_timeout(manifest: dict, strategy: str, image_path: Path | None,
     return payload
 
 
-def _base_row(generated, seed: int, experiment_name: str,
+def _base_row(generated, seed: int, experiment_name: str, profile: str,
               map_path: Path) -> dict:
     return {
-        "experiment": experiment_name, "seed": seed, "profile": PROFILE,
+        "experiment": experiment_name, "seed": seed, "profile": profile,
         "fingerprint": generated.fingerprint,
         "attempts": generated.attempts, "map_json": str(map_path),
         "obstacle_count": len(generated.scenario.movable),
@@ -489,6 +491,7 @@ def main() -> int:
     generator = ScenarioGenerator()
 
     print(f"Random-map benchmark: {len(seeds)} maps x {len(strategies)} strategies")
+    print(f"Profiles: {', '.join(cfg.random_map_profiles)}")
     print(f"Output: {out}  timeout: {cfg.random_map_timeout_seconds:g}s  "
           f"resume: {cfg.random_map_resume}", flush=True)
     needs_llm = any(STRATEGIES[strategy].llm_cost
@@ -528,10 +531,11 @@ def main() -> int:
         experiment_name = f"experiment_{index:04d}"
         experiment_dir = out / experiment_name
         experiment_dir.mkdir(parents=True, exist_ok=True)
-        print(f"\n[{index}/{len(seeds)}] {experiment_name}, seed={seed}: "
-              "generating map...", flush=True)
+        print(f"\n[{index}/{len(seeds)}] {experiment_name}, seed={seed}, "
+              f"profile={profile}: generating map...", flush=True)
+        profile = _profile_for(cfg, index)
         generated = generator.generate(RandomScenarioRequest(
-            seed=seed, profile=PROFILE,
+            seed=seed, profile=profile,
             obstacle_count=cfg.random_map_obstacle_count,
             event_count=cfg.random_map_dynamic_obstacle_count))
         manifest = generated.manifest
@@ -541,7 +545,7 @@ def main() -> int:
         if (saved_manifest is None
                 or saved_manifest.get("fingerprint") != generated.fingerprint):
             _atomic_json(map_path, manifest)
-        base = _base_row(generated, seed, experiment_name, map_path)
+        base = _base_row(generated, seed, experiment_name, profile, map_path)
         map_rows = []
 
         for strategy in strategies:

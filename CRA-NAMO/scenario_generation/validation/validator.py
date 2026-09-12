@@ -14,6 +14,19 @@ from scenarios._realism import check_layout
 from scenario_generation.models import ValidationIssue, ValidationReport
 
 
+# Kinds whose whole point is that the offline tables misread the label.
+_BLIND_KINDS = ("blind_risk", "blind_weight", "risk_or_risk")
+# Kinds that must record what an offline reader would have chosen.
+_BELIEF_KINDS = ("hidden_difficulty", "blind_weight", "blind_risk",
+                 "false_alarm")
+# A map may answer several gates qualitatively, but not all of them.
+_MIN_QUANTITATIVE = 3
+# Dodging every gate at once must cost at least this fraction of the direct
+# route.  Without it a map can carry six decisions that one free corridor
+# bypasses, so the robot is never actually asked anything.
+_MIN_FULL_BYPASS_RATIO = 0.35
+
+
 def _connected(candidate, polygons) -> bool:
     blocked = unary_union(list(polygons))
     free = candidate.workspace.difference(blocked).buffer(
@@ -80,7 +93,7 @@ class ScenarioValidator:
                     f"{point.name} relative margin {margin:.4f} is outside [0.05, 0.30]"))
             oracle_margins.append(float(margin))
             belief_action = oracle.get("belief_action_before_contact")
-            if point.kind == "hidden_difficulty" and not belief_action:
+            if point.kind in _BELIEF_KINDS and not belief_action:
                 issues.append(ValidationIssue(
                     "calibration", "missing_belief_oracle",
                     f"{point.name} has no pre-contact belief label"))
@@ -88,10 +101,41 @@ class ScenarioValidator:
                 belief_flip_count += 1
 
         if sum(1 for point in candidate.decision_points
-               if not point.metadata.get("oracle", {}).get("qualitative")) < 3:
+               if not point.metadata.get("oracle", {}).get("qualitative")
+               ) < _MIN_QUANTITATIVE:
             issues.append(ValidationIssue(
                 "calibration", "too_few_quantitative_oracles",
-                "expected at least three quantitative decision labels"))
+                f"expected at least {_MIN_QUANTITATIVE} quantitative "
+                "decision labels"))
+
+        # The blind gates only measure anything while the offline keyword table
+        # still misreads them. An edit to risk.RISK_LABELS that makes one of
+        # these labels legible would silently turn the corpus into a plain one.
+        blind_points = [point for point in candidate.decision_points
+                        if point.kind in _BLIND_KINDS]
+        for point in blind_points:
+            label = point.metadata.get("material", "")
+            if label and risk.keyword_level(label) != risk.LOW:
+                issues.append(ValidationIssue(
+                    "decision", "blind_label_is_legible",
+                    f"{point.name} uses {label!r}, which the keyword table "
+                    f"already reads as {risk.keyword_level(label)}"))
+        # A false alarm only measures anything while the keyword table still
+        # over-reads the label.
+        for point in candidate.decision_points:
+            if point.kind != "false_alarm":
+                continue
+            label = point.metadata.get("material", "")
+            if label and risk.keyword_level(label) == risk.LOW:
+                issues.append(ValidationIssue(
+                    "decision", "false_alarm_is_silent",
+                    f"{point.name} uses {label!r}, which the keyword table "
+                    "reads as low, so there is no false alarm to see through"))
+        belief_flips = sum(
+            1 for point in candidate.decision_points
+            if point.metadata.get("oracle", {}).get(
+                "belief_action_before_contact") not in
+            (None, point.metadata.get("oracle", {}).get("best_action")))
 
         by_oid = {obs.oid: obs for obs in candidate.movable}
         for event in candidate.events:
@@ -161,6 +205,16 @@ class ScenarioValidator:
                 issues.append(ValidationIssue(
                     "topology", "no_junction",
                     "room graph contains no branching junction"))
+            base_route = float(topology_metrics.get("base_route_m", 0.0) or 0.0)
+            bypass = topology_metrics.get("full_bypass_detour_m")
+            # None means no route dodges every gate, which is the strongest
+            # form of the property this check is after.
+            if (bypass is not None and base_route > 0.0
+                    and bypass < _MIN_FULL_BYPASS_RATIO * base_route):
+                issues.append(ValidationIssue(
+                    "topology", "gates_are_free_to_dodge",
+                    f"bypassing every decision costs {bypass:.1f} m against a "
+                    f"{base_route:.1f} m route, so the robot need not choose"))
 
         metrics = {
             "wall_count": len(candidate.static),
@@ -180,6 +234,11 @@ class ScenarioValidator:
             "highest_risk": max(
                 (risk.LEVELS.index(risk.keyword_level(obs.material))
                  for obs in candidate.movable), default=0),
+            "decision_kind_counts": dict(sorted(Counter(
+                point.kind for point in candidate.decision_points).items())),
+            "blind_decision_count": len(blind_points),
+            "belief_flip_decisions": belief_flips,
+            "theme": candidate.metadata.get("theme", "unknown"),
             "calibrated_decision_count": len(oracle_margins),
             "oracle_margin_min": round(min(oracle_margins), 4)
             if oracle_margins else None,

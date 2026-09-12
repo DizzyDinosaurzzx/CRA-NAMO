@@ -23,7 +23,7 @@ class SeededRandomTests(unittest.TestCase):
         self.generator = ScenarioGenerator()
 
     def test_same_seed_is_byte_stable(self):
-        request = RandomScenarioRequest(seed=42, profile="showcase")
+        request = RandomScenarioRequest(seed=42, profile="hospital")
         first = self.generator.generate(request)
         second = self.generator.generate(request)
         self.assertEqual(first.fingerprint, second.fingerprint)
@@ -32,8 +32,8 @@ class SeededRandomTests(unittest.TestCase):
 
     def test_exact_obstacle_and_dynamic_counts(self):
         generated = self.generator.generate(RandomScenarioRequest(
-            seed=42, profile="balanced", obstacle_count=10, event_count=1))
-        self.assertEqual(len(generated.scenario.movable), 10)
+            seed=42, profile="depot", obstacle_count=16, event_count=1))
+        self.assertEqual(len(generated.scenario.movable), 16)
         dynamic_oids = {
             event.effect.oid for event in generated.scenario.events
             if isinstance(event.effect, MoveTo)
@@ -44,13 +44,13 @@ class SeededRandomTests(unittest.TestCase):
 
     def test_artifacts_use_experiment_numbers(self):
         generated = self.generator.generate(RandomScenarioRequest(
-            seed=42, profile="showcase"))
+            seed=42, profile="hospital"))
         self.assertEqual(experiment_id(42), "experiment_0042")
         self.assertEqual(experiment_id(-3), "experiment_neg_0003")
         self.assertTrue(map_stem(generated.manifest).startswith(
-            "experiment_0042_showcase_map_"))
+            "experiment_0042_hospital_map_"))
         self.assertTrue(run_stem(generated.manifest, "no-llm").startswith(
-            "experiment_0042_showcase_no-llm_"))
+            "experiment_0042_hospital_no-llm_"))
 
     def test_manifest_round_trip(self):
         generated = self.generator.generate(RandomScenarioRequest(seed=7))
@@ -78,19 +78,21 @@ class SeededRandomTests(unittest.TestCase):
             generated = self.generator.generate(RandomScenarioRequest(
                 seed=seed, profile="benchmark"))
             self.assertTrue(generated.validation.accepted)
-            self.assertGreaterEqual(
-                generated.validation.metrics["decision_count"], 3)
-            fingerprints.add(generated.fingerprint)
             metrics = generated.validation.metrics
+            # Six gates, plus a dynamic decision when the map carries an event.
+            self.assertGreaterEqual(metrics["decision_count"], 6)
+            fingerprints.add(generated.fingerprint)
             families.add(metrics["topology_family"])
-            topology_signatures.add((
-                metrics["room_count"], metrics["graph_edge_count"],
-                metrics["cycle_rank"], metrics["dead_end_count"],
-                metrics["junction_count"], metrics["shortest_hops"]))
-            self.assertGreaterEqual(metrics["angled_wall_count"], 1)
-            self.assertTrue(all(hops >= 0
-                                for hops in metrics["decision_detour_hops"]))
+            if "room_count" in metrics:          # staged topologies have no graph
+                topology_signatures.add((
+                    metrics["room_count"], metrics["graph_edge_count"],
+                    metrics["cycle_rank"], metrics["dead_end_count"],
+                    metrics["junction_count"], metrics["shortest_hops"]))
+                self.assertGreaterEqual(metrics["angled_wall_count"], 1)
+                self.assertTrue(all(hops >= 0
+                                    for hops in metrics["decision_detour_hops"]))
             self.assertGreaterEqual(metrics["calibrated_decision_count"], 3)
+            self.assertGreaterEqual(metrics["blind_decision_count"], 1)
             self.assertGreaterEqual(metrics["oracle_margin_min"], 0.05)
             self.assertLessEqual(metrics["oracle_margin_max"], 0.30)
             for point in generated.scenario.decision_points:
@@ -100,23 +102,54 @@ class SeededRandomTests(unittest.TestCase):
                     self.assertGreaterEqual(oracle["relative_margin"], 0.05)
                     self.assertLessEqual(oracle["relative_margin"], 0.30)
         self.assertEqual(len(fingerprints), 100)
-        self.assertEqual(families, {"room_graph", "junction"})
+        self.assertLessEqual({"room_graph", "junction"}, families)
         self.assertGreaterEqual(len(topology_signatures), 25)
         self.assertLessEqual({"move", "detour", "safe_move"}, oracle_actions)
 
     def test_hidden_decision_has_belief_and_ground_truth_labels(self):
-        generated = self.generator.generate(RandomScenarioRequest(
-            seed=42, profile="showcase"))
-        hidden = next(point for point in generated.scenario.decision_points
-                      if point.kind == "hidden_difficulty")
+        # Whether a given map carries a hidden-difficulty gate is a seeded
+        # choice, so look across a handful of them.
+        hidden = None
+        for seed in range(12):
+            generated = self.generator.generate(RandomScenarioRequest(
+                seed=seed, profile="hospital"))
+            hidden = next(
+                (point for point in generated.scenario.decision_points
+                 if point.kind == "hidden_difficulty"), None)
+            if hidden is not None:
+                break
+        self.assertIsNotNone(hidden, "no seed produced a hidden-difficulty gate")
         oracle = hidden.metadata["oracle"]
         self.assertEqual(oracle["stage"], "contact")
         self.assertEqual(oracle["belief_action_before_contact"], "move")
         self.assertEqual(oracle["best_action"], "detour")
 
+    def test_blind_gates_are_invisible_to_the_offline_tables(self):
+        """The whole point of a blind gate: the keyword table must misread it."""
+        import risk
+        seen = set()
+        for seed in range(20):
+            generated = self.generator.generate(RandomScenarioRequest(
+                seed=seed, profile="earthquake"))
+            for point in generated.scenario.decision_points:
+                if point.kind not in ("blind_risk", "blind_weight",
+                                      "risk_or_risk"):
+                    continue
+                label = point.metadata["material"]
+                seen.add(point.kind)
+                self.assertEqual(
+                    risk.keyword_level(label), risk.LOW,
+                    f"{label} is already legible to the keyword table")
+                if point.kind == "blind_risk":
+                    self.assertNotEqual(point.metadata["true_risk"], risk.LOW)
+                    self.assertNotEqual(
+                        risk.keyword_level(point.metadata["reveals"]), risk.LOW,
+                        "contact must teach a blind arm something")
+        self.assertTrue(seen, "no blind gate was generated in twenty seeds")
+
     def test_event_and_decision_oids_exist(self):
         generated = self.generator.generate(RandomScenarioRequest(
-            seed=3, profile="dynamic", event_count=(1, 1)))
+            seed=3, profile="depot", event_count=(1, 1)))
         oids = {obs.oid for obs in generated.scenario.movable}
         for point in generated.scenario.decision_points:
             self.assertLessEqual(set(point.involved_oids), oids)
@@ -126,9 +159,9 @@ class SeededRandomTests(unittest.TestCase):
     def test_dynamic_profile_varies_event_templates(self):
         names = set()
         timed_actions = set()
-        for seed in range(30):
+        for seed in range(60):
             generated = self.generator.generate(RandomScenarioRequest(
-                seed=seed, profile="dynamic", event_count=(1, 1)))
+                seed=seed, profile="depot", event_count=(1, 1)))
             names.update(event.name for event in generated.scenario.events)
             timed_actions.update(
                 point.metadata["oracle"]["best_action"]

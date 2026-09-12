@@ -7,14 +7,16 @@ from shapely.geometry import LineString
 from config import Config
 from scenario_generation.calibration import DecisionCalibrator
 from scenario_generation.decisions import build_gate_decisions
-from scenario_generation.decisions.builders import OidAllocator
+from scenario_generation.decisions.builders import (OidAllocator, doors_needed,
+                                                    plan_gate_kinds)
 from scenario_generation.models import (
     CandidateScenario,
     GenerationResult,
     RandomScenarioRequest,
     ScenarioGenerationError,
 )
-from scenario_generation.profiles import get_profile, weighted_choice
+from scenario_generation.materials import get_theme
+from scenario_generation.profiles import get_profile, pick_theme, weighted_choice
 from scenario_generation.rng import SeedStreams
 from scenario_generation.sampling import (build_additional_dynamic_event,
                                            build_dynamic_event, fill_background)
@@ -37,13 +39,27 @@ class ScenarioGenerator:
                 profile.topology_weights, streams.rng("topology.choice"))
             if topology_name not in BUILDERS:
                 raise ValueError(f"unknown topology {topology_name!r}")
-            topology = BUILDERS[topology_name](
-                request, streams.rng("topology.geometry"), profile)
+            # Each gate's kind decides how many doorways its wall needs, so
+            # it has to be settled before the walls exist.
+            kinds = plan_gate_kinds(
+                profile.gate_decisions, streams.rng("decisions.kinds"),
+                include_hidden=(streams.rng("hidden_state").random()
+                                < profile.hidden_probability),
+                trap_probability=profile.trap_probability)
+            try:
+                topology = BUILDERS[topology_name](
+                    request, streams.rng("topology.geometry"), profile,
+                    door_counts=doors_needed(kinds))
+            except ValueError as exc:
+                # A layout that cannot carry every gate is rejected like any
+                # other unusable candidate; the next attempt reshapes it.
+                rejected.append(f"topology {topology_name}: {exc}")
+                continue
+            theme = get_theme(pick_theme(
+                profile, streams.rng("materials.theme")))
             allocator = OidAllocator()
             critical, decisions = build_gate_decisions(
-                topology, allocator, streams.rng("decisions"),
-                include_hidden=(streams.rng("hidden_state").random()
-                                < profile.hidden_probability))
+                topology, allocator, streams.rng("decisions"), theme, kinds)
 
             events = []
             event_rng = streams.rng("events")
@@ -84,7 +100,7 @@ class ScenarioGenerator:
                           round(base_target * profile.background_density)))
             background = fill_background(
                 topology, critical, allocator,
-                streams.rng("obstacles.background"), target)
+                streams.rng("obstacles.background"), target, theme)
 
             cfg = Config(
                 robot_radius=0.10,
@@ -109,6 +125,7 @@ class ScenarioGenerator:
                 decision_points=decisions,
                 metadata={
                     "seed": request.seed, "profile": profile.name,
+                    "theme": theme.name,
                     "topology": topology_name, "attempt": attempt,
                     "topology_family": topology.anchors.get(
                         "topology_family", topology_name),

@@ -54,7 +54,9 @@ def partition_with_openings(
 
 
 def staged_topology(request: RandomScenarioRequest, rng, *, corridor: bool,
-                    wall_angle_sigma: float | None = None) -> TopologyResult:
+                    wall_angle_sigma: float | None = None,
+                    gate_count: int = 3,
+                    door_counts=None) -> TopologyResult:
     width, height = request.width, request.height
     wall_t = 0.38
     workspace = box(0.0, 0.0, width, height)
@@ -64,7 +66,7 @@ def staged_topology(request: RandomScenarioRequest, rng, *, corridor: bool,
     bypass_y = height * (0.69 if corridor else 0.73)
     emergency_y = height * 0.89
     door_h = max(1.45, min(2.0, height * 0.13))
-    gate_count = max(3, min(4, request.max_decision_points))
+    gate_count = max(1, int(gate_count))
     gate_xs = [width * (i + 1) / (gate_count + 1) for i in range(gate_count)]
     gates = []
     for i, base_x in enumerate(gate_xs):
@@ -72,17 +74,20 @@ def staged_topology(request: RandomScenarioRequest, rng, *, corridor: bool,
         sigma = ((0.025 if corridor else 0.045)
                  if wall_angle_sigma is None else wall_angle_sigma)
         tilt = rng.gauss(0.0, sigma)
+        wanted = (2 if door_counts is None
+                  else door_counts[i] if i < len(door_counts) else 1)
+        lanes = ([(direct_y, door_h), (bypass_y, door_h), (emergency_y, door_h)]
+                 if wanted >= 2
+                 else [(direct_y, door_h), (emergency_y, door_h)])
         pieces, poses = partition_with_openings(
-            x=x, height=height, thickness=wall_t,
-            openings=[(direct_y, door_h), (bypass_y, door_h),
-                      (emergency_y, door_h)],
+            x=x, height=height, thickness=wall_t, openings=lanes,
             tilt=tilt, name=f"gate_{i}")
         walls.extend(pieces)
         gates.append({
             "index": i,
             "direct": poses[0],
-            "bypass": poses[1],
-            "emergency": poses[2],
+            "bypass": poses[1] if wanted >= 2 else None,
+            "emergency": poses[-1],
             "door_height": door_h,
             "wall_thickness": wall_t,
             "tilt": tilt,

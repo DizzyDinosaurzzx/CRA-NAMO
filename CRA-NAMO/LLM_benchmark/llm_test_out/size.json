@@ -1,0 +1,210 @@
+{
+  "scales": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "rows": [
+    {
+      "label": "unloaded push trolley",
+      "by_scale": {
+        "0.5": 2.5,
+        "1.0": 1.0,
+        "2.0": 1.0
+      },
+      "mu_rho_true": 1.0,
+      "group": "object"
+    },
+    {
+      "label": "expanded polystyrene packing box",
+      "by_scale": {
+        "0.5": 5.25,
+        "1.0": 5.25,
+        "2.0": 5.25
+      },
+      "mu_rho_true": 5.25,
+      "group": "object"
+    },
+    {
+      "label": "wooden shipping crate",
+      "by_scale": {
+        "0.5": 27.0,
+        "1.0": 27.0,
+        "2.0": 27.0
+      },
+      "mu_rho_true": 27.0,
+      "group": "object"
+    },
+    {
+      "label": "steel storage rack with stock",
+      "by_scale": {
+        "0.5": 220.0,
+        "1.0": 160.0,
+        "2.0": 200.0
+      },
+      "mu_rho_true": 150.0,
+      "group": "object"
+    },
+    {
+      "label": "solid concrete cube",
+      "by_scale": {
+        "0.5": 1440.0,
+        "1.0": 1440.0,
+        "2.0": 1440.0
+      },
+      "mu_rho_true": 1440.0,
+      "group": "object"
+    },
+    {
+      "label": "empty steel drum",
+      "by_scale": {
+        "0.5": 50.0,
+        "1.0": 31.0,
+        "2.0": 20.0
+      },
+      "mu_rho_true": 24.691358024691358,
+      "group": "object"
+    },
+    {
+      "label": "granite countertop slab",
+      "by_scale": {
+        "0.5": 1350.0,
+        "1.0": 1620.0,
+        "2.0": 1620.0
+      },
+      "mu_rho_true": 1615.3846153846155,
+      "group": "object"
+    },
+    {
+      "label": "cardboard box packed with hardcover books",
+      "by_scale": {
+        "0.5": 200.0,
+        "1.0": 175.0,
+        "2.0": 175.0
+      },
+      "mu_rho_true": 153.12499999999997,
+      "group": "state"
+    },
+    {
+      "label": "empty 240 litre wheelie bin",
+      "by_scale": {
+        "0.5": 1.0,
+        "1.0": 1.0,
+        "2.0": 1.0
+      },
+      "mu_rho_true": 1.6331187778174567,
+      "group": "state"
+    },
+    {
+      "label": "IKEA BILLY bookcase, empty",
+      "by_scale": {
+        "0.5": 50.0,
+        "1.0": 36.0,
+        "2.0": 25.4
+      },
+      "mu_rho_true": 40.775282885431395,
+      "group": "brand"
+    }
+  ],
+  "metadata": {
+    "code_version": "b4d5a97270812f278301678dc4a91402e7405f96",
+    "source_hash": "faf56393daf11dd4d5786b3553b81e526fa99e5915c21e4ebf8a879823f87bdb",
+    "prompt_hash": "f973dcde307ee1c0a8f12e0a1387b5b720e0e7efc9bd82c2d6898d5c606998ba",
+    "dataset_version": "6eb2735a1b0de7777f8236eb177dd6d9ed4a2fd32ca527dedf9e96af26b38c9b",
+    "config": {
+      "robot_radius": 0.1,
+      "random_map_obstacle_count": 16,
+      "random_map_dynamic_obstacle_count": 1,
+      "random_map_experiment_count": 10,
+      "random_map_generate_images": true,
+      "random_map_run_strategies": [
+        "no-llm",
+        "shortest",
+        "llm-cost-risk",
+        "llm-choice"
+      ],
+      "random_map_profiles": [
+        "depot",
+        "home",
+        "hospital",
+        "earthquake"
+      ],
+      "random_map_timeout_seconds": 300,
+      "random_map_resume": true,
+      "random_map_seed_start": 0,
+      "random_map_output_dir": "img/random_experiments",
+      "robot_v_max": 0.6,
+      "robot_a_max": 0.5,
+      "robot_w_max": 1.5,
+      "robot_alpha_max": 2.0,
+      "robot_v_max_loaded": 0.25,
+      "robot_a_max_loaded": 0.2,
+      "robot_w_max_loaded": 0.6,
+      "robot_alpha_max_loaded": 0.8,
+      "time_importance": 0.0,
+      "time_value": 100.0,
+      "lambda_distance": 350.0,
+      "risk_weight": 1.0,
+      "risk_forbidden_level": "extreme",
+      "risk_heavy_ratio": 3.0,
+      "R_perc": 10.0,
+      "sight_width": 0.1,
+      "R_manip": 5.0,
+      "manip_forward_penalty": 2.0,
+      "manip_lookahead": true,
+      "manip_max_frames_per_action": 30,
+      "manip_blocked_edge_penalty_m": 0.0,
+      "contact_required": true,
+      "contact_station_spacing": 0.3,
+      "contact_max_slide": 0.6,
+      "contact_clearance": 0.01,
+      "contact_replan_ratio": 1.25,
+      "contact_max_force_ratio": 1.0,
+      "robot_max_push_force": 200000.0,
+      "robot_push_height": 0.15,
+      "push_friction_mu": 0.5,
+      "se2_cell": 0.15,
+      "se2_n_theta": 12,
+      "se2_connectivity": 8,
+      "se2_containment": "centroid",
+      "se2_rot_weight": null,
+      "se2_goal_candidates": 24,
+      "se2_goal_widen": 1,
+      "dynamic_speed": 0.3,
+      "dynamic_step": 0.25,
+      "dynamic_block_patience": 2.0,
+      "dynamic_give_up": 30.0,
+      "dynamic_replan_backoff": 2.0,
+      "dynamic_wait_step": 2.0,
+      "dynamic_max_wait": 90.0,
+      "grid_step": 0.3,
+      "conn_radius": 0.6,
+      "strategy": "llm-cost-risk",
+      "use_llm_ordering": true,
+      "max_expansions": 100000,
+      "step_execute_edges": 1,
+      "max_replans": 10000,
+      "deepseek_api_key": "<set>",
+      "deepseek_base_url": "https://api.deepseek.com/chat/completions",
+      "deepseek_model": "deepseek-flash",
+      "deepseek_thinking": true,
+      "deepseek_reasoning_effort": "low",
+      "llm_max_tokens": null,
+      "llm_timeout": 300.0,
+      "llm_max_retries": 2,
+      "perception_llm_timeout": 60.0,
+      "perception_llm_max_calls": 8,
+      "llm_choice_max_options": 10,
+      "llm_choice_reuse_decision": true,
+      "out_dir": "img",
+      "save_frames": true,
+      "show_global_obstacles": false,
+      "gif_fps": 10,
+      "gif_end_hold_s": 2,
+      "gif_dpi": 300,
+      "gif_time_step": 1.0,
+      "gif_max_frames": 400,
+      "verbose": false
+    }
+  }
+}

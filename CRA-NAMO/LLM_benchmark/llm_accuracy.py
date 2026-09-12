@@ -7,6 +7,7 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -23,8 +24,9 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+import cost
 import scenarios
-from config import Config
+from config import Config, validate_strategy
 from llm_difficulty import (
     MATERIAL_MU_RHO,
     DifficultyEstimator,
@@ -68,6 +70,15 @@ INK, MUTED, GRID, SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#fcfcfb"
 def log(msg: str) -> None:
     """输出带时间戳的进度消息。"""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _fmt_pct(value) -> str:
+    """把可能缺失的百分比格式化成表格单元。"""
+    return "-" if value is None else f"{value:+.1f}%"
+
+
+def _fmt_num(value, digits: int = 1) -> str:
+    return "-" if value is None else f"{value:.{digits}f}"
 
 
 def _hash_files(paths) -> str:
@@ -380,6 +391,10 @@ def _reorder_anchor_block(prompt: str, order: str, seed: int = 0) -> str:
     return "\n".join(lines), ordered
 
 
+# 回答要留够篇幅；截断的回答解析出来是草稿数字，会伪装成“照抄锚点”。
+ORDER_MAX_TOKENS = 512
+
+
 def stage_order(cfg: Config, workers: int) -> dict:
     _preflight(cfg)
     est = DifficultyEstimator(cfg)
@@ -402,9 +417,10 @@ def stage_order(cfg: Config, workers: int) -> dict:
             f"last row = {last_value:g}, largest = {max_value:g}")
 
         def ask(it: Item, _p=prompts):
-            value, _ = _ask_raw(cfg, cfg.deepseek_model, "disabled", 32,
-                                _p[it.label])
-            return it.label, value
+            # 32 个 token 会把每次回答都截断，解析到的是草稿里的数字而不是结论。
+            value, why = _ask_raw(cfg, cfg.deepseek_model, "disabled",
+                                  ORDER_MAX_TOKENS, _p[it.label])
+            return it.label, (value if why != "length" else None)
 
         t0 = time.time()
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -440,35 +456,61 @@ def stage_order(cfg: Config, workers: int) -> dict:
 
 
 # 合成估计误差路线研究。
+#
+# 十门地图上每道门是一个独立的三选一：搬 A、搬 B 或绕行。这里不调 API，而是
+# 直接把「估计值 / 真实值 = F」写进 belief，再看规划器的选择和真实代价如何变化。
+# F 是构造出来的而不是采样出来的，所以横轴就是真实的 Gap 比例，「多大的 Gap
+# 换来多少 C」可以直接读出来。
 
 DOORS_MAP = "ten_doors"
 
-# 每个误差点限定一个带种子的乘性代价误差和风险等级偏移。
-DOORS_GAPS = ((1.0, 0), (1.5, 1), (2.0, 2), (4.0, 3), (10.0, 4))
+# 代价 Gap 梯度：belief 里的难度是真实值的 F 倍或 1/F 倍。
+DOORS_COST_RATIOS = (1.0, 1.15, 1.3, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 6.0, 10.0)
+# 风险 Gap 梯度：belief 里的等级相对真实等级偏移 K 级，越界后截断。
+DOORS_RISK_SHIFTS = (0, 1, 2, 3, 4)
+# 联合梯度：代价比例与风险偏移成对增大。
+DOORS_JOINT_LADDER = ((1.5, 1), (2.0, 2), (4.0, 3), (10.0, 4))
+# 冒烟测试用的短梯度。
+DOORS_QUICK_COST = (1.0, 1.5, 2.0, 4.0, 10.0)
+DOORS_QUICK_RISK = (0, 2, 4)
+DOORS_QUICK_JOINT = ((2.0, 2), (10.0, 4))
 
-# 每个种子在仅代价、仅风险和联合实验中保持配对采样。
-DOORS_SEEDS = 1
+# 三个方向。`under` 把每个估计都往「更便宜、更安全」偏，`over` 反之，
+# `mixed` 给每个障碍物一个固定的随机方向。
+DOORS_DIRECTIONS = ("under", "over", "mixed")
+DIRECTION_LABEL = {"under": "under-estimate", "over": "over-estimate",
+                   "mixed": "random direction", "exact": "exact"}
+DIRECTION_STYLE = {"under": ("#eb6834", "v"), "over": ("#2a78d6", "^"),
+                   "mixed": ("#1baf7a", "o")}
+FAMILY_LABEL = {"cost": "cost only", "risk": "risk only", "joint": "cost + risk"}
+
+# `mixed` 每个 Gap 点的随机方向重复数；`under` 和 `over` 是确定性的，各一次。
+DOORS_SEEDS = 3
+# 校准阶段用来禁掉一个选项的 belief 难度，高于 Config.robot_max_push_force。
+DOORS_FORBID_N = 1e7
 
 
-def _doors_beliefs(gates: List[dict], seed: int, cost_factor: float,
-                   risk_levels: int, perturb: tuple):
-    """在用户指定的 Gap 等级下生成离线 LLM 风格 belief。"""
-    rng_d = random.Random(f"difficulty-{seed}-{cost_factor:g}")
-    rng_r = random.Random(f"risk-{seed}-{risk_levels}")
+def _doors_signs(gates: List[dict], seed: int) -> Dict[int, int]:
+    """给每个障碍物一个只取决于 seed 的偏离方向，与 Gap 大小无关。
+
+    方向固定之后，同一个 seed 在梯度上的各点就是配对样本：曲线的起伏来自 F
+    变大，而不是来自换了一组随机数。旧实现按 (seed, F) 建流，梯度点之间互相
+    独立，于是 Gap 的影响和采样噪声混在一起。
+    """
+    rng = random.Random(f"ten-doors-signs-{seed}")
+    return {r["oid"]: (1 if rng.random() < 0.5 else -1) for r in gates}
+
+
+def _doors_beliefs(gates: List[dict], cost_ratio: float, risk_shift: int,
+                   direction: str, signs: Dict[int, int]):
+    """按给定的 Gap 比例构造离线 belief。"""
     difficulty, level = {}, {}
+    fixed = {"under": -1, "over": 1}.get(direction)
     for r in gates:
-        d, lvl = r["difficulty"], r["risk"]
-        log_band = math.log10(cost_factor)
-        draw_d = 10.0 ** rng_d.uniform(-log_band, log_band)
-        shift = rng_r.randint(-risk_levels, risk_levels) if risk_levels else 0
-        draw_r = LEVELS[max(0, min(len(LEVELS) - 1,
-                                  LEVELS.index(lvl) + shift))]
-        if "difficulty" in perturb:
-            d = max(0.01, d * draw_d)
-        if "risk" in perturb:
-            lvl = draw_r
-        difficulty[r["oid"]] = d
-        level[r["oid"]] = lvl
+        sign = signs[r["oid"]] if fixed is None else fixed
+        difficulty[r["oid"]] = float(r["difficulty"]) * (cost_ratio ** sign)
+        index = LEVELS.index(r["risk"]) + sign * risk_shift
+        level[r["oid"]] = LEVELS[max(0, min(len(LEVELS) - 1, index))]
     return difficulty, level
 
 
@@ -484,10 +526,17 @@ def _gate_choices(gates: List[dict], removed) -> Dict[int, str]:
     return choice
 
 
-def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
-               level: Dict[int, str], summary_path: Optional[str] = None) -> dict:
-    """使用带种子的估计器 belief 运行一次十门穿越。"""
-    scenario = scenarios.load(DOORS_MAP)             # 每次运行加载全新的物体。
+def _run_doors(job: dict) -> dict:
+    """按给定 belief 跑一次十门穿越，并按真实风险等级重新计价 C。
+
+    参数是一个可 pickle 的字典，因此这一步可以放进进程池并行。
+    """
+    gates = job["gates"]
+    difficulty = {int(k): float(v) for k, v in job["difficulty"].items()}
+    level = {int(k): str(v) for k, v in job["level"].items()}
+
+    scenario = scenarios.load(DOORS_MAP,             # 每次运行加载全新的物体。
+                              closed_bypasses=tuple(job.get("closed_bypasses", ())))
     cfg: Config = scenario["cfg"]
     cfg.save_frames = False
     cfg.verbose = False
@@ -496,39 +545,61 @@ def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
                      scenario["movable"], scenario["start"], scenario["goal"], cfg)
     original_poses = {w.oid: w.polygon for w in sim.world}
     sim.estimator.api_key = ""
-    sim.estimator.mode = arm
+    sim.estimator.mode = "offline-gap"
     sim.risk.api_key = ""
     for oid, value in difficulty.items():
-        sim.estimator.cache[oid] = round(float(value), 3)
+        sim.estimator.cache[oid] = round(value, 3)
     for oid, lvl in level.items():
         sim.risk.level[oid] = lvl
-        sim.risk.source[oid] = arm
+        sim.risk.source[oid] = "offline-gap"
 
     t0 = time.time()
     res = sim.run()
-    if summary_path:
-        import viz
-        os.makedirs(os.path.dirname(summary_path), exist_ok=True)
-        viz.visualize(sim, res, original_poses, summary_path)
-        log(f"wrote {summary_path}")
-    choices = _gate_choices(gates, res.removed)
+    wall = round(time.time() - t0, 1)
+
     true_difficulty = {r["oid"]: r["difficulty"] for r in gates}
     true_risk = {r["oid"]: r["risk"] for r in gates}
+    moved = sorted(set(res.removed))
+    # 执行器按 belief 的等级收风险附加项，所以低估风险的运行会白拿一笔折扣，
+    # 甚至比 exact 还便宜。这里按真实等级重算，C_true 才是与 belief 无关的
+    # 裁判分；res.C 作为 C_believed 保留，用来显示这笔折扣有多大。
+    risk_true = sum(cost.risk_cost(cfg, true_risk.get(oid, LOW)) for oid in moved)
+    c_true = res.C - res.risk_cost + risk_true
+
+    if job.get("screenshot"):
+        import viz
+        path = os.path.join(OUT_DIR, job["screenshot"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        viz.visualize(sim, res, original_poses, path, benchmark_info={
+            "strategy": job["label"], "llm_modes": "offline gap injection",
+            "wall_time_seconds": wall,
+            "status": ("reached goal" if res.success else "failed")})
+        log(f"wrote {path}")
+
     factor_gaps = [max(difficulty[oid] / true, true / difficulty[oid])
                    for oid, true in true_difficulty.items()]
     risk_gaps = [abs(LEVELS.index(level[oid]) - LEVELS.index(true))
                  for oid, true in true_risk.items()]
     return {
-        "arm": arm, "success": res.success, "J": res.J, "C": res.C,
-        "walk_cost": res.walk_cost, "work_cost": res.work_cost,
-        "risk_cost": res.risk_cost, "pushes": len(res.removed),
-        "removed": sorted(res.removed),
-        # 统计真实风险高于 low 且被搬移的障碍物。
-        "risky_pushes": sorted(oid for oid in res.removed
+        "label": job["label"], "family": job["family"],
+        "direction": job["direction"], "seed": job["seed"],
+        "cost_ratio": job["cost_ratio"], "risk_shift": job["risk_shift"],
+        "closed_bypasses": tuple(job.get("closed_bypasses", ())),
+        "success": res.success,
+        # 与 belief 无关的裁判分，报告里的 ΔC 全部基于它。
+        "C_true": round(c_true, 4),
+        "C_believed": res.C,
+        "risk_cost_true": round(risk_true, 4),
+        "risk_cost_believed": res.risk_cost,
+        "J": res.J, "walk_cost": res.walk_cost, "work_cost": res.work_cost,
+        "pushes": len(moved), "removed": moved,
+        # 真实风险高于 low 却仍被搬移的障碍物。
+        "risky_pushes": sorted(oid for oid in moved
                                if true_risk.get(oid, LOW) != LOW),
-        "choices": {str(g): c for g, c in sorted(choices.items())},
+        "choices": {str(g): c for g, c in sorted(
+            _gate_choices(gates, res.removed).items())},
         "cycles": res.cycles, "expansions": res.total_expansions,
-        "wall_s": round(time.time() - t0, 1), "message": res.message,
+        "wall_s": wall, "message": res.message,
         "realized_mean_cost_factor": round(statistics.fmean(factor_gaps), 3),
         "realized_max_cost_factor": round(max(factor_gaps), 3),
         "realized_mean_risk_levels": round(statistics.fmean(risk_gaps), 3),
@@ -538,63 +609,327 @@ def _run_doors(arm: str, gates: List[dict], difficulty: Dict[int, float],
     }
 
 
-def stage_doors(seeds: int) -> dict:
+def _run_doors_batch(jobs: List[dict], workers: int) -> List[dict]:
+    """顺序或并行跑完一批运行；两种路径结果完全相同。"""
+    log(f"doors: {len(jobs)} runs on {workers} worker(s), no API calls")
+    t0 = time.time()
+    rows: List[dict] = []
+
+    def drain(stream):
+        for i, row in enumerate(stream, 1):
+            rows.append(row)
+            log(f"  {i}/{len(jobs)} {row['label']:<28s} "
+                f"C={row['C_true']:>11,.0f}  pushes={row['pushes']:>2d}  "
+                f"risky={len(row['risky_pushes'])}  ({row['wall_s']}s)")
+
+    if workers <= 1:
+        drain(_run_doors(job) for job in jobs)
+    else:
+        # 每次运行都是独立且带种子的，并行不改变任何一个结果。
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            drain(pool.map(_run_doors, jobs))
+    log(f"doors: {len(jobs)} runs in {time.time() - t0:.1f}s")
+    return rows
+
+
+def _doors_rungs(cost_ratios, risk_shifts, joint) -> Dict[str, list]:
+    """把三个实验族都写成 (cost_ratio, risk_shift) 梯级列表。"""
+    return {
+        "cost": [(float(f), 0) for f in cost_ratios if f > 1.0],
+        "risk": [(1.0, int(k)) for k in risk_shifts if k > 0],
+        "joint": [(float(f), int(k)) for f, k in joint if f > 1.0 or k > 0],
+    }
+
+
+def _doors_jobs(gates, rungs: Dict[str, list], seeds: int,
+                shots: bool) -> List[dict]:
+    """列出整个扫描要跑的全部运行，并挑出要出图的那几次。"""
+    exact_difficulty = {r["oid"]: r["difficulty"] for r in gates}
+    exact_level = {r["oid"]: r["risk"] for r in gates}
+    jobs = [{"label": "exact", "gates": gates, "family": "exact",
+             "direction": "exact", "seed": 0, "cost_ratio": 1.0,
+             "risk_shift": 0, "difficulty": exact_difficulty,
+             "level": exact_level,
+             "screenshot": "ten_doors_exact.png" if shots else None}]
+
+    # 每个族最大的一级各出一张图：一张最乐观、一张最悲观。
+    shot_at = {}
+    if shots:
+        for family, ladder in rungs.items():
+            if ladder:
+                shot_at[(family, ladder[-1], "under")] = \
+                    f"ten_doors_{family}_under.png"
+        if rungs["cost"]:
+            shot_at[("cost", rungs["cost"][-1], "over")] = \
+                "ten_doors_cost_over.png"
+
+    signs = {seed: _doors_signs(gates, seed) for seed in range(seeds)}
+    for family, ladder in rungs.items():
+        for rung in ladder:
+            ratio, shift = rung
+            for direction in DOORS_DIRECTIONS:
+                for seed in (range(seeds) if direction == "mixed" else (0,)):
+                    difficulty, level = _doors_beliefs(
+                        gates, ratio, shift, direction, signs[seed])
+                    tag = f"{family}_{ratio:g}x_{shift}lvl_{direction}"
+                    jobs.append({
+                        "label": tag if direction != "mixed" else f"{tag}_s{seed}",
+                        "gates": gates, "family": family,
+                        "direction": direction, "seed": seed,
+                        "cost_ratio": ratio, "risk_shift": shift,
+                        "difficulty": difficulty, "level": level,
+                        "screenshot": shot_at.get((family, rung, direction))})
+    return jobs
+
+
+def _doors_finish(runs: List[dict], base: dict) -> None:
+    """把每次运行折算成相对 exact 的差额，就地写回。"""
+    for row in runs:
+        ref = base["C_true"]
+        row["delta_C_pct"] = (round(100.0 * (row["C_true"] - ref) / ref, 3)
+                              if ref else None)
+        row["delta_C"] = round(row["C_true"] - ref, 1)
+        row["delta_walk"] = round(row["walk_cost"] - base["walk_cost"], 1)
+        row["delta_work"] = round(row["work_cost"] - base["work_cost"], 1)
+        row["delta_risk"] = round(row["risk_cost_true"]
+                                  - base["risk_cost_true"], 1)
+        # 低估风险换来的账面折扣：规划器自己算的 C 比裁判分便宜多少。
+        row["risk_discount"] = round(row["C_true"] - row["C_believed"], 1)
+        row["changed_gates"] = sorted(
+            (g for g, c in row["choices"].items() if c != base["choices"][g]),
+            key=int)
+        row["changed"] = len(row["changed_gates"])
+        row["extra_risky"] = (len(row["risky_pushes"])
+                              - len(base["risky_pushes"]))
+
+
+def _check_exact_balance(base: dict, n_gates: int) -> None:
+    """exact 一边倒时提醒：这样的地图问不出估计误差的影响。
+
+    十道门全部绕行或全部搬走时，改变 belief 也没有第二个选项可以换，扫描
+    量到的只会是零。`doors-calibrate` 的平衡点难度就是用来修这件事的。
+    """
+    pushed = sum(1 for choice in base["choices"].values() if choice != "detour")
+    share = base["work_cost"] / base["C_true"] if base["C_true"] else 0.0
+    if 2 <= pushed <= n_gates - 2 and share >= 0.05:
+        return
+    log(f"doors: WARNING the exact run pushes {pushed} of {n_gates} gates and "
+        f"spends {share:.1%} of C on manipulation. With the decisions this "
+        f"lopsided there is little for an estimate error to move, so the "
+        f"ladder below will read close to flat. Run `doors-calibrate` and "
+        f"retune the difficulties in scenarios/ten_doors.py around the "
+        f"break-even values it reports.")
+
+
+def _check_ladder_headroom(gates, rungs: Dict[str, list], cfg: Config) -> None:
+    """梯度顶端高估出来的难度不能越过机器人的推力上限。
+
+    越过之后 `search._off_limits` 会直接禁掉这次搬移，量到的就成了那条禁令，
+    而不是估计误差本身。这里只在真的越界时提醒，不改动梯度。
+    """
+    limit = cfg.robot_max_push_force
+    if limit <= 0:
+        return
+    top = max([f for ladder in rungs.values() for f, _ in ladder] or [1.0])
+    worst = max(r["difficulty"] for r in gates) * top
+    if worst > limit:
+        log(f"doors: WARNING at {top:g}x the believed difficulty reaches "
+            f"{worst:,.0f} N, past the robot's {limit:,.0f} N limit - those "
+            f"gates measure a ban on pushing, not an estimate gap. Lower the "
+            f"ladder or raise Config.robot_max_push_force.")
+
+
+def stage_doors(seeds: int, workers: int, quick: bool, shots: bool) -> dict:
     if seeds < 1:
         raise SystemExit("doors: --doors-seeds must be at least 1")
-    gates = scenarios.load(DOORS_MAP)["gates"]
-    families = {"both": ("difficulty", "risk"),
-                "difficulty": ("difficulty",), "risk": ("risk",)}
-    n_runs = 1 + (len(DOORS_GAPS) - 1) * len(families) * seeds
-    log(f"doors: {DOORS_MAP}, synthetic Gap ladder {DOORS_GAPS}, "
-        f"{seeds} seeds = {n_runs} runs; no API calls")
+    scenario = scenarios.load(DOORS_MAP)
+    gates, summary = scenario["gates"], scenario["gate_summary"]
+    rungs = _doors_rungs(
+        DOORS_QUICK_COST if quick else DOORS_COST_RATIOS,
+        DOORS_QUICK_RISK if quick else DOORS_RISK_SHIFTS,
+        DOORS_QUICK_JOINT if quick else DOORS_JOINT_LADDER)
+    _check_ladder_headroom(gates, rungs, scenario["cfg"])
+    jobs = _doors_jobs(gates, rungs, seeds, shots)
+    log(f"doors: {DOORS_MAP}, cost ladder "
+        + ", ".join(f"{f:g}x" for f, _ in rungs["cost"])
+        + f"; risk ladder " + ", ".join(f"+/-{k}" for _, k in rungs["risk"])
+        + f"; {seeds} random-direction seeds per point")
 
-    runs = [_run_doors("exact", gates,
-                       {r["oid"]: r["difficulty"] for r in gates},
-                       {r["oid"]: r["risk"] for r in gates},
-                       os.path.join(OUT_DIR, "ten_doors_exact.png"))]
-    runs[0].update({"family": "exact", "seed": 0, "gap_index": 0,
-                    "cost_factor": 1.0, "risk_levels": 0, "changed": 0})
-    log(f"  {'exact':<14s} C={runs[0]['C']:>12,.0f}  J={runs[0]['J']:>12,.0f}  "
-        f"pushes={runs[0]['pushes']}  ({runs[0]['wall_s']}s)")
+    runs = _run_doors_batch(jobs, workers)
+    base = runs[0]
+    _doors_finish(runs, base)
+    _check_exact_balance(base, len(summary))
 
-    max_gap_index = len(DOORS_GAPS) - 1
-    for gap_index, (cost_factor, risk_levels) in enumerate(DOORS_GAPS[1:], 1):
-        for seed in range(seeds):
-            for family, perturb in families.items():
-                difficulty, level = _doors_beliefs(
-                    gates, seed, cost_factor, risk_levels, perturb)
-                screenshot = None
-                if gap_index == max_gap_index and seed == 0 and family == "both":
-                    screenshot = os.path.join(OUT_DIR,
-                                              "ten_doors_max_gap.png")
-                row = _run_doors(
-                    f"gap{gap_index}_{family}_{seed}", gates, difficulty, level,
-                    screenshot)
-                row.update({"family": family, "seed": seed,
-                            "gap_index": gap_index,
-                            "cost_factor": cost_factor,
-                            "risk_levels": risk_levels})
-                row["changed"] = sum(
-                    1 for g, c in row["choices"].items()
-                    if c != runs[0]["choices"][g])
-                runs.append(row)
-                log(f"  gap={gap_index} {family:<10s} seed={seed}  "
-                    f"C={row['C']:>12,.0f}  J={row['J']:>12,.0f}  "
-                    f"changed={row['changed']}/10  "
-                    f"risky={len(row['risky_pushes'])}  ({row['wall_s']}s)")
-
-    payload = {"map": DOORS_MAP, "seeds": seeds,
-               "gap_model": {
-                   "cost": "estimate/true sampled log-uniformly in [1/F, F]",
-                   "risk": "integer level shift sampled in [-K, K], then clipped",
-               },
-               "gaps": [{"gap_index": i, "cost_factor": f, "risk_levels": k}
-                        for i, (f, k) in enumerate(DOORS_GAPS)],
-               "families": list(families), "gates": gates, "runs": runs,
-               "screenshots": {"exact": "ten_doors_exact.png",
-                               "max_gap": "ten_doors_max_gap.png"}}
+    payload = {
+        "map": DOORS_MAP, "seeds": seeds,
+        "gap_model": {
+            "cost": "believed difficulty = true * F (over) or true / F (under); "
+                    "in the mixed arm the direction is drawn once per obstacle "
+                    "and held across the whole ladder",
+            "risk": "believed level = true level shifted K steps toward safe "
+                    "(under) or dangerous (over), clipped to the ladder",
+            "scoring": "C_true re-prices the risk surcharge at the reference "
+                       "level, so a run that under-called risk does not get a "
+                       "discount for it",
+        },
+        "ladders": {name: [{"cost_ratio": f, "risk_shift": k} for f, k in rung]
+                    for name, rung in rungs.items()},
+        "directions": list(DOORS_DIRECTIONS),
+        "gates": gates, "gate_summary": summary, "runs": runs,
+        "screenshots": {job["label"]: job["screenshot"]
+                        for job in jobs if job.get("screenshot")},
+    }
     _save("doors.json", payload)
-    _chart_doors_gap(payload, os.path.join(OUT_DIR, "doors_gap.png"))
+    _write_doors_csv(payload)
+    _chart_doors_gap(payload, _load("accuracy.json"), _load("risk.json"),
+                     os.path.join(OUT_DIR, "doors_gap.png"))
+    _chart_doors_gates(payload, os.path.join(OUT_DIR, "doors_gates.png"))
+    return payload
+
+
+# 逐门校准：单独测出「搬 A」「搬 B」「绕行」各自的真实代价。
+
+def _calibration_jobs(gates: List[dict]) -> List[dict]:
+    """每道门三次运行，每次只留下一个选项。"""
+    exact_difficulty = {r["oid"]: r["difficulty"] for r in gates}
+    exact_level = {r["oid"]: r["risk"] for r in gates}
+    by_gate: Dict[int, Dict[str, int]] = {}
+    for r in gates:
+        by_gate.setdefault(r["gate"], {})[r["side"]] = r["oid"]
+
+    jobs = []
+    for gate, sides in sorted(by_gate.items()):
+        # 砌死绕行开口后只剩两扇门，再把其中一扇的 belief 抬到机器人推不动，
+        # 剩下的那扇就是规划器唯一能选的路。
+        for keep in ("A", "B"):
+            difficulty = dict(exact_difficulty)
+            difficulty[sides["B" if keep == "A" else "A"]] = DOORS_FORBID_N
+            jobs.append({"label": f"gate{gate}_only{keep}", "gates": gates,
+                         "family": "calibration", "direction": keep,
+                         "seed": gate, "cost_ratio": 1.0, "risk_shift": 0,
+                         "difficulty": difficulty, "level": exact_level,
+                         "closed_bypasses": (gate,), "screenshot": None})
+        # 两扇门都推不动时，只能绕行。
+        difficulty = dict(exact_difficulty)
+        for oid in sides.values():
+            difficulty[oid] = DOORS_FORBID_N
+        jobs.append({"label": f"gate{gate}_detour", "gates": gates,
+                     "family": "calibration", "direction": "detour",
+                     "seed": gate, "cost_ratio": 1.0, "risk_shift": 0,
+                     "difficulty": difficulty, "level": exact_level,
+                     "closed_bypasses": (), "screenshot": None})
+    return jobs
+
+
+def _flip_factors(option_C: Dict[str, float], option_work: Dict[str, float]):
+    """预测每个选项被误估到多大比例时决策才翻转。
+
+    规划器给一次搬移的计价里，只有「难度 x 移动距离」这一项随 belief 线性
+    变化，其余是行驶和风险。所以把选项 o 的估计放大 F 倍后，它的账面代价是
+    `C_o + work_o * (F - 1)`；缩小 F 倍则是 `C_o - work_o * (1 - 1/F)`。
+    赢家被抬到输，或者输家被压到赢，都能解析地解出那个 F。
+    """
+    usable = {k: v for k, v in option_C.items() if v is not None}
+    if len(usable) < 2:
+        return {"best": None, "margin_J": None, "flip_over": None,
+                "flip_under": None, "flip_under_option": None}
+    best = min(usable, key=usable.get)
+    second = min((k for k in usable if k != best), key=usable.get)
+    margin = usable[second] - usable[best]
+
+    work_best = option_work.get(best) or 0.0
+    # 赢家被高估：账面代价涨到超过第二名就翻转。
+    flip_over = 1.0 + margin / work_best if work_best > 0 else None
+
+    # 输家被低估：账面代价压到低于赢家就翻转，压到 0 都不够就永远不翻。
+    flip_under, flip_under_option = None, None
+    for name, value in usable.items():
+        if name == best:
+            continue
+        work = option_work.get(name) or 0.0
+        gap = value - usable[best]
+        if work <= gap or work <= 0:
+            continue
+        candidate = 1.0 / (1.0 - gap / work)
+        if flip_under is None or candidate < flip_under:
+            flip_under, flip_under_option = candidate, name
+    return {"best": best, "margin_J": round(margin, 1),
+            "flip_over": round(flip_over, 3) if flip_over else None,
+            "flip_under": round(flip_under, 3) if flip_under else None,
+            "flip_under_option": flip_under_option}
+
+
+def _break_even_difficulty(design: dict, option_C: Dict[str, float],
+                           option_work: Dict[str, float]) -> Dict[str, float]:
+    """每扇门要多重才与绕行正好持平，用来重新校准地图。
+
+    搬移代价里只有「难度 x 移动距离」随难度线性变化，所以把这一项调整到
+    两个选项的 C 相等，就得到平衡点上的难度。高于它这扇门会被绕开，低于
+    它会被搬走；地图想问出问题，难度就得跨在这个数两侧。
+    """
+    detour = option_C.get("detour")
+    out: Dict[str, float] = {}
+    for side in ("A", "B"):
+        here, work = option_C.get(side), option_work.get(side) or 0.0
+        if detour is None or here is None or work <= 0:
+            continue
+        value = design[side]["difficulty"] * (1.0 + (detour - here) / work)
+        # 平衡点算成负数，说明这扇门输给绕行的不是重量：即使它没有重量，
+        # 风险附加项或者接近它要走的路也已经比绕行贵了。调难度救不回来。
+        out[side] = round(value, 1) if value > 0 else None
+    return out
+
+
+def stage_doors_calibrate(workers: int) -> dict:
+    """测出每道门三个选项的真实代价，得到决策裕度和预测翻转比例。"""
+    scenario = scenarios.load(DOORS_MAP)
+    gates, summary = scenario["gates"], scenario["gate_summary"]
+    jobs = _calibration_jobs(gates)
+    log(f"calibrate: {len(summary)} gates x 3 options = {len(jobs)} runs")
+    runs = _run_doors_batch(jobs, workers)
+
+    by_gate: Dict[int, Dict[str, dict]] = {}
+    for row in runs:
+        gate = int(row["label"].split("_")[0][4:])
+        by_gate.setdefault(gate, {})[row["direction"]] = row
+
+    rows = []
+    for gate in sorted(by_gate):
+        got = by_gate[gate]
+        option_C = {k: (r["C_true"] if r["success"] else None)
+                    for k, r in got.items()}
+        detour = got.get("detour")
+        # 绕行时这道门一点功都不做，所以两次运行的功之差就是这道门自己的功。
+        base_work = detour["work_cost"] if detour else 0.0
+        option_work = {"detour": 0.0}
+        for side in ("A", "B"):
+            if side in got:
+                option_work[side] = max(0.0, got[side]["work_cost"] - base_work)
+        design = next(g for g in summary if g["gate"] == gate)
+        rows.append({"gate": gate, "kind": design["kind"],
+                     "detour_m": design["detour_m"],
+                     "ab_ratio": design["ab_ratio"],
+                     "A": design["A"], "B": design["B"],
+                     "C": {k: (round(v, 1) if v is not None else None)
+                           for k, v in option_C.items()},
+                     "work": {k: round(v, 1) for k, v in option_work.items()},
+                     "break_even_difficulty": _break_even_difficulty(
+                         design, option_C, option_work),
+                     **_flip_factors(option_C, option_work)})
+        r = rows[-1]
+        over = f"{r['flip_over']:.2f}x" if r["flip_over"] else "never"
+        under = f"{r['flip_under']:.2f}x" if r["flip_under"] else "never"
+        even = "  ".join(
+            f"{side} {value:,.0f} N" if value else f"{side} not by weight"
+            for side, value in sorted(r["break_even_difficulty"].items()))
+        log(f"  gate {gate} ({r['kind']:<4s})  best={r['best'] or '-':<6s} "
+            f"margin={r['margin_J'] or 0:>9,.0f} J  "
+            f"flips when over-estimated {over:<7s} "
+            f"when under-estimated {under:<7s}  break-even: {even}")
+
+    payload = {"map": DOORS_MAP, "gates": rows, "runs": runs}
+    _save("doors_calibration.json", payload)
     return payload
 
 
@@ -637,6 +972,8 @@ def _risk_stats(rows, key: str) -> dict:
         "under": round(sum(1 for d in deltas if d < 0) / n, 3),
         "over": round(sum(1 for d in deltas if d > 0) / n, 3),
         "worst_under_levels": -min(deltas) if min(deltas) < 0 else 0,
+        # 十门风险梯度按「差几级」标刻度，用这个数把实测精度落到梯度上。
+        "mean_abs_levels": round(statistics.fmean(abs(d) for d in deltas), 3),
         "shortfall_m": round(statistics.fmean(max(0.0, -g) for g in gaps), 1),
         "excess_m": round(statistics.fmean(max(0.0, g) for g in gaps), 1),
     }
@@ -734,12 +1071,13 @@ def _repeatability(rows) -> dict:
 # 图表。
 
 def _chart_accuracy(rows, path: str):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    """左图是估计值对参考值，右图是误差倍数的分布。"""
+    plt = _plt()
 
-    fig, ax = plt.subplots(figsize=(7.2, 6.4))
-        # 按观测数据设置坐标轴范围，避免裁剪点。
+    fig, (ax, ax_cdf) = plt.subplots(
+        1, 2, figsize=(12.2, 6.0), gridspec_kw={"width_ratios": [1.35, 1.0]})
+
+    # 按观测数据设置坐标轴范围，避免裁剪点。
     seen = [v for r in rows for v in (r["mu_rho_true"], r.get("pred")) if v]
     lo, hi = min(0.2, min(seen) / 1.6), max(3000.0, max(seen) * 1.6)
     ax.plot([lo, hi], [lo, hi], color=INK, lw=1.2, zorder=2)
@@ -747,7 +1085,7 @@ def _chart_accuracy(rows, path: str):
         ax.fill_between([lo, hi], [lo / band, hi / band], [lo * band, hi * band],
                         color=MUTED, alpha=alpha, lw=0, zorder=1)
 
-        # 在图表中直接标注重复出现的锚点数值。
+    # 在图表中直接标注重复出现的锚点数值。
     counts: Dict[float, int] = {}
     for r in rows:
         if r.get("pred"):
@@ -772,27 +1110,62 @@ def _chart_accuracy(rows, path: str):
 
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
-    ax.set_xlabel("reference mu*rho  [kg/m$^3$]", color=INK)
-    ax.set_ylabel("LLM estimate  [kg/m$^3$]", color=INK)
-    ax.set_title("LLM mu*rho vs reference — shaded bands are 1.5x and 2x",
-                 color=INK, fontsize=11, loc="left")
-        # 主要数量级保持对数网格可读。
+    _style(ax, xlabel="reference mu*rho  [kg/m$^3$]",
+           ylabel="LLM estimate  [kg/m$^3$]",
+           title="LLM mu*rho against the reference", grid="both")
     ax.grid(True, which="major", color=GRID, lw=0.6, zorder=0)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    ax.tick_params(colors=MUTED)
-    ax.legend(frameon=False, loc="upper left", fontsize=9)
+    ax.text(0.02, 0.98, "shaded bands are 1.5x and 2x", transform=ax.transAxes,
+            ha="left", va="top", fontsize=8.5, color=MUTED)
+    ax.legend(frameon=False, loc="lower right", fontsize=9)
+
+    # 右图把误差换算成十门实验横轴上的「Gap 比例」。
+    arms = (("LLM", "pred", "#2a78d6", 14), ("offline heuristic", "heuristic",
+                                             MUTED, -16))
+    limit = 1.0
+    for name, key, colour, dy in arms:
+        factors = sorted(10 ** abs(e) for e in _log_errors(rows, key))
+        if not factors:
+            continue
+        limit = max(limit, factors[-1])
+        share = [(i + 1) / len(factors) for i in range(len(factors))]
+        ax_cdf.step(factors, share, where="post", color=colour, lw=2.0,
+                    label=f"{name} (n={len(factors)})", zorder=3)
+        median = statistics.median(factors)
+        ax_cdf.scatter([median], [0.5], s=46, color=colour, zorder=4,
+                       edgecolor=SURFACE, linewidth=1.0)
+        # 两条曲线的中位数常常靠得很近，上下错开标注。
+        ax_cdf.annotate(f"{name} median {median:.1f}x", xy=(median, 0.5),
+                        xytext=(8, dy), textcoords="offset points",
+                        fontsize=8.5, color=colour)
+    ax_cdf.set_xscale("log")
+    ax_cdf.set_xlim(1.0, max(limit * 1.1, 2.0))
+    # 刻度直接用十门实验的梯级，两张图可以并排对读。
+    rungs = [r for r in DOORS_COST_RATIOS if 1.0 <= r <= limit * 1.1]
+    for rung in rungs[1:]:
+        ax_cdf.axvline(rung, color=GRID, lw=0.9, zorder=1)
+    ax_cdf.set_xticks(rungs)
+    ax_cdf.set_xticklabels([f"{r:g}x" for r in rungs], fontsize=7.5,
+                           rotation=40, ha="right")
+    ax_cdf.minorticks_off()
+    ax_cdf.set_ylim(0, 1.02)
+    ax_cdf.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax_cdf.set_yticklabels(["0%", "25%", "50%", "75%", "100%"])
+    _style(ax_cdf, xlabel="error factor  |estimate / reference|",
+           ylabel="share of objects at or below",
+           title="How wrong, on the ten-gate experiment's own axis")
+    ax_cdf.text(0.02, 0.98,
+                "vertical guides are the Gap ladder rungs in doors_gap.png",
+                transform=ax_cdf.transAxes, ha="left", va="top",
+                fontsize=8, color=MUTED)
+    ax_cdf.legend(frameon=False, loc="lower right", fontsize=9)
+
     fig.tight_layout()
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
-    log(f"wrote {path}")
+    _save_fig(fig, path)
 
 
 def _chart_risk(risk: dict, path: str):
-    """为每个风险估计阶段绘制一个混淆矩阵。"""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    """上排是每个阶段的混淆矩阵，下排是折算成米的代价。"""
+    plt = _plt()
     from matplotlib.colors import LinearSegmentedColormap
     from matplotlib.patches import Rectangle
 
@@ -808,8 +1181,11 @@ def _chart_risk(risk: dict, path: str):
     ticks = [short.get(name, name) for name in LEVELS]
     n = len(LEVELS)
 
-    fig, axes = plt.subplots(1, len(grids), figsize=(3.55 * len(grids) + 1.2, 4.5))
-    axes = list(axes) if len(grids) > 1 else [axes]
+    fig = plt.figure(figsize=(3.9 * len(grids) + 1.4, 7.0),
+                     constrained_layout=True)
+    spec = fig.add_gridspec(2, len(grids), height_ratios=[2.6, 1.0])
+    axes = [fig.add_subplot(spec[0, i]) for i in range(len(grids))]
+    ax_cost = fig.add_subplot(spec[1, :])
 
     for ax, (name, grid, stat) in zip(axes, grids):
         ax.set_facecolor(SURFACE)
@@ -823,7 +1199,7 @@ def _chart_risk(risk: dict, path: str):
                     ax.text(j, i, str(count), ha="center", va="center",
                             fontsize=9, zorder=3,
                             color=SURFACE if shade > 0.55 else INK)
-        # 描出对角线，使色阶继续表示计数。
+            # 描出对角线，使色阶继续表示计数。
             ax.add_patch(Rectangle((i - 0.5, i - 0.5), 1, 1, fill=False,
                                    edgecolor=INK, lw=1.1, zorder=2))
 
@@ -841,79 +1217,456 @@ def _chart_risk(risk: dict, path: str):
         ax.tick_params(colors=MUTED, length=0)
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.set_title(f"{name}\n{stat['exact']:.0%} exact  ·  "
-                     f"{stat['under']:.0%} called too safe",
-                     color=INK, fontsize=10, loc="left", pad=10)
+        ax.set_title(f"{name}\n{stat['exact']:.0%} exact, "
+                     f"{stat['under']:.0%} too safe\n"
+                     f"{stat['mean_abs_levels']:.2f} levels off on average",
+                     color=INK, fontsize=9.5, loc="left", pad=8)
 
     for ax in axes[1:]:
         ax.set_yticklabels([])
     axes[0].set_ylabel("reference risk level", color=INK, fontsize=9.5)
-    fig.supxlabel("level the estimator returned — left of the outline is an "
-                  "obstacle called safer than it is", color=MUTED, fontsize=9)
-    fig.tight_layout()
-    fig.savefig(path, dpi=160, facecolor=SURFACE)
-    plt.close(fig)
+
+    # 把每个阶段的误判折算成米：缺失的保护和凭空多走的路。
+    names = [name for name, _, _ in grids]
+    spots = list(range(len(names)))
+    width = 0.36
+    shortfall = [stat["shortfall_m"] for _, _, stat in grids]
+    excess = [stat["excess_m"] for _, _, stat in grids]
+    ax_cost.barh([s + width / 2 for s in spots], shortfall, height=width,
+                 color="#eb6834", label="protection dropped (shortfall)",
+                 zorder=3)
+    ax_cost.barh([s - width / 2 for s in spots], excess, height=width,
+                 color="#9ec5f4", label="detour invented (excess)", zorder=3)
+    for s, (under, over) in enumerate(zip(shortfall, excess)):
+        ax_cost.text(under, s + width / 2, f" {under:,.0f} m", va="center",
+                     fontsize=8.5, color=INK)
+        ax_cost.text(over, s - width / 2, f" {over:,.0f} m", va="center",
+                     fontsize=8.5, color=INK)
+    ax_cost.set_yticks(spots)
+    ax_cost.set_yticklabels(names, fontsize=9)
+    ax_cost.invert_yaxis()
+    ax_cost.margins(x=0.18)
+    _style(ax_cost, xlabel="mean detour-equivalent error per object  [m]",
+           title="What each mistake is worth in the planner's own units",
+           grid="x")
+    # 图例放到标题行右侧，否则会压住最长的那根柱子。
+    ax_cost.legend(frameon=False, fontsize=8.5, loc="lower right", ncol=2,
+                   bbox_to_anchor=(1.0, 1.0))
+
+    fig.supxlabel("level the estimator returned - left of the outline in the "
+                  "matrices is an obstacle called safer than it is",
+                  color=MUTED, fontsize=9)
+    _save_fig(fig, path)
+
+
+# 十门结果的汇总与导出。
+
+def _doors_sample(runs, family: str, direction: str, ratio: float,
+                  shift: int) -> List[dict]:
+    """取出一个 (族, 方向, 梯级) 上的全部运行。"""
+    return [r for r in runs
+            if r["family"] == family and r["direction"] == direction
+            and abs(r["cost_ratio"] - ratio) < 1e-9 and r["risk_shift"] == shift]
+
+
+def _doors_stats(sample: List[dict]) -> dict:
+    """把一组运行汇总成 ΔC 的分布和决策改动量。"""
+    if not sample:
+        return {"n": 0}
+    ok = [r for r in sample if r["success"] and r.get("delta_C_pct") is not None]
+    deltas = sorted(r["delta_C_pct"] for r in ok)
+    changed = [r["changed"] for r in sample]
+    risky = [r["extra_risky"] for r in sample]
+    out = {"n": len(sample), "reached": len(ok),
+           "mean_changed": round(statistics.fmean(changed), 2),
+           "max_changed": max(changed),
+           "mean_extra_risky": round(statistics.fmean(risky), 2),
+           "max_extra_risky": max(risky)}
+    if deltas:
+        out.update({
+            "mean": round(statistics.fmean(deltas), 2),
+            "median": round(statistics.median(deltas), 2),
+            "p10": round(float(np.percentile(deltas, 10)), 2),
+            "p90": round(float(np.percentile(deltas, 90)), 2),
+            "worst": round(deltas[-1], 2), "best": round(deltas[0], 2),
+            "mean_C_true": round(statistics.fmean(r["C_true"] for r in ok), 1),
+        })
+    return out
+
+
+def _doors_curve(runs, family: str, direction: str, ladder: List[dict],
+                 axis: str = "cost_ratio") -> List[tuple]:
+    """返回该族该方向上的 (x, 统计量) 序列，并补上 exact 处的零点。"""
+    neutral = 1.0 if axis == "cost_ratio" else 0
+    points = [(neutral, {"n": 1, "reached": 1, "mean": 0.0, "median": 0.0,
+                         "p10": 0.0, "p90": 0.0, "worst": 0.0, "best": 0.0,
+                         "mean_changed": 0.0, "max_changed": 0,
+                         "mean_extra_risky": 0.0, "max_extra_risky": 0})]
+    for rung in ladder:
+        stat = _doors_stats(_doors_sample(
+            runs, family, direction, rung["cost_ratio"], rung["risk_shift"]))
+        # 一个梯级上没有一次运行到达目标时就没有 ΔC 可画，跳过而不是补零。
+        if stat.get("mean") is not None:
+            points.append((rung[axis], stat))
+    return points
+
+
+def _interp_log(points: List[tuple], key: str, x: float):
+    """在 log x 轴上对曲线线性插值；x 越界时截断到端点。"""
+    usable = [(a, s[key]) for a, s in points if a > 0 and s.get(key) is not None]
+    if not usable or x <= 0:
+        return None
+    usable.sort()
+    if x <= usable[0][0]:
+        return usable[0][1]
+    if x >= usable[-1][0]:
+        return usable[-1][1]
+    for (x0, y0), (x1, y1) in zip(usable, usable[1:]):
+        if x0 <= x <= x1:
+            span = math.log(x1 / x0)
+            if span <= 0:
+                return y0
+            return y0 + (y1 - y0) * math.log(x / x0) / span
+    return usable[-1][1]
+
+
+def _doors_slope(points: List[tuple], key: str = "mean"):
+    """把 ΔC% 对 log2(F) 做最小二乘：估计误差每翻一倍要多花多少 C。"""
+    xs = [math.log2(a) for a, s in points if a > 0 and s.get(key) is not None]
+    ys = [s[key] for a, s in points if a > 0 and s.get(key) is not None]
+    if len(xs) < 2:
+        return None
+    return round(float(np.polyfit(xs, ys, 1)[0]), 2)
+
+
+def _doors_flip_grid(doors: dict, family: str, axis: str):
+    """返回 gates x 梯级 的决策改动比例，用于热力图。"""
+    runs, base = doors["runs"], doors["runs"][0]
+    ladder = doors["ladders"][family]
+    gate_ids = sorted(base["choices"], key=int)
+    grid = []
+    for gate in gate_ids:
+        row = []
+        for rung in ladder:
+            sample = [r for r in runs
+                      if r["family"] == family
+                      and abs(r["cost_ratio"] - rung["cost_ratio"]) < 1e-9
+                      and r["risk_shift"] == rung["risk_shift"]]
+            flips = sum(1 for r in sample
+                        if r["choices"][gate] != base["choices"][gate])
+            row.append(flips / len(sample) if sample else 0.0)
+        grid.append(row)
+    return gate_ids, [rung[axis] for rung in ladder], grid
+
+
+def _write_doors_csv(doors: dict) -> str:
+    """把「Gap 比例 -> C 差别比例」写成可直接引用的表格。"""
+    os.makedirs(OUT_DIR, exist_ok=True)
+    path = os.path.join(OUT_DIR, "doors_gap_vs_cost.csv")
+    base = doors["runs"][0]
+    header = ["family", "direction", "gap_ratio", "risk_shift", "runs",
+              "reached_goal", "delta_C_mean_pct", "delta_C_median_pct",
+              "delta_C_p90_pct", "delta_C_worst_pct", "gates_changed_mean",
+              "gates_changed_max", "extra_risky_mean", "C_true_mean",
+              "C_true_exact"]
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(header)
+        for family, ladder in doors["ladders"].items():
+            for direction in DOORS_DIRECTIONS:
+                for rung in ladder:
+                    stat = _doors_stats(_doors_sample(
+                        doors["runs"], family, direction,
+                        rung["cost_ratio"], rung["risk_shift"]))
+                    if not stat.get("n"):
+                        continue
+                    writer.writerow([
+                        family, direction, f"{rung['cost_ratio']:g}",
+                        rung["risk_shift"], stat["n"], stat["reached"],
+                        stat.get("mean", ""), stat.get("median", ""),
+                        stat.get("p90", ""), stat.get("worst", ""),
+                        stat["mean_changed"], stat["max_changed"],
+                        stat["mean_extra_risky"], stat.get("mean_C_true", ""),
+                        base["C_true"]])
     log(f"wrote {path}")
+    return path
 
 
-def _chart_doors_gap(doors: dict, path: str):
-    """展示模拟 Gap 增大时路线代价和决策如何变化。"""
+# 图表样式。
+
+def _plt():
+    """统一初始化 matplotlib，避免每个图表函数各写一遍。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    return plt
 
-    runs, base = doors["runs"], doors["runs"][0]
-    gaps = doors["gaps"]
-    families = (("difficulty", "cost only", "#2a78d6", "o"),
-                ("risk", "risk only", "#eb6834", "^"),
-                ("both", "cost + risk", "#1baf7a", "D"))
-    fig, axes = plt.subplots(1, 2, figsize=(10.2, 4.2), sharex=True)
 
-    for family, label, color, marker in families:
-        xs, penalties, changes = [], [], []
-        lows_p, highs_p, lows_c, highs_c = [], [], [], []
-        for gap in gaps:
-            i = gap["gap_index"]
-            sample = ([base] if i == 0 else
-                      [r for r in runs if r.get("family") == family
-                       and r.get("gap_index") == i and r["success"]])
-            if not sample:
-                continue
-            ps = [100.0 * (r["C"] - base["C"]) / base["C"]
-                  for r in sample] if base["C"] else [0.0]
-            cs = [r.get("changed", 0) for r in sample]
-            xs.append(i)
-            penalties.append(statistics.fmean(ps))
-            changes.append(statistics.fmean(cs))
-            lows_p.append(min(ps)); highs_p.append(max(ps))
-            lows_c.append(min(cs)); highs_c.append(max(cs))
-        axes[0].plot(xs, penalties, color=color, marker=marker, lw=1.8,
-                     ms=5, label=label)
-        axes[1].plot(xs, changes, color=color, marker=marker, lw=1.8,
-                     ms=5, label=label)
-        if doors["seeds"] > 1:
-            axes[0].fill_between(xs, lows_p, highs_p, color=color, alpha=0.12)
-            axes[1].fill_between(xs, lows_c, highs_c, color=color, alpha=0.12)
+def _style(ax, xlabel=None, ylabel=None, title=None, grid="y"):
+    """套用全篇统一的坐标轴样式。"""
+    if xlabel:
+        ax.set_xlabel(xlabel, color=INK, fontsize=9.5)
+    if ylabel:
+        ax.set_ylabel(ylabel, color=INK, fontsize=9.5)
+    if title:
+        ax.set_title(title, loc="left", color=INK, fontsize=10.5, pad=8)
+    if grid:
+        ax.grid(True, axis=grid, color=GRID, lw=0.6, zorder=0)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors=MUTED, labelsize=8.5)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(GRID)
+    return ax
 
-    labels = [f"{g['cost_factor']:g}x / +/-{g['risk_levels']}"
-              for g in gaps]
-    for ax in axes:
-        ax.axhline(0, color=INK, lw=0.8)
-        ax.set_xticks(range(len(gaps)), labels, rotation=25, ha="right")
-        ax.grid(True, axis="y", color=GRID, lw=0.6)
-        ax.tick_params(colors=MUTED)
-        for spine in ("top", "right"):
-            ax.spines[spine].set_visible(False)
-    axes[0].set_ylabel("change from exact C  [%]", color=INK)
-    axes[1].set_ylabel("gates chosen differently  [of 10]", color=INK)
-    axes[0].set_title("Route-cost impact", loc="left", color=INK)
-    axes[1].set_title("Decision impact", loc="left", color=INK)
-    fig.supxlabel("maximum simulated Gap: cost factor / risk levels", color=MUTED)
-    axes[0].legend(frameon=False, fontsize=9)
-    fig.tight_layout()
+
+def _save_fig(fig, path: str):
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
     fig.savefig(path, dpi=160, facecolor=SURFACE)
-    plt.close(fig)
+    _plt().close(fig)
     log(f"wrote {path}")
+
+
+def _ratio_axis(ax, ratios):
+    """把 x 轴设成对数 Gap 比例，并标上真正跑过的梯级。"""
+    ax.set_xscale("log")
+    ax.set_xticks(list(ratios))
+    # 梯级在对数轴低端挨得很近，横排会互相压住。
+    ax.set_xticklabels([f"{r:g}x" for r in ratios], fontsize=7.5,
+                       rotation=40, ha="right")
+    ax.minorticks_off()
+
+
+def _measured_accuracy(accuracy: Optional[dict]) -> Optional[dict]:
+    """把准确率阶段的典型误差折算成 Gap 梯度上的一个位置。"""
+    if not accuracy:
+        return None
+    stat = _accuracy_stats(accuracy["rows"])
+    if not stat.get("n"):
+        return None
+    return {"median": stat["median_abs_factor"], "p90": stat["p90_abs_factor"],
+            "model": accuracy.get("model", "")}
+
+
+def _measured_risk_gap(risk: Optional[dict]) -> Optional[float]:
+    """风险阶段实测的平均等级偏差。"""
+    if not risk:
+        return None
+    stat = _risk_stats(risk["rows"], "sight")
+    return stat.get("mean_abs_levels") if stat.get("n") else None
+
+
+def _chart_doors_gap(doors: dict, accuracy: Optional[dict],
+                     risk: Optional[dict], path: str):
+    """四格图：Gap 比例分别换来多少 C、多少决策改动和多少危险搬移。"""
+    plt = _plt()
+    runs = doors["runs"]
+    cost_ladder = doors["ladders"]["cost"]
+    risk_ladder = doors["ladders"]["risk"]
+    joint_ladder = doors["ladders"]["joint"]
+    measured = _measured_accuracy(accuracy)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12.4, 8.4))
+    ax_c, ax_d, ax_r, ax_s = axes[0][0], axes[0][1], axes[1][0], axes[1][1]
+
+    # 1. ΔC 随代价 Gap 比例的变化。
+    ratios = [1.0] + [r["cost_ratio"] for r in cost_ladder]
+    for direction in DOORS_DIRECTIONS:
+        colour, marker = DIRECTION_STYLE[direction]
+        points = _doors_curve(runs, "cost", direction, cost_ladder)
+        if len(points) < 2:
+            continue
+        xs = [a for a, _ in points]
+        ys = [s["mean"] for _, s in points]
+        if direction == "mixed" and doors["seeds"] > 1:
+            ax_c.fill_between(xs, [s["best"] for _, s in points],
+                              [s["worst"] for _, s in points],
+                              color=colour, alpha=0.12, lw=0, zorder=1)
+        slope = _doors_slope(points)
+        label = DIRECTION_LABEL[direction]
+        if slope is not None:
+            label += f"  ({slope:+.1f}%/doubling)"
+        ax_c.plot(xs, ys, color=colour, marker=marker, lw=1.9, ms=5,
+                  label=label, zorder=3)
+
+    if measured:
+        mixed = _doors_curve(runs, "cost", "mixed", cost_ladder)
+        mid = math.sqrt(ratios[0] * ratios[-1])
+        for key, style in (("median", "-"), ("p90", ":")):
+            x = measured[key]
+            y = _interp_log(mixed, "mean", x)
+            if y is None:
+                continue
+            ax_c.axvline(x, color=INK, lw=1.0, ls=style, zorder=2)
+            # 靠近右边界时改成向左标注，否则文字会跑出坐标区。
+            right = x > mid
+            ax_c.annotate(f"measured {key} miss {x:.1f}x -> {y:+.1f}% C",
+                          xy=(x, y), xytext=(-8 if right else 8, 10),
+                          textcoords="offset points", fontsize=8.5, color=INK,
+                          ha="right" if right else "left")
+            ax_c.scatter([x], [y], s=44, color=INK, zorder=5)
+
+    ax_c.axhline(0, color=INK, lw=0.9, zorder=2)
+    _ratio_axis(ax_c, ratios)
+    _style(ax_c, xlabel="cost Gap ratio F = estimate / truth",
+           ylabel="change from exact C  [%]",
+           title="1. What an estimate that is off by F costs the route")
+    ax_c.legend(frameon=False, fontsize=8.5, loc="upper left")
+
+    # 2. 改变的决策数。
+    for direction in DOORS_DIRECTIONS:
+        colour, marker = DIRECTION_STYLE[direction]
+        points = _doors_curve(runs, "cost", direction, cost_ladder)
+        if len(points) < 2:
+            continue
+        ax_d.plot([a for a, _ in points],
+                  [s["mean_changed"] for _, s in points],
+                  color=colour, marker=marker, lw=1.9, ms=5,
+                  label=DIRECTION_LABEL[direction], zorder=3)
+    n_gates = len(doors["gate_summary"])
+    ax_d.set_ylim(0, n_gates)
+    _ratio_axis(ax_d, ratios)
+    _style(ax_d, xlabel="cost Gap ratio F = estimate / truth",
+           ylabel=f"gates decided differently  [of {n_gates}]",
+           title="2. How many of the ten decisions the error moves")
+    ax_d.legend(frameon=False, fontsize=8.5, loc="upper left")
+
+    # 3. 风险等级偏差和联合梯度。
+    width = 0.26
+    shifts = [0] + [r["risk_shift"] for r in risk_ladder]
+    for i, direction in enumerate(DOORS_DIRECTIONS):
+        colour, _ = DIRECTION_STYLE[direction]
+        points = _doors_curve(runs, "risk", direction, risk_ladder,
+                              axis="risk_shift")
+        xs = [a + (i - 1) * width for a, _ in points]
+        ax_r.bar(xs, [s["mean"] for _, s in points], width=width,
+                 color=colour, label=DIRECTION_LABEL[direction], zorder=3)
+    joint = _doors_curve(runs, "joint", "mixed", joint_ladder,
+                         axis="risk_shift")
+    if len(joint) > 1:
+        ax_r.plot([a for a, _ in joint], [s["mean"] for _, s in joint],
+                  color=INK, marker="s", ms=4, lw=1.4, ls="--",
+                  label="cost + risk together", zorder=4)
+    measured_levels = _measured_risk_gap(risk)
+    if measured_levels:
+        ax_r.axvline(measured_levels, color=INK, lw=1.0, ls=":", zorder=2)
+        ax_r.annotate(f"measured {measured_levels:.2f} levels",
+                      xy=(measured_levels, 0), xytext=(4, 6),
+                      textcoords="offset points", fontsize=8.5, color=INK)
+    ax_r.axhline(0, color=INK, lw=0.9, zorder=2)
+    ax_r.set_xticks(shifts)
+    _style(ax_r, xlabel="risk Gap K = levels between estimate and reference",
+           ylabel="change from exact C  [%]",
+           title="3. What a mis-rated risk level costs")
+    ax_r.legend(frameon=False, fontsize=8.5, loc="upper left")
+
+    # 4. 多出来的 C 花在了哪里。
+    parts = (("delta_walk", "driving", "#9ec5f4"),
+             ("delta_work", "pushing", "#2a78d6"),
+             ("delta_risk", "risk surcharge", "#eb6834"))
+    xs = list(range(len(cost_ladder)))
+    bottoms_pos = [0.0] * len(cost_ladder)
+    bottoms_neg = [0.0] * len(cost_ladder)
+    for key, label, colour in parts:
+        values = []
+        for rung in cost_ladder:
+            sample = _doors_sample(runs, "cost", "mixed",
+                                   rung["cost_ratio"], rung["risk_shift"])
+            ok = [r for r in sample if r["success"]]
+            values.append(statistics.fmean(r[key] for r in ok) if ok else 0.0)
+        bottoms = [bottoms_neg[i] if v < 0 else bottoms_pos[i]
+                   for i, v in enumerate(values)]
+        ax_s.bar(xs, values, bottom=bottoms, width=0.66, color=colour,
+                 label=label, zorder=3)
+        for i, v in enumerate(values):
+            if v < 0:
+                bottoms_neg[i] += v
+            else:
+                bottoms_pos[i] += v
+    ax_s.axhline(0, color=INK, lw=0.9, zorder=2)
+    ax_s.set_xticks(xs)
+    ax_s.set_xticklabels([f"{r['cost_ratio']:g}x" for r in cost_ladder],
+                         fontsize=8)
+    _style(ax_s, xlabel="cost Gap ratio F  (random-direction arm)",
+           ylabel="change from exact  [J]",
+           title="4. Where the extra cost is spent")
+    ax_s.legend(frameon=False, fontsize=8.5, loc="upper left")
+
+    subtitle = ("C is re-priced at the reference risk level, so a run that "
+                "called a hazard safe pays for it here")
+    if measured:
+        subtitle = f"model {measured['model']} - " + subtitle
+    fig.suptitle("Estimate error on the ten-gate corridor", x=0.012, ha="left",
+                 color=INK, fontsize=13)
+    fig.supxlabel(subtitle, color=MUTED, fontsize=9)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.965))
+    _save_fig(fig, path)
+
+
+def _chart_doors_gates(doors: dict, path: str):
+    """逐门热力图：哪一道门在多大的 Gap 上开始改主意。"""
+    plt = _plt()
+    from matplotlib.colors import LinearSegmentedColormap
+
+    panels = [("cost", "cost_ratio", "cost Gap ratio F"),
+              ("risk", "risk_shift", "risk Gap K  [levels]")]
+    panels = [p for p in panels if doors["ladders"].get(p[0])]
+    if not panels:
+        return
+    cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUE)
+    base = doors["runs"][0]
+    summary = {g["gate"]: g for g in doors["gate_summary"]}
+
+    fig, axes = plt.subplots(
+        1, len(panels), figsize=(5.6 * len(panels) + 1.6, 5.2),
+        gridspec_kw={"width_ratios": [len(doors["ladders"][p[0]])
+                                      for p in panels]})
+    axes = list(axes) if len(panels) > 1 else [axes]
+
+    for ax, (family, axis, xlabel) in zip(axes, panels):
+        gate_ids, ticks, grid = _doors_flip_grid(doors, family, axis)
+        ax.set_facecolor(SURFACE)
+        for i, row in enumerate(grid):
+            for j, share in enumerate(row):
+                if not share:                 # 没翻转过就留白。
+                    continue
+                ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, lw=0,
+                                           facecolor=cmap(share), zorder=1))
+                ax.text(j, i, f"{share:.0%}", ha="center", va="center",
+                        fontsize=8, zorder=3,
+                        color=SURFACE if share > 0.55 else INK)
+        ax.set_xlim(-0.5, len(ticks) - 0.5)
+        ax.set_ylim(len(gate_ids) - 0.5, -0.5)
+        ax.set_xticks(range(len(ticks)))
+        ax.set_xticklabels([f"{t:g}x" if axis == "cost_ratio" else f"+/-{t:g}"
+                            for t in ticks], fontsize=8.5)
+        ax.set_xticks([k - 0.5 for k in range(len(ticks) + 1)], minor=True)
+        ax.set_yticks([k - 0.5 for k in range(len(gate_ids) + 1)], minor=True)
+        ax.grid(which="minor", color=SURFACE, lw=2)
+        ax.tick_params(which="minor", length=0)
+        ax.set_yticks(range(len(gate_ids)))
+        ax.set_yticklabels([
+            f"{g}  {summary[int(g)]['kind']}  "
+            f"A/B {summary[int(g)]['ab_ratio']:g}x  "
+            f"detour {summary[int(g)]['detour_m']:g} m  "
+            f"-> {base['choices'][g]}" for g in gate_ids], fontsize=8)
+        ax.tick_params(colors=MUTED, length=0)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        _style(ax, xlabel=xlabel, grid=None,
+               title=f"{FAMILY_LABEL[family]} Gap")
+
+    for ax in axes[1:]:
+        ax.set_yticklabels([])
+    axes[0].set_ylabel("gate, its design margin, and what exact chose",
+                       color=INK, fontsize=9.5)
+    fig.supxlabel("share of runs at that Gap that decided the gate differently "
+                  "from the exact run", color=MUTED, fontsize=9)
+    fig.tight_layout()
+    _save_fig(fig, path)
 
 
 # 报告生成。
@@ -923,6 +1676,320 @@ def _table(header: List[str], body: List[List[str]]) -> str:
              "|" + "|".join("---" for _ in header) + "|"]
     lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in body]
     return "\n".join(lines) + "\n"
+
+
+def _doors_headline(doors: dict, accuracy: Optional[dict]) -> List[str]:
+    """把十门扫描压缩成标题里的两三句话。"""
+    runs = doors["runs"]
+    ladder = doors["ladders"]["cost"]
+    n_gates = len(doors["gate_summary"])
+    if not ladder:
+        return []
+    mixed = _doors_curve(runs, "cost", "mixed", ladder)
+    slope = _doors_slope(mixed)
+    out = []
+    if slope is not None:
+        worst = ladder[-1]["cost_ratio"]
+        stat = _doors_stats(_doors_sample(runs, "cost", "mixed", worst, 0))
+        out.append(
+            f"- On the ten-gate corridor, **every doubling of the cost "
+            f"estimate's error costs {slope:+.1f}% of C**. At the ladder's "
+            f"far end ({worst:g}x) the route is {stat.get('mean', 0):+.1f}% "
+            f"dearer on average, worst {stat.get('worst', 0):+.1f}%, with "
+            f"{stat['mean_changed']:.1f} of {n_gates} gates decided "
+            f"differently.")
+    measured = _measured_accuracy(accuracy)
+    if measured:
+        typical = _interp_log(mixed, "mean", measured["median"])
+        bad = _interp_log(mixed, "mean", measured["p90"])
+        if typical is not None:
+            out.append(
+                f"- Read the measured accuracy off that ladder and the "
+                f"estimator's typical **{measured['median']:.1f}x miss is "
+                f"worth {typical:+.1f}% of C**; its p90 "
+                f"{measured['p90']:.1f}x miss is worth "
+                f"{_fmt_pct(bad)}. That is the price of the error in the only "
+                f"unit the planner cares about.")
+    risky = _doors_stats(_doors_sample(
+        runs, "risk", "under", 1.0, doors["ladders"]["risk"][-1]["risk_shift"])
+    ) if doors["ladders"].get("risk") else {}
+    if risky.get("mean_extra_risky"):
+        out.append(
+            f"- Under-calling risk is the expensive half: at the end of the "
+            f"risk ladder the planner pushes "
+            f"{risky['mean_extra_risky']:+.1f} more obstacles that were never "
+            f"safe to push, for {risky.get('mean', 0):+.1f}% of C once those "
+            f"pushes are priced at the level they deserved.")
+    return out
+
+
+def _first_flip(doors: dict, gate: str, family: str = "cost"):
+    """返回这道门第一次改主意的梯级，一直不改则返回 None。"""
+    base = doors["runs"][0]
+    for rung in doors["ladders"].get(family, ()):
+        sample = [r for r in doors["runs"]
+                  if r["family"] == family
+                  and abs(r["cost_ratio"] - rung["cost_ratio"]) < 1e-9
+                  and r["risk_shift"] == rung["risk_shift"]]
+        if any(r["choices"][gate] != base["choices"][gate] for r in sample):
+            return rung
+    return None
+
+
+def _report_doors(doors: dict, accuracy: Optional[dict],
+                  risk: Optional[dict]) -> List[str]:
+    """第 4 节：Gap 比例换来多少 C。"""
+    runs, base = doors["runs"], doors["runs"][0]
+    cost_ladder = doors["ladders"]["cost"]
+    risk_ladder = doors["ladders"]["risk"]
+    joint_ladder = doors["ladders"]["joint"]
+    n_gates = len(doors["gate_summary"])
+    parts = ["\n## 4. What the error costs a route\n"]
+
+    parts.append(
+        f"The `{doors['map']}` map is {n_gates} walls in a row, each with three "
+        f"ways past it: move the obstacle in door A, move the one in door B, or "
+        f"walk around through a third opening placed far enough off the axis to "
+        f"cost a real detour. Every gate is one independent three-way decision, "
+        f"so a run is {n_gates} of them and the arms differ only in what the "
+        f"planner was told to believe.\n\n"
+        f"No API is called here. The belief is written directly: at Gap ratio "
+        f"`F` every cost estimate is exactly `true * F` (the **over-estimate** "
+        f"arm), exactly `true / F` (the **under-estimate** arm), or one of the "
+        f"two with the direction drawn once per obstacle and then held fixed "
+        f"for the whole ladder (the **random-direction** arm). Because `F` is "
+        f"constructed rather than sampled, the realized gap equals the axis "
+        f"label, and the rows below can be read as 'an estimator this wrong "
+        f"costs this much'. Holding each obstacle's direction fixed across the "
+        f"ladder also makes the rungs paired samples, so the curve's shape is "
+        f"the Gap growing rather than a fresh set of random numbers.\n\n"
+        f"Risk is perturbed the same way: `K` levels toward safe in the "
+        f"under-estimate arm, `K` toward dangerous in the over-estimate arm, "
+        f"clipped to the ladder.\n\n"
+        f"**C is re-priced at the reference risk level.** The executor charges "
+        f"the risk surcharge at the level it believed, so a run that called a "
+        f"hazard safe would otherwise book a discount for the mistake and look "
+        f"cheaper than `exact`. Every C below is `J` plus the surcharge the "
+        f"pushed obstacles were really worth, which is what makes a wrong "
+        f"decision show up as a cost rather than a saving.\n\n"
+        f"Beliefs are seeded per obstacle, but the corrections a real run earns "
+        f"are left in: touching an obstacle reveals its true difficulty and "
+        f"re-rates its risk. What the perturbation buys is therefore a wrong "
+        f"*decision*, taken before the robot could know better, which is "
+        f"exactly what a bad estimate costs in practice.\n\n"
+        f"The ladder straddles one threshold worth knowing about. "
+        f"`Config.contact_replan_ratio` is {Config().contact_replan_ratio:g}, "
+        f"so an error smaller than that is never noticed: the robot takes "
+        f"hold, finds the force close enough to what it planned for, and "
+        f"carries on. Above it the mismatch triggers a re-plan mid-push, which "
+        f"is why the curve is flatter at the first rung or two than a straight "
+        f"line through the rest would predict.\n\n"
+        f"`exact` is the floor at C = {base['C_true']:,.0f} J with "
+        f"{len(base['removed'])} obstacles pushed.\n\n")
+
+    # 4.1 主表：不同 Gap 比例对应的 C 差别比例。
+    parts.append("\n### 4.1 Gap ratio against the change in C\n")
+    parts.append("The headline table. One row per rung of the cost ladder and "
+                 "arm; `dC` is the percentage change from the exact run's C.\n\n")
+    body = []
+    for rung in cost_ladder:
+        for direction in DOORS_DIRECTIONS:
+            stat = _doors_stats(_doors_sample(
+                runs, "cost", direction, rung["cost_ratio"],
+                rung["risk_shift"]))
+            if not stat.get("n"):
+                continue
+            body.append([
+                f"{rung['cost_ratio']:g}x", DIRECTION_LABEL[direction],
+                stat["n"], f"{stat['reached']}/{stat['n']}",
+                f"{stat.get('mean', 0):+.1f}%", f"{stat.get('median', 0):+.1f}%",
+                f"{stat.get('p90', 0):+.1f}%", f"{stat.get('worst', 0):+.1f}%",
+                f"{stat['mean_changed']:.1f}", stat["max_changed"],
+                f"{stat['mean_extra_risky']:+.1f}",
+                f"{stat.get('mean_C_true', 0):,.0f}"])
+    parts.append(_table(
+        ["Gap F", "arm", "runs", "reached goal", "dC mean", "dC median",
+         "dC p90", "dC worst", f"gates changed (of {n_gates})", "worst",
+         "extra risky pushes", "mean C"], body))
+
+    slopes = {d: _doors_slope(_doors_curve(runs, "cost", d, cost_ladder))
+              for d in DOORS_DIRECTIONS}
+    known = {d: s for d, s in slopes.items() if s is not None}
+    if known:
+        parts.append(
+            "\n**Sensitivity.** Fitting the mean `dC` against `log2(F)` gives "
+            "the cost of each doubling of estimate error: "
+            + ", ".join(f"{DIRECTION_LABEL[d]} **{s:+.1f}% of C per doubling**"
+                        for d, s in known.items())
+            + ". The two deterministic arms bracket the random one: a uniform "
+              "bias moves every option the same way and only changes "
+              "push-against-detour, while a random direction also reverses "
+              "door A against door B, which is the cheaper mistake to make but "
+              "the easier one to make often.\n")
+
+    # 4.2 把实测的估计精度落到这条曲线上。
+    measured = _measured_accuracy(accuracy)
+    if measured:
+        mixed = _doors_curve(runs, "cost", "mixed", cost_ladder)
+        rows = []
+        for name, key in (("typical miss (median)", "median"),
+                          ("bad-case miss (p90)", "p90")):
+            factor = measured[key]
+            rows.append([name, f"{factor:.2f}x",
+                         _fmt_pct(_interp_log(mixed, "mean", factor)),
+                         _fmt_pct(_interp_log(mixed, "worst", factor)),
+                         _fmt_num(_interp_log(mixed, "mean_changed", factor)),
+                         _fmt_num(_interp_log(mixed, "mean_extra_risky", factor))])
+        parts.append("\n### 4.2 Where the measured estimator lands on that "
+                     "ladder\n")
+        parts.append(
+            f"Section 1 measured how wrong `{measured['model']}` is on the "
+            f"reference objects. Reading that number off the curve above turns "
+            f"an accuracy figure into a route cost, which is the only unit that "
+            f"matters to the planner. Values are interpolated on the log-ratio "
+            f"axis between the rungs that were actually run.\n\n")
+        parts.append(_table(
+            ["estimator accuracy", "as a Gap ratio", "dC mean", "dC worst",
+             "gates changed", "extra risky pushes"], rows))
+
+    # 4.3 风险等级误差。
+    if risk_ladder:
+        parts.append("\n### 4.3 The same sweep on risk levels\n")
+        parts.append(
+            "A risk level is not a ratio, so this ladder is in levels: `K` "
+            "steps from the reference level, clipped at `low` and `extreme`. "
+            "Under-calling is the direction that matters, because it is the one "
+            "that lets the planner push something it should have walked "
+            "around.\n\n")
+        body = []
+        for rung in risk_ladder:
+            for direction in DOORS_DIRECTIONS:
+                stat = _doors_stats(_doors_sample(
+                    runs, "risk", direction, rung["cost_ratio"],
+                    rung["risk_shift"]))
+                if not stat.get("n"):
+                    continue
+                body.append([
+                    f"+/-{rung['risk_shift']}", DIRECTION_LABEL[direction],
+                    stat["n"], f"{stat['reached']}/{stat['n']}",
+                    f"{stat.get('mean', 0):+.1f}%", f"{stat.get('worst', 0):+.1f}%",
+                    f"{stat['mean_changed']:.1f}",
+                    f"{stat['mean_extra_risky']:+.1f}"])
+        parts.append(_table(
+            ["Gap K", "arm", "runs", "reached goal", "dC mean", "dC worst",
+             "gates changed", "extra risky pushes"], body))
+
+    if joint_ladder:
+        parts.append("\n### 4.4 Both at once\n")
+        parts.append("Cost and risk perturbed together, so the two "
+                     "contributions can be compared against their sum.\n\n")
+        body = []
+        for rung in joint_ladder:
+            for direction in DOORS_DIRECTIONS:
+                stat = _doors_stats(_doors_sample(
+                    runs, "joint", direction, rung["cost_ratio"],
+                    rung["risk_shift"]))
+                if not stat.get("n"):
+                    continue
+                alone = []
+                for family, key in (("cost", "cost_ratio"),
+                                    ("risk", "risk_shift")):
+                    part = _doors_stats(_doors_sample(
+                        runs, family, direction,
+                        rung["cost_ratio"] if family == "cost" else 1.0,
+                        rung["risk_shift"] if family == "risk" else 0))
+                    alone.append(part.get("mean"))
+                total = sum(v for v in alone if v is not None)
+                body.append([
+                    f"{rung['cost_ratio']:g}x / +/-{rung['risk_shift']}",
+                    DIRECTION_LABEL[direction], stat["n"],
+                    f"{stat.get('mean', 0):+.1f}%",
+                    _fmt_pct(alone[0]), _fmt_pct(alone[1]), f"{total:+.1f}%",
+                    f"{stat['mean_changed']:.1f}"])
+        parts.append(_table(
+            ["Gap F / K", "arm", "runs", "dC together", "dC cost alone",
+             "dC risk alone", "sum of the two", "gates changed"], body))
+
+    # 4.5 逐门：哪一道门在多大的 Gap 上先改主意。
+    parts.append("\n### 4.5 Which decisions move first\n")
+    parts.append(
+        "A gate flips when the error exceeds its own margin, so the ladder "
+        "rung at which each gate first changes its mind is a direct reading of "
+        "how much slack that decision had. `A/B ratio` is the true difficulty "
+        "ratio between the two doors: a random-direction error has to exceed "
+        "roughly that ratio before door A and door B swap places.\n\n")
+    body = []
+    for g in doors["gate_summary"]:
+        gate = str(g["gate"])
+        cost_flip = _first_flip(doors, gate, "cost")
+        risk_flip = _first_flip(doors, gate, "risk")
+        flips = sum(1 for r in runs[1:] if r["choices"][gate]
+                    != base["choices"][gate])
+        body.append([
+            gate, g["kind"], f"{g['detour_m']:g} m", f"{g['ab_ratio']:g}x",
+            f"{g['A']['difficulty']:.0f} N {g['A']['risk']}",
+            f"{g['B']['difficulty']:.0f} N {g['B']['risk']}",
+            base["choices"][gate],
+            f"{cost_flip['cost_ratio']:g}x" if cost_flip else "never",
+            f"+/-{risk_flip['risk_shift']}" if risk_flip else "never",
+            f"{flips}/{len(runs) - 1}"])
+    parts.append(_table(
+        ["gate", "kind", "detour", "A/B ratio", "door A", "door B",
+         "exact chose", "first cost flip", "first risk flip",
+         "runs that chose otherwise"], body))
+
+    calibration = _load("doors_calibration.json")
+    if calibration:
+        parts.append("\n### 4.6 Measured margins per gate\n")
+        parts.append(
+            "The `doors-calibrate` stage prices each option on its own: the "
+            "third opening is walled up and one door at a time is made too "
+            "heavy to move, so the planner has exactly one way past that gate. "
+            "Only the `difficulty x distance` term of a push moves with the "
+            "belief, so the factor at which each decision flips follows in "
+            "closed form, and the `first cost flip` column above is the "
+            "measurement it predicts.\n\n")
+        body = []
+        for row in calibration["gates"]:
+            costs, even = row["C"], row.get("break_even_difficulty") or {}
+            body.append([
+                row["gate"], row["kind"],
+                *[f"{costs[k]:,.0f}" if costs.get(k) else "-"
+                  for k in ("A", "B", "detour")],
+                row["best"] or "-",
+                f"{row['margin_J']:,.0f}" if row["margin_J"] else "-",
+                f"{row['flip_over']:g}x" if row["flip_over"] else "never",
+                (f"{row['flip_under']:g}x -> {row['flip_under_option']}"
+                 if row["flip_under"] else "never"),
+                " / ".join(f"{side} {value:,.0f}" if value
+                           else f"{side} not by weight"
+                           for side, value in sorted(even.items())) or "-"])
+        parts.append(_table(
+            ["gate", "kind", "C if A", "C if B", "C if detour", "cheapest",
+             "margin J", "flips when over-estimated",
+             "flips when under-estimated", "break-even difficulty N"], body))
+        parts.append(
+            "\nThe last column is the map's tuning knob. A door heavier than "
+            "its break-even value is walked around and a lighter one is pushed, "
+            "so the ten difficulties in `scenarios/ten_doors.py` have to "
+            "straddle these numbers. If they all sit on one side, every gate "
+            "makes the same choice and no amount of estimate error can move "
+            "anything: the sweep would measure nothing. `not by weight` marks "
+            "a door that loses to the detour even at zero weight, so its risk "
+            "surcharge or its approach travel decides it and no difficulty "
+            "setting will change that.\n")
+
+    shots = doors.get("screenshots") or {}
+    if shots:
+        parts.append("\n### 4.7 Route screenshots\n")
+        parts.append(_table(["run", "image"],
+                            [[label, f"`{name}`"]
+                             for label, name in sorted(shots.items())]))
+    parts.append(
+        f"\nThe machine-readable version of section 4.1 is "
+        f"`doors_gap_vs_cost.csv`; `doors_gap.png` plots it and "
+        f"`doors_gates.png` breaks it down per gate.\n")
+    return parts
 
 
 def stage_report() -> str:
@@ -988,27 +2055,7 @@ def stage_report() -> str:
             f"matters: an under-called obstacle is one the planner is willing "
             f"to push.")
     if doors:
-        base = doors["runs"][0]
-        max_gap = max(g["gap_index"] for g in doors["gaps"])
-        perturbed = [r for r in doors["runs"][1:]
-                     if r.get("family") == "both"
-                     and r.get("gap_index") == max_gap]
-        if perturbed and base["C"]:
-            pen = [100.0 * (r["C"] - base["C"]) / base["C"] for r in perturbed
-                   if r["success"]]
-            changed = [r.get("changed", 0) for r in perturbed]
-            extra_risky = [len(r["risky_pushes"]) - len(base["risky_pushes"])
-                           for r in perturbed]
-            head.append(
-                f"- At the largest simulated Gap, across {len(perturbed)} "
-                f"crossings of the ten-gate map it changes "
-                f"**{statistics.fmean(changed):.1f} of 10 decisions** (worst "
-                f"{max(changed)}) and costs "
-                f"**{statistics.fmean(pen):+.1f}% of C** on average, worst "
-                f"{max(pen):+.1f}%"
-                + (f", and it pushes {statistics.fmean(extra_risky):+.1f} more "
-                   f"obstacles that were never safe to push."
-                   if any(extra_risky) else "."))
+        head.extend(_doors_headline(doors, acc))
     heur = _accuracy_stats(rows, key="heuristic")
     if heur.get("n") and heur["median_abs_factor"] < overall["median_abs_factor"]:
         head.append(
@@ -1186,94 +2233,7 @@ def stage_report() -> str:
 
     # 路线影响部分。
     if doors:
-        runs = doors["runs"]
-        base = runs[0]
-        parts.append("\n## 4. What the error costs a route\n")
-        parts.append(
-            f"The `{doors['map']}` map is ten walls in a row, each with three "
-            f"ways past it: move the obstacle in door A, move the one in door "
-            f"B, or walk around through a third opening placed far enough off "
-            f"the axis to cost a real detour. Every gate is one independent "
-            f"three-way decision, so a run is ten of them and the arms differ "
-            f"only in what the planner was told to believe.\n\n"
-            f"`exact` is the floor: beliefs equal the truth. At a Gap point "
-            f"`F / K`, each cost estimate is a seeded log-uniform draw between "
-            f"`true/F` and `true*F`, while each risk estimate is shifted by a "
-            f"seeded random integer from `-K` to `+K` levels and clipped to the "
-            f"valid ladder. The tested points are "
-            + ", ".join(f"{g['cost_factor']:g}x/±{g['risk_levels']}" for g in doors["gaps"])
-            + ". `difficulty` and `risk` perturb one term each and `both` uses "
-            f"the same two draws, so arm differences isolate the source rather "
-            f"than a different random sample.\n\n"
-            f"Beliefs are seeded per obstacle and no API is called, but the "
-            f"corrections a real run earns are left in: touching an obstacle "
-            f"reveals its true difficulty and re-rates its risk. What the "
-            f"perturbation buys is therefore a wrong *decision*, taken before "
-            f"the robot could know better — which is exactly what a bad "
-            f"estimate costs in practice. The two route screenshots compare "
-            f"the exact arm with seed 0 at the maximum joint Gap.\n\n")
-
-        body = []
-        for gap in doors["gaps"]:
-            for family in ("exact", "difficulty", "risk", "both"):
-                if gap["gap_index"] == 0:
-                    if family != "exact":
-                        continue
-                    sub = [base]
-                else:
-                    if family == "exact":
-                        continue
-                    sub = [r for r in runs if r.get("family") == family
-                           and r.get("gap_index") == gap["gap_index"]]
-                ok = [r for r in sub if r["success"]]
-                pen = [100.0 * (r["C"] - base["C"]) / base["C"] for r in ok
-                       if base["C"]]
-                changed = [r.get("changed", 0) for r in sub]
-                risky = [len(r["risky_pushes"]) for r in sub]
-                body.append([
-                    f"{gap['cost_factor']:g}x/±{gap['risk_levels']}", family,
-                    len(sub), f"{len(ok)}/{len(sub)}",
-                    f"{statistics.fmean(r['realized_mean_cost_factor'] for r in sub):.2f}x",
-                    f"{statistics.fmean(r['realized_mean_risk_levels'] for r in sub):.2f}",
-                    f"{statistics.fmean(r['C'] for r in ok):,.0f}" if ok else "-",
-                    "-" if family == "exact" else
-                    (f"{statistics.fmean(pen):+.1f}%" if pen else "-"),
-                    "-" if family == "exact" else
-                    f"{statistics.fmean(changed):.1f}",
-                    f"{statistics.fmean(risky):.1f}"])
-        parts.append(_table(
-            ["Gap F/±K", "arm", "runs", "reached goal",
-             "realized cost gap", "realized risk gap", "mean C",
-             "C vs exact", "gates changed", "risky pushes"], body))
-
-        parts.append(
-            f"\n`gates changed` counts gates where the perturbed run chose "
-            f"differently from `exact` — the direct measure of an estimate "
-            f"changing a decision. The penalty is taken on **C**, not J: the "
-            f"risk surcharge is charged outside J, so a run that pushed "
-            f"something it should have avoided books a cheaper J and a dearer "
-            f"C, and only C tells the two apart. `pushes of a risky obstacle` counts "
-            f"obstacles moved that were not `low` risk to begin with; `exact` "
-            f"moves {len(base['risky_pushes'])} of them, and every one above "
-            f"that is the planner disturbing something it should have walked "
-            f"around.\n")
-
-        # 逐门细节显示发生变化的决策。
-        parts.append("\n### Where the decisions moved\n")
-        gates_by_i: Dict[str, dict] = {}
-        for r in doors["gates"]:
-            g = gates_by_i.setdefault(str(r["gate"]), {"detour_m": r["detour_m"]})
-            g[r["side"]] = f"{r['difficulty']:.0f} N {r['risk']}"
-        body = []
-        for g in sorted(gates_by_i, key=int):
-            flips = sum(1 for r in runs[1:] if r["choices"][g] != base["choices"][g])
-            body.append([g, f"{gates_by_i[g]['detour_m']:g} m",
-                         gates_by_i[g]["A"], gates_by_i[g]["B"],
-                         base["choices"][g],
-                         f"{flips}/{len(runs) - 1}"])
-        parts.append(_table(
-            ["gate", "detour", "door A", "door B", "exact chose",
-             "perturbed runs that chose otherwise"], body))
+        parts.extend(_report_doors(doors, acc, risk))
 
     text = "".join(parts)
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -1286,37 +2246,59 @@ def stage_report() -> str:
     if risk:
         _chart_risk(risk, os.path.join(OUT_DIR, "risk.png"))
     if doors:
-        _chart_doors_gap(doors, os.path.join(OUT_DIR, "doors_gap.png"))
+        _write_doors_csv(doors)
+        _chart_doors_gap(doors, acc, risk,
+                         os.path.join(OUT_DIR, "doors_gap.png"))
+        _chart_doors_gates(doors, os.path.join(OUT_DIR, "doors_gates.png"))
     return path
 
+
+STAGES = ("accuracy", "risk", "size", "order", "doors", "doors-calibrate",
+          "report", "all")
+# `all` 不包含 doors-calibrate：它只在改过地图之后需要重跑一次。
+ALL_STAGES = ("accuracy", "risk", "size", "order", "doors", "report")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("stage", choices=["accuracy", "risk", "size",
-                                      "order", "doors", "report", "all"])
+    ap.add_argument("stage", choices=STAGES)
     ap.add_argument("--repeats", type=int, default=2,
                     help="LLM calls per item in the accuracy and risk stages")
     ap.add_argument("--workers", type=int, default=8, help="parallel API calls")
     ap.add_argument("--doors-seeds", type=int, default=DOORS_SEEDS,
-                    help="random seeds per Gap and arm in the offline doors stage")
+                    help="random-direction repeats per rung of the Gap ladder")
+    ap.add_argument("--doors-workers", type=int,
+                    default=max(1, min(6, (os.cpu_count() or 2) - 1)),
+                    help="parallel planner runs in the offline doors stages; "
+                         "runs are independent and seeded, so this does not "
+                         "change any result")
+    ap.add_argument("--doors-quick", action="store_true",
+                    help="short Gap ladder for a smoke test")
+    ap.add_argument("--no-doors-shots", action="store_true",
+                    help="skip the route screenshots the doors stage renders")
     args = ap.parse_args()
 
     cfg = Config()
     cfg.verbose = False
+    # 两个估计器只在对应策略位打开时才持有密钥，本实验两个都要测。
+    cfg.strategy = validate_strategy("llm-cost-risk")
+    wanted = ALL_STAGES if args.stage == "all" else (args.stage,)
 
-    if args.stage in ("accuracy", "all"):
+    if "accuracy" in wanted:
         stage_accuracy(cfg, args.repeats, args.workers)
-    if args.stage in ("risk", "all"):
+    if "risk" in wanted:
         stage_risk(cfg, args.repeats, args.workers)
-    if args.stage in ("size", "all"):
+    if "size" in wanted:
         stage_size(cfg, args.workers)
-    if args.stage in ("order", "all"):
+    if "order" in wanted:
         stage_order(cfg, args.workers)
-    if args.stage in ("doors", "all"):
-        stage_doors(args.doors_seeds)
-    if args.stage in ("report", "all"):
+    if "doors-calibrate" in wanted:
+        stage_doors_calibrate(args.doors_workers)
+    if "doors" in wanted:
+        stage_doors(args.doors_seeds, args.doors_workers, args.doors_quick,
+                    not args.no_doors_shots)
+    if "report" in wanted:
         stage_report()
 
 

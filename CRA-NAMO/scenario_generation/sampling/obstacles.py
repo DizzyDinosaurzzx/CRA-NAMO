@@ -8,16 +8,6 @@ from obstacle import MovableObstacle
 from scenarios._realism import push_force
 
 
-_CATALOG = (
-    # material, l range, d range, h range, density range, friction range
-    ("cardboard_box", (0.45, 0.9), (0.4, 0.8), (0.5, 1.1), (30, 60), (0.28, 0.38)),
-    ("wooden_crate", (0.6, 1.2), (0.55, 1.0), (0.7, 1.2), (100, 190), (0.35, 0.48)),
-    ("empty_cart", (0.7, 1.2), (0.45, 0.8), (0.8, 1.2), (35, 65), (0.02, 0.05)),
-    ("filing_cabinet", (0.55, 0.9), (0.45, 0.75), (1.1, 1.6), (180, 330), (0.38, 0.5)),
-    ("loaded_pallet", (0.8, 1.4), (0.7, 1.2), (0.7, 1.3), (260, 480), (0.32, 0.45)),
-)
-
-
 def _angle(rng) -> float:
     draw = rng.random()
     if draw < 0.60:
@@ -28,16 +18,23 @@ def _angle(rng) -> float:
     return rng.uniform(-math.pi / 2, math.pi / 2)
 
 
-def fill_background(topology, existing, allocator, rng, target_count: int) -> list:
-    """Rejection-sample clutter away from authored decision corridors."""
+def fill_background(topology, existing, allocator, rng, target_count: int,
+                    theme) -> list:
+    """Rejection-sample clutter away from authored decision corridors.
+
+    Clutter is drawn from the map's own vocabulary, traps included: a corpus
+    where every heuristic-blind label sits in a doorway would be solvable by
+    noticing which objects block doors rather than by reading them.
+    """
     result = []
     walls = topology.walls
     zones = topology.anchors["background_zones"]
+    catalog = theme.all_materials()
     attempts = 0
     while len(existing) + len(result) < target_count and attempts < target_count * 80:
         attempts += 1
-        material, lr, dr, hr, rr, mur = rng.choice(_CATALOG)
-        l, d, h = rng.uniform(*lr), rng.uniform(*dr), rng.uniform(*hr)
+        material = catalog[rng.randrange(len(catalog))]
+        l, d, h = material.sample_size(rng)
         zone = rng.choice(zones)
         minx, miny, maxx, maxy = zone.bounds
         if maxx - minx <= l or maxy - miny <= d:
@@ -45,9 +42,10 @@ def fill_background(topology, existing, allocator, rng, target_count: int) -> li
         obs = MovableObstacle(
             x=rng.uniform(minx + l / 2, maxx - l / 2),
             y=rng.uniform(miny + d / 2, maxy - d / 2),
-            l=l, d=d, h=h, theta=_angle(rng), material=material,
-            difficulty=push_force(rng.uniform(*rr) * l * d * h,
-                                  rng.uniform(*mur)), oid=allocator.take())
+            l=l, d=d, h=h, theta=_angle(rng), material=material.label,
+            difficulty=push_force(material.sample_density(rng) * l * d * h,
+                                  material.mu),
+            contact_reveals=material.reveals, oid=allocator.take())
         if not topology.workspace.covers(obs.polygon):
             continue
         if any(obs.polygon.intersection(w.polygon).area > 1e-7 for w in walls):

@@ -483,11 +483,16 @@ class OnlineNAMO:
             name = point.get("name", "decision")
             risky, safer = point.get("risky"), point.get("safer_alternative")
             partners = [p for p in (point.get("partners") or ()) if p in moved]
+            # Single-blocker decisions name their obstacle under "obstacles";
+            # without this they always reported "went round".
+            plain = [o for o in (point.get("obstacles") or ()) if o in moved]
             what = []
             if risky is not None and risky in moved:
                 what.append(f"moved the risky one ({risky})")
             if safer is not None and safer in moved:
                 what.append(f"took the safer one ({safer})")
+            if plain:
+                what.append(f"moved {plain}")
             if partners:
                 what.append(f"also disturbed {partners}")
             taken.append(f"{name}: " + ("; ".join(what) if what else "went round"))

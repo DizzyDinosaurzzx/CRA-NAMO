@@ -16,12 +16,12 @@ class RandomScenarioRequest:
     """Everything that may intentionally change a generated scenario."""
 
     seed: int
-    profile: str = "balanced"
-    width: float = 24.0
-    height: float = 14.0
+    profile: str = "benchmark"
+    width: float = 30.0
+    height: float = 18.0
     topology: str | None = None
-    min_decision_points: int = 3
-    max_decision_points: int = 4
+    min_decision_points: int = 6
+    max_decision_points: int = 7
     obstacle_count: int | tuple[int, int] = (8, 12)
     event_count: int | tuple[int, int] = (0, 1)
     max_generation_attempts: int = 40
@@ -33,8 +33,8 @@ class RandomScenarioRequest:
             raise ValueError("min_decision_points must be positive")
         if self.max_decision_points < self.min_decision_points:
             raise ValueError("max_decision_points must be >= min_decision_points")
-        if self.max_decision_points < 3 or self.max_decision_points > 4:
-            raise ValueError("generator v1 supports three or four decision points")
+        if self.max_decision_points > 12:
+            raise ValueError("more than twelve decision points will not fit a map")
         lo, hi = ((self.obstacle_count, self.obstacle_count)
                   if isinstance(self.obstacle_count, int)
                   else self.obstacle_count)

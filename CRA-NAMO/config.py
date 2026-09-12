@@ -22,7 +22,7 @@ STRATEGIES: dict[str, StrategyFlags] = {
     "shortest": StrategyFlags(False, False, True, False),
     "llm-choice": StrategyFlags(True, True, False, True),
 }
-DEFAULT_STRATEGY = "shortest"
+DEFAULT_STRATEGY = "no-llm"
 
 
 def validate_strategy(value: str) -> str:
@@ -35,6 +35,16 @@ def validate_strategy(value: str) -> str:
 
 REASONING_EFFORTS = ("low", "high", "max")
 _EFFORT_ALIASES = {"medium": "high", "xhigh": "high"}
+
+
+def validate_profile(value: str) -> str:
+    """Check a random-map profile name without importing the generator eagerly."""
+    from scenario_generation.profiles import PROFILES
+    name = str(value).strip().lower()
+    if name not in PROFILES:
+        raise ValueError(f"unknown random-map profile {value!r}; available: "
+                         + ", ".join(sorted(PROFILES)))
+    return name
 
 
 def validate_reasoning_effort(value: str) -> str:
@@ -68,9 +78,14 @@ class Config:
 
     # Seeded-random map generation. obstacle_count is the total number of
     # movable obstacles (decision, dynamic, and background obstacles combined).
-    random_map_obstacle_count: int = 10
-    # Number of independently moving obstacles on each generated map.
-    random_map_dynamic_obstacle_count: int = 5
+    # Six gate decisions need eight or nine blockers on their own, so this is
+    # the floor for a map that still has incidental clutter in its rooms.
+    random_map_obstacle_count: int = 16
+    # Number of independently moving obstacles on each generated map. The
+    # corpus is about deliberate choices, so the world is kept mostly still:
+    # one moving obstacle poses the wait-or-replan question without turning
+    # every run into a chase.
+    random_map_dynamic_obstacle_count: int = 1
     # Number of consecutive maps produced by benchmarks/random_maps.py.
     random_map_experiment_count: int = 10
     # Whether the batch benchmark writes a PNG and GIF for each strategy run.
@@ -79,6 +94,11 @@ class Config:
     # these values directly; no command-line switches are required.
     random_map_run_strategies: tuple[str, ...] = (
         "no-llm", "shortest", "llm-cost-risk", "llm-choice")
+    # Material themes the batch cycles through, one per generated map, so a
+    # single experiment covers every vocabulary. Name one profile to run only
+    # that theme.
+    random_map_profiles: tuple[str, ...] = (
+        "depot", "home", "hospital", "earthquake")
     random_map_timeout_seconds: float = 300
     random_map_resume: bool = True
     random_map_seed_start: int = 0
@@ -160,7 +180,7 @@ class Config:
     step_execute_edges: int = 1     # edges executed before re-perception
     max_replans: int = 10000
 
-    deepseek_api_key: str = "sk-4bb1a"
+    deepseek_api_key: str = "sk-2c5fc50b67184b348a49a538c017a21d"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-flash"
     deepseek_thinking: bool = True
@@ -196,13 +216,17 @@ class Config:
             raise ValueError(
                 "random_map_dynamic_obstacle_count must be non-negative")
         if (self.random_map_obstacle_count
-                < 4 + self.random_map_dynamic_obstacle_count):
+                < 8 + self.random_map_dynamic_obstacle_count):
             raise ValueError(
-                "random_map_obstacle_count must leave room for the four "
-                "decision obstacles and configured dynamic obstacle")
+                "random_map_obstacle_count must leave room for the gate "
+                "blockers and the configured dynamic obstacles")
         if self.random_map_experiment_count < 1:
             raise ValueError(
                 "random_map_experiment_count must be positive")
+        if not self.random_map_profiles:
+            raise ValueError("random_map_profiles must not be empty")
+        self.random_map_profiles = tuple(
+            validate_profile(value) for value in self.random_map_profiles)
         if not self.random_map_run_strategies:
             raise ValueError("random_map_run_strategies must not be empty")
         self.random_map_run_strategies = tuple(
