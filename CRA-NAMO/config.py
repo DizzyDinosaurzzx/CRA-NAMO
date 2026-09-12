@@ -78,7 +78,7 @@ class Config:
     # Complete batch-experiment configuration.  The benchmark entry point reads
     # these values directly; no command-line switches are required.
     random_map_run_strategies: tuple[str, ...] = (
-        "no-llm", "shortest", "llm-cost-risk")
+        "no-llm", "shortest", "llm-cost-risk", "llm-choice")
     random_map_timeout_seconds: float = 300
     random_map_resume: bool = True
     random_map_seed_start: int = 0
@@ -162,7 +162,7 @@ class Config:
 
     deepseek_api_key: str = "sk-4bb1a"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
-    deepseek_model: str = "deepseek-v4-flash-vision-exp"
+    deepseek_model: str = "deepseek-flash"
     deepseek_thinking: bool = True
     deepseek_reasoning_effort: str = "low"
     llm_max_tokens: int | None = None

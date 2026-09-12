@@ -127,7 +127,9 @@ def _run(manifest: dict, strategy: str, image_path: str | None,
     metrics = {
         "strategy": strategy, "status": status, "success": result.success,
         "C": result.C, "J": result.J, "risk_cost": result.risk_cost,
-        "T": result.T, "wait_time": result.wait_time,
+        "walk_cost": result.walk_cost, "work_cost": result.work_cost,
+        "T": result.T, "move_time": result.move_time,
+        "wait_time": result.wait_time,
         "wall_time_seconds": round(wall_time, 6),
         "plan_time_seconds": result.plan_time,
         "cycles": result.cycles, "expansions": result.total_expansions,
@@ -355,69 +357,110 @@ def _mean(values) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-_SUMMARY_TITLE_FS = 15     # panel title font size
-_SUMMARY_LABEL_FS = 12     # axis label font size
-_SUMMARY_TICK_FS = 11      # tick label font size
-_SUMMARY_LEGEND_FS = 12    # legend font size
+# The final comparison is a table, not a chart: one row per strategy, one
+# column per quantity the strategies are actually being compared on.
+_SUMMARY_COLUMNS = (
+    ("strategy", "strategy", "{}"),
+    ("runs", "runs", "{:d}"),
+    ("success_rate", "success %", "{:.1f}"),
+    ("llm_calls", "LLM calls", "{:,.1f}"),
+    ("J", "J", "{:,.1f}"),
+    ("work_cost", "W (obstacle)", "{:,.1f}"),
+    ("T", "T [s]", "{:,.2f}"),
+    ("move_time", "move [s]", "{:,.2f}"),
+    ("wait_time", "wait [s]", "{:,.2f}"),
+)
+
+_SUMMARY_NOTE = (
+    "success %% and LLM calls cover all %d runs; "
+    "J, W, T, move and wait are averaged over successful runs only "
+    "(%s). W is the obstacle-manipulation work inside J."
+)
 
 
-def _generate_summary_figure(rows: list[dict], out_path: Path,
-                             strategies: tuple[str, ...]) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def _summary_rows(rows: list[dict], strategies: tuple[str, ...]) -> list[dict]:
+    """Aggregate one comparison row per strategy."""
+    table = []
+    for strategy in strategies:
+        runs = [row for row in rows if row.get("strategy") == strategy]
+        done = [row for row in runs if row.get("success")]
+        table.append({
+            "strategy": strategy,
+            "runs": len(runs),
+            "succeeded": len(done),
+            "success_rate": 100.0 * len(done) / len(runs) if runs else 0.0,
+            "llm_calls": _mean([row.get("llm_calls") for row in runs]),
+            "J": _mean([row.get("J") for row in done]),
+            "work_cost": _mean([row.get("work_cost") for row in done]),
+            "T": _mean([row.get("T") for row in done]),
+            "move_time": _mean([row.get("move_time") for row in done]),
+            "wait_time": _mean([row.get("wait_time") for row in done]),
+        })
+    return table
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8.5), constrained_layout=True)
-    colours = plt.cm.Set2.colors
-    grouped = {strategy: [row for row in rows if row["strategy"] == strategy]
-               for strategy in strategies}
 
-    def bars(ax, values, title, ylabel):
-        ax.bar(strategies, values,
-               color=[colours[i % len(colours)] for i in range(len(strategies))])
-        ax.set_title(title)
-        ax.set_ylabel(ylabel)
-        ax.grid(axis="y", alpha=0.25)
+# Columns that only make sense over runs that actually reached the goal.
+_AVERAGED_OVER_SUCCESSES = ("J", "work_cost", "T", "move_time", "wait_time")
 
-    bars(axes[0, 0], [_mean([int(r.get("success", False)) for r in grouped[s]]) * 100
-                      for s in strategies], "Success rate", "%")
-    bars(axes[0, 1], [_mean([r.get("C") for r in grouped[s] if r.get("success")])
-                      for s in strategies], "Average cost", "C")
-    bars(axes[0, 2], [_mean([r.get("wall_time_seconds") for r in grouped[s]])
-                      for s in strategies], "Average wall time", "seconds")
-    bars(axes[1, 0], [_mean([r.get("cycles") for r in grouped[s]])
-                      for s in strategies], "Average replans", "cycles")
-    for index, strategy in enumerate(strategies):
-        data = grouped[strategy]
-        obstacle_counts = sorted({r.get("obstacle_count") for r in data})
-        axes[1, 1].plot(obstacle_counts, [
-            _mean([int(r.get("success", False)) for r in data
-                   if r.get("obstacle_count") == count]) * 100
-            for count in obstacle_counts], marker="o", label=strategy,
-            color=colours[index % len(colours)])
-        dynamic_counts = sorted({r.get("dynamic_obstacle_count") for r in data})
-        axes[1, 2].plot(dynamic_counts, [
-            _mean([r.get("wall_time_seconds") for r in data
-                   if r.get("dynamic_obstacle_count") == count])
-            for count in dynamic_counts], marker="o", label=strategy,
-            color=colours[index % len(colours)])
-    axes[1, 1].set(title="Obstacle count vs success rate",
-                   xlabel="obstacles", ylabel="success %")
-    axes[1, 2].set(title="Dynamic obstacles vs wall time",
-                   xlabel="dynamic obstacles", ylabel="seconds")
-    for ax in axes[1, 1:]:
-        ax.grid(alpha=0.25)
-        ax.legend(fontsize=_SUMMARY_LEGEND_FS)
-    for ax in axes.flat:
-        ax.title.set_fontsize(_SUMMARY_TITLE_FS)
-        ax.xaxis.label.set_fontsize(_SUMMARY_LABEL_FS)
-        ax.yaxis.label.set_fontsize(_SUMMARY_LABEL_FS)
-        ax.tick_params(labelsize=_SUMMARY_TICK_FS)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = out_path.with_name(out_path.name + ".tmp")
-    fig.savefig(temporary, dpi=150, format="png")
-    plt.close(fig)
-    os.replace(temporary, out_path)
+
+def _summary_cells(table: list[dict]) -> list[list[str]]:
+    """Format every cell, leaving what has not been measured yet blank."""
+    body = []
+    for row in table:
+        cells = []
+        for key, _, spec in _SUMMARY_COLUMNS:
+            blank = ((not row["runs"] and key != "strategy")
+                     or (key in _AVERAGED_OVER_SUCCESSES and not row["succeeded"]))
+            cells.append("-" if blank else spec.format(row[key]))
+        body.append(cells)
+    return body
+
+
+def _summary_text(table: list[dict]) -> str:
+    """Render the comparison as an aligned plain-text table."""
+    headers = [header for _, header, _ in _SUMMARY_COLUMNS]
+    body = _summary_cells(table)
+    widths = [max(len(headers[i]), *(len(row[i]) for row in body))
+              if body else len(headers[i]) for i in range(len(headers))]
+
+    def line(cells):
+        return "  ".join(
+            cell.ljust(widths[i]) if i == 0 else cell.rjust(widths[i])
+            for i, cell in enumerate(cells))
+
+    out = [line(headers), "  ".join("-" * width for width in widths)]
+    out.extend(line(row) for row in body)
+    return "\n".join(out)
+
+
+def _summary_markdown(table: list[dict]) -> str:
+    headers = [header for _, header, _ in _SUMMARY_COLUMNS]
+    aligns = ["---" if i == 0 else "---:" for i in range(len(headers))]
+    lines = ["| " + " | ".join(headers) + " |",
+             "| " + " | ".join(aligns) + " |"]
+    lines.extend("| " + " | ".join(row) + " |" for row in _summary_cells(table))
+    return "\n".join(lines)
+
+
+def _write_summary(out: Path, rows: list[dict],
+                   strategies: tuple[str, ...]) -> str:
+    """Write the strategy comparison as Markdown and CSV; return the text form."""
+    table = _summary_rows(rows, strategies)
+    total_runs = sum(row["runs"] for row in table)
+    succeeded = ", ".join(f"{row['strategy']} {row['succeeded']}"
+                          for row in table)
+    note = _SUMMARY_NOTE % (total_runs, succeeded)
+    _atomic_text(out / "experiment_summary.md",
+                 "# Strategy comparison\n\n" + _summary_markdown(table)
+                 + "\n\n" + note + "\n")
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer, fieldnames=[key for key, _, _ in _SUMMARY_COLUMNS] + ["succeeded"])
+    writer.writeheader()
+    for row in table:
+        writer.writerow({key: row[key] for key in writer.fieldnames})
+    _atomic_text(out / "experiment_summary.csv", buffer.getvalue())
+    return _summary_text(table) + "\n\n" + note
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -560,6 +603,7 @@ def main() -> int:
             "map_json": str(map_path), "fingerprint": generated.fingerprint,
             "strategies": map_rows, "completed_at": _utc_now()})
         _atomic_json(out / "coverage.json", _coverage(manifests))
+        _write_summary(out, rows, strategies)
         save_progress("running", seed=seed)
         elapsed = time.monotonic() - benchmark_started
         eta = elapsed / completed_maps * (len(seeds) - completed_maps)
@@ -567,10 +611,12 @@ def main() -> int:
               f"map time {_format_duration(time.monotonic() - map_started)}, "
               f"ETA {_format_duration(eta)}", flush=True)
 
-    summary_path = out / "experiment_summary.png"
-    _generate_summary_figure(rows, summary_path, strategies)
+    summary = _write_summary(out, rows, strategies)
     save_progress("completed")
-    print(f"\nCompleted {len(seeds)} maps. Summary -> {summary_path}", flush=True)
+    print(f"\nCompleted {len(seeds)} maps.\n")
+    print(summary, flush=True)
+    print(f"\nSummary -> {out / 'experiment_summary.md'}, "
+          f"{out / 'experiment_summary.csv'}", flush=True)
     return 0
 
 
