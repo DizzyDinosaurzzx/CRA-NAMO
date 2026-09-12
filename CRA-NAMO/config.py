@@ -132,8 +132,6 @@ class Config:
     R_manip: float = 5.0             # relocation search radius [m]
     # Soft preference for forward drop poses; zero disables it.
     manip_forward_penalty: float = 2.0
-    # Score candidate drop poses using the remaining robot route.
-    manip_lookahead: bool = True
     manip_max_frames_per_action: int = 30
     # Penalty, in metres of obstacle travel, for reducing roadmap clearance.
     manip_blocked_edge_penalty_m: float = 0.0
