@@ -29,8 +29,12 @@ def _config_dict(cfg: Config) -> dict:
     result.pop("deepseek_api_key", None)
     # Corpus size does not describe an individual map and must not affect its
     # content fingerprint.
-    result.pop("random_map_experiment_count", None)
-    result.pop("random_map_generate_images", None)
+    for name in (
+            "random_map_experiment_count", "random_map_generate_images",
+            "random_map_run_strategies", "random_map_timeout_seconds",
+            "random_map_resume", "random_map_seed_start",
+            "random_map_output_dir"):
+        result.pop(name, None)
     return result
 
 

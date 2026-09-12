@@ -155,6 +155,9 @@ class WorldDynamics:
         self.actors: Dict[int, Actor] = {}
         self.moved_by_robot: set = set()
         self.moved_on_own: set = set()
+        # Actual centre trajectories, retained even when animation frames are
+        # disabled so benchmark summary PNGs can show dynamic motion.
+        self.tracks: Dict[int, List[XY]] = {}
         self.log: List[Tuple[float, str]] = []
         self.version = 0
         self.clock = 0.0
@@ -220,6 +223,8 @@ class WorldDynamics:
         """为障碍物设置移动目标。"""
         if self.obstacle(oid) is None:
             return
+        obs = self.obstacle(oid)
+        self.tracks.setdefault(oid, [(obs.x, obs.y)])
         self.actors[oid] = Actor(oid, tuple(goal),
                                  float(self.cfg.dynamic_speed if speed is None
                                        else speed))
@@ -377,6 +382,10 @@ class WorldDynamics:
         if moved:
             obs.x, obs.y, obs.theta = pose
             self.moved_on_own.add(actor.oid)
+            point = (obs.x, obs.y)
+            track = self.tracks.setdefault(actor.oid, [point])
+            if not track or track[-1] != point:
+                track.append(point)
             actor.waited = 0.0
             if actor.leg + 1 >= len(actor.path):
                 actor.arrived = True

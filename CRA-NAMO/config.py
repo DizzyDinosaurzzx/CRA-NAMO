@@ -15,6 +15,8 @@ class StrategyFlags(NamedTuple):
 
 
 STRATEGIES: dict[str, StrategyFlags] = {
+    # Primary CRA-NAMO method: LLM estimates both manipulation cost and risk.
+    "cra-namo": StrategyFlags(True, True, False, False),
     "llm-cost-risk": StrategyFlags(True, True, False, False),
     "llm-cost": StrategyFlags(True, False, False, False),
     "llm-risk": StrategyFlags(False, True, False, False),
@@ -71,10 +73,18 @@ class Config:
     random_map_obstacle_count: int = 10
     # Number of independently moving obstacles on each generated map.
     random_map_dynamic_obstacle_count: int = 5
-    # Number of maps produced by benchmarks/random_maps.py when --seeds is omitted.
+    # Number of consecutive maps produced by benchmarks/random_maps.py.
     random_map_experiment_count: int = 10
-    # Whether the batch benchmark writes a summary PNG for each strategy run.
+    # Whether the batch benchmark writes a PNG and GIF for each strategy run.
     random_map_generate_images: bool = True
+    # Complete batch-experiment configuration.  The benchmark entry point reads
+    # these values directly; no command-line switches are required.
+    random_map_run_strategies: tuple[str, ...] = (
+        "no-llm", "shortest", "cra-namo")
+    random_map_timeout_seconds: float = 300
+    random_map_resume: bool = True
+    random_map_seed_start: int = 0
+    random_map_output_dir: str = "img/random_experiments"
 
     # Motion limits for unloaded and loaded driving.
     robot_v_max: float = 0.6         # [m/s]
@@ -152,7 +162,7 @@ class Config:
     step_execute_edges: int = 1     # edges executed before re-perception
     max_replans: int = 10000
 
-    deepseek_api_key: str = ""
+    deepseek_api_key: str = "sk-4bb1a5aef5974898ac20b43dc275466a"
     deepseek_base_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_thinking: bool = True
@@ -195,6 +205,18 @@ class Config:
         if self.random_map_experiment_count < 1:
             raise ValueError(
                 "random_map_experiment_count must be positive")
+        if not self.random_map_run_strategies:
+            raise ValueError("random_map_run_strategies must not be empty")
+        self.random_map_run_strategies = tuple(
+            validate_strategy(value) for value in self.random_map_run_strategies)
+        if len(set(self.random_map_run_strategies)) != len(
+                self.random_map_run_strategies):
+            raise ValueError("random_map_run_strategies must not contain duplicates")
+        if self.random_map_timeout_seconds <= 0:
+            raise ValueError("random_map_timeout_seconds must be positive")
+        self.random_map_seed_start = int(self.random_map_seed_start)
+        if not str(self.random_map_output_dir).strip():
+            raise ValueError("random_map_output_dir must not be empty")
         self.lambda_distance = validate_lambda(self.lambda_distance)
         self.time_importance = validate_time_importance(self.time_importance)
         self.strategy = validate_strategy(self.strategy)

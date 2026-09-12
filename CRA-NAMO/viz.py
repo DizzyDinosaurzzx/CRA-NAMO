@@ -14,6 +14,7 @@ matplotlib.rcParams["mathtext.fontset"] = "stix"
 import matplotlib.patheffects as patheffects
 from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, LogNorm, to_rgb
+from matplotlib.lines import Line2D
 from matplotlib.patches import PathPatch, Rectangle
 from matplotlib.path import Path
 from PIL import Image
@@ -113,6 +114,23 @@ def _draw_obstacle_key(ax, show_unperceived: bool, show_world_moved: bool = Fals
         ax.add_patch(Rectangle((0, 0), 0, 0, facecolor="none",
                                edgecolor=_UNPERCEIVED, lw=1.0, ls=":",
                                label="not yet perceived"))
+
+
+def _draw_benchmark_key(ax, dynamic_oids):
+    """Add the semantic obstacle and trajectory legend used by benchmarks."""
+    ax.add_patch(Rectangle((0, 0), 0, 0, facecolor=_WALL,
+                           edgecolor=_WALL_EDGE, label="static obstacle"))
+    ax.add_patch(Rectangle((0, 0), 0, 0, facecolor=_difficulty_cmap()(0.45),
+                           edgecolor=_OBSTACLE_EDGE, label="ordinary obstacle"))
+    if dynamic_oids:
+        ax.add_patch(Rectangle((0, 0), 0, 0,
+                               facecolor=_difficulty_cmap()(0.7),
+                               edgecolor=_WORLD_EDGE, hatch="///",
+                               label="dynamic obstacle"))
+        ax.add_line(Line2D([], [], color=_WORLD_EDGE, lw=1.8, ls="--",
+                           label="dynamic obstacle trajectory"))
+    ax.add_line(Line2D([], [], color=_ROUTE, lw=2.2,
+                       label="actual robot trajectory"))
 
 
 def _draw_difficulty_key(fig, ax, colours, low, high):
@@ -307,23 +325,37 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
                          ncol=min(len(handles), _LEGEND_NCOL), fontsize=8,
                          framealpha=0.9, borderaxespad=0.0)
 
-def _summary_title(sim: OnlineNAMO, res) -> list:
+def _summary_title(sim: OnlineNAMO, res, benchmark_info=None) -> list:
+    info = benchmark_info or {}
     moved = (f"{len(res.removed)} obstacles" if len(res.removed) > 8
              else (str(res.removed) if res.removed else "none"))
+    status = str(info.get("status") or ("success" if res.success else "failed"))
+    identity = []
+    if "experiment_index" in info:
+        identity.append(f"experiment {info['experiment_index']}/{info.get('experiment_total', '?')}")
+    if "seed" in info:
+        identity.append(f"seed={info['seed']}")
+    if info.get("strategy"):
+        identity.append(f"strategy={info['strategy']}")
+    if info.get("llm_modes"):
+        identity.append(f"LLM {info['llm_modes']}")
     return [
-        ("", [res.message]),
-        ("cost", [f"J={res.J:,}",
+        ("", identity),
+        ("status", [status.upper(), res.message]),
+        ("cost", [f"C={res.C:,}", f"J={res.J:,}",
                   f"lambda*D={res.walk_cost:,}",
                   f"W={res.work_cost:,}"]),
-        ("time", [f"plan {res.plan_time:,g}s",
-                  f"move {res.move_time:,g}s",
+        ("time", [f"wall {info.get('wall_time_seconds', res.plan_time):,.2f}s",
+                  f"simulated {res.T:,g}s",
                   f"time_importance={sim.cfg.time_importance:g}"]),
-        ("moved", [moved]),
+        ("replans", [str(res.cycles)]),
+        ("moved by robot", [moved]),
     ]
 
 
-def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
-    title = _lay_out_title(_summary_title(sim, res),
+def visualize(sim: OnlineNAMO, res, original_poses, out_path: str,
+              benchmark_info=None):
+    title = _lay_out_title(_summary_title(sim, res, benchmark_info),
                            _PLOT_BOX[0], max_lines=8)
     fig, ax = _new_canvas(sim, title_lines=title.count("\n") + 1)
     _draw_static(ax, sim, original_poses)
@@ -331,10 +363,12 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     # Color fill encodes true difficulty; outline encodes movement.
     colours, low, high = difficulty_palette(sim.world)
     world_moved = set(sim.dynamics.moved_on_own)
+    dynamic_oids = set((benchmark_info or {}).get("dynamic_oids", ()))
     for w in sim.world:
         edge, lw = _obstacle_edge(w.oid, w.removed, world_moved)
         _plot_poly(ax, w.polygon, facecolor=colours[w.oid], alpha=_OBSTACLE_ALPHA,
-                   edgecolor=edge, lw=lw, zorder=3)
+                   edgecolor=edge, lw=lw, zorder=3,
+                   hatch="///" if w.oid in dynamic_oids else None)
         colour = _label_colour(colours[w.oid])
         ax.text(w.x, w.y, _obstacle_label(w.oid, sim.estimator.cache,
                                            sim.belief.touched_difficulty,
@@ -345,17 +379,27 @@ def visualize(sim: OnlineNAMO, res, original_poses, out_path: str):
     _draw_difficulty_key(fig, ax, colours, low, high)
     _draw_obstacle_key(ax, show_unperceived=False,
                        show_world_moved=bool(world_moved))
+    if benchmark_info is not None:
+        _draw_benchmark_key(ax, dynamic_oids)
+
+    for oid, track in sim.dynamics.tracks.items():
+        if len(track) >= 2:
+            ax.plot([p[0] for p in track], [p[1] for p in track],
+                    color=_WORLD_EDGE, lw=1.8, ls="--", alpha=0.9, zorder=4)
 
     # Draw the robot motion trail.
     if len(res.robot_track) >= 2:
         corridor = LineString(res.robot_track).buffer(sim.cfg.robot_radius, cap_style=1)
         _plot_poly(ax, corridor, facecolor=_TRAIL, alpha=0.45, zorder=_TRAIL_Z)
+        ax.plot([p[0] for p in res.robot_track],
+                [p[1] for p in res.robot_track], color=_ROUTE,
+                lw=1.5, alpha=0.9, zorder=_TRAIL_Z + 0.2)
     elif res.robot_track:
         # Draw a circle when the robot did not move.
         p = Point(res.robot_track[0]).buffer(sim.cfg.robot_radius)
         _plot_poly(ax, p, facecolor=_TRAIL, alpha=0.45, zorder=_TRAIL_Z)
     _finish_ax(ax, sim, title)
-    fig.savefig(out_path, dpi=130)
+    fig.savefig(out_path, dpi=130, format="png")
     plt.close(fig)
 
 
@@ -474,6 +518,7 @@ def render_sequence(sim: OnlineNAMO, res, original_poses, gif_path: str):
     step_ms = max(20, int(round(1000.0 / cfg.gif_fps)))
     durations = [step_ms] * len(images)
     durations[-1] = max(step_ms, int(cfg.gif_end_hold_s * 1000))  # pause on the result
-    images[0].save(gif_path, save_all=True, append_images=images[1:],
+    images[0].save(gif_path, format="GIF", save_all=True,
+                   append_images=images[1:],
                    duration=durations, loop=0, optimize=True)
     return len(images), step

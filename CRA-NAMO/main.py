@@ -64,7 +64,8 @@ def main():
     ap.add_argument("--strategy", default=None,
                     choices=sorted(config.STRATEGIES),
                     help="What the LLM is asked to estimate. "
-                         "llm-cost-risk: LLM estimates both push cost and risk; "
+                         "cra-namo (alias: llm-cost-risk): LLM estimates both "
+                         "push cost and risk; "
                          "llm-cost: LLM estimates cost, risk falls back to the "
                          "offline keyword table; "
                          "llm-risk: LLM estimates risk, cost falls back to the "

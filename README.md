@@ -161,7 +161,21 @@ python CRA-NAMO/main.py --scenario corridor --frames
 
 `seeded_random` 使用“房间连接图 → 墙体与门洞 → 决策点挖掘 → 背景障碍物 → 动态事件 → 决策难度校准 → 分级校验”的流水线生成地图。随机性按墙体、障碍物几何、物理属性、隐藏状态、事件和校准分别派生，因此同一 seed 可以稳定重放，也不会因某个采样器增加一次随机调用而改变整张地图。
 
-随机地图和批量实验的常用选项统一在 `CRA-NAMO/config.py` 中调整：`random_map_obstacle_count` 是每张地图的可移动障碍物总数，`random_map_dynamic_obstacle_count` 是其中的动态障碍物数，`random_map_experiment_count` 是批量脚本未传 `--seeds` 时生成的地图数，`random_map_generate_images` 控制批量运行是否生成每种策略的 summary PNG（默认 `True`）。这些数量按 config 原值生效；显式传入 `--seeds` 仍会覆盖实验地图数量。
+随机地图批量实验的全部选项统一在 `CRA-NAMO/config.py` 中调整：
+
+```python
+random_map_obstacle_count = 10
+random_map_dynamic_obstacle_count = 5
+random_map_experiment_count = 10
+random_map_generate_images = True
+random_map_run_strategies = ("no-llm", "shortest", "cra-namo")
+random_map_timeout_seconds = 300
+random_map_resume = True
+random_map_seed_start = 0
+random_map_output_dir = "img/random_experiments"
+```
+
+批量入口不再接收 `--run`、`--seeds` 或 `--out` 等实验参数，运行时只读取以上配置。默认三组分别是启发式 CRA-NAMO（`no-llm`）、最短路径基线（`shortest`）和同时使用 LLM 成本与风险估计的完整方法（`cra-namo`，等价于原有 `llm-cost-risk`）。
 
 默认拓扑会随机生成 3–4 行、4–5 列的不等尺寸房间，然后从网格邻接关系中删除部分连接，同时保留整体连通性。不同 seed 会产生不同的环路、死路、岔路和最短路径长度。决策障碍物不是绑定在固定编号墙上，而是放到最短路线中具有反事实绕行路径的门边；验证器会确认每个关键门边被移除后仍有替代路线。房间内部还会生成不占用图通道的随机斜墙。
 
@@ -184,16 +198,19 @@ python CRA-NAMO/main.py --scenario seeded_random \
 
 校准阶段保持房间图和墙体不变，根据门边的反事实绕行长度调节关键障碍物的真实推动阻力，并根据替代路线代价调节临时封路的等待窗口。定量决策的最优与次优代价差控制在 5%–30%，且由独立随机流决定是搬移、绕行、安全搬移、等待还是重规划占优，避免所有 seed 都给出同一种答案。隐藏难度决策同时保存接触前 belief 与接触后真值标签，用来检查算法能否因新信息改变选择。
 
-批量生成种子语料；加 `--run` 会进一步执行 `no-llm` 与 `shortest` 两个对照策略：
+一键生成随机地图并运行配置的全部对照策略：
 
 ```bash
-python CRA-NAMO/benchmarks/random_maps.py \
-  --seeds 0:99 --profile benchmark --out img/random_benchmark
+python3 CRA-NAMO/benchmarks/random_maps.py
 ```
 
-批量输出除了逐 seed 的 `results.json`、`results.csv` 和地图 manifest，还包含 `coverage.json`，汇总拓扑族、唯一拓扑签名、决策类型、事件模板、oracle 动作分布和决策差距范围。加 `--run` 后，每个策略还会输出 `oracle_accuracy`、`oracle_regret` 和禁止动作选择次数。
+所有批量产物保存在 `img/random_experiments/`。地图按生成顺序分入 `experiment_0001/`、`experiment_0002/` 等目录；每个目录包含地图 JSON、三种策略的结果 JSON、三张 PNG、三张 GIF 和该地图的合并结果。文件名同时包含实验编号与策略，例如 `experiment_0001_cra-namo.png` 和 `experiment_0001_cra-namo.gif`。
 
-随机地图默认按实验编号命名产物。例如 seed 42 的运行会生成 `experiment_0042_showcase_no-llm_<id>_animation.gif`、`experiment_0042_showcase_no-llm_<id>_summary.png` 和 `maps/experiment_0042_showcase_map_<id>.json`。末尾保留 8 位内容 ID 防止同一实验编号在生成规则变化后被静默覆盖。批量跑实验或只需要统计结果时可以显式传入 `--no-frames`；`random_maps.py` 的 benchmark runner 始终关闭动画以避免批量实验被渲染耗时主导。
+每个策略完成后会立即原子写入当前实验目录，并同步更新根目录下的 `results.json`、`results.csv` 和 `progress.json`；一张地图的全部策略完成后，会立即写入 `experiment_XXXX_results.json` 和当前 `coverage.json`。`progress.json` 包含已完成地图/运行数、当前 seed 与策略、运行时间和 ETA。开启 `random_map_resume` 后，重启会跳过已有且 PNG、GIF、结果 JSON 均完整的策略；单个策略超过 `random_map_timeout_seconds` 时，其子进程会被终止并记录为 `timeout`，同时生成对应的状态 PNG 和 GIF。
+
+单次 PNG 标出实验编号、seed、策略、成功/失败/超时状态、成本、墙钟/仿真时间、重规划次数、起终点、机器人实际轨迹、机器人搬动的障碍物、动态障碍物及其实际轨迹。全部实验结束后自动生成 `experiment_summary.png`，包含成功率、平均成本、平均运行时间、平均重规划次数、障碍物数量与成功率、动态障碍物数量与耗时六项对比。
+
+单地图入口仍按 seed 和内容指纹命名；批量入口则严格按本次地图生成顺序编号，并为每种策略保存静态结果图和完整动画。
 
 每张 manifest 保存墙体多边形、障碍物真实物理属性、动态事件、决策点、校准摘要、配置、校验指标和内容指纹；每个决策点的 `metadata.oracle` 保存候选代价、最优动作、相对差距，以及可用时的接触前 belief。随机生成器实现位于 `CRA-NAMO/scenario_generation/`。
 
