@@ -355,6 +355,12 @@ def _mean(values) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+_SUMMARY_TITLE_FS = 15     # panel title font size
+_SUMMARY_LABEL_FS = 12     # axis label font size
+_SUMMARY_TICK_FS = 11      # tick label font size
+_SUMMARY_LEGEND_FS = 12    # legend font size
+
+
 def _generate_summary_figure(rows: list[dict], out_path: Path,
                              strategies: tuple[str, ...]) -> None:
     import matplotlib
@@ -401,7 +407,12 @@ def _generate_summary_figure(rows: list[dict], out_path: Path,
                    xlabel="dynamic obstacles", ylabel="seconds")
     for ax in axes[1, 1:]:
         ax.grid(alpha=0.25)
-        ax.legend()
+        ax.legend(fontsize=_SUMMARY_LEGEND_FS)
+    for ax in axes.flat:
+        ax.title.set_fontsize(_SUMMARY_TITLE_FS)
+        ax.xaxis.label.set_fontsize(_SUMMARY_LABEL_FS)
+        ax.yaxis.label.set_fontsize(_SUMMARY_LABEL_FS)
+        ax.tick_params(labelsize=_SUMMARY_TICK_FS)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = out_path.with_name(out_path.name + ".tmp")
     fig.savefig(temporary, dpi=150, format="png")

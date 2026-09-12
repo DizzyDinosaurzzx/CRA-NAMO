@@ -168,14 +168,14 @@ random_map_obstacle_count = 10
 random_map_dynamic_obstacle_count = 5
 random_map_experiment_count = 10
 random_map_generate_images = True
-random_map_run_strategies = ("no-llm", "shortest", "cra-namo")
+random_map_run_strategies = ("no-llm", "shortest", "llm-cost-risk")
 random_map_timeout_seconds = 300
 random_map_resume = True
 random_map_seed_start = 0
 random_map_output_dir = "img/random_experiments"
 ```
 
-批量入口不再接收 `--run`、`--seeds` 或 `--out` 等实验参数，运行时只读取以上配置。默认三组分别是启发式 CRA-NAMO（`no-llm`）、最短路径基线（`shortest`）和同时使用 LLM 成本与风险估计的完整方法（`cra-namo`，等价于原有 `llm-cost-risk`）。
+批量入口不再接收 `--run`、`--seeds` 或 `--out` 等实验参数，运行时只读取以上配置。默认三组分别是启发式 CRA-NAMO（`no-llm`）、最短路径基线（`shortest`）和同时使用 LLM 成本与风险估计的完整方法（`llm-cost-risk`）。
 
 默认拓扑会随机生成 3–4 行、4–5 列的不等尺寸房间，然后从网格邻接关系中删除部分连接，同时保留整体连通性。不同 seed 会产生不同的环路、死路、岔路和最短路径长度。决策障碍物不是绑定在固定编号墙上，而是放到最短路线中具有反事实绕行路径的门边；验证器会确认每个关键门边被移除后仍有替代路线。房间内部还会生成不占用图通道的随机斜墙。
 
@@ -204,7 +204,7 @@ python CRA-NAMO/main.py --scenario seeded_random \
 python3 CRA-NAMO/benchmarks/random_maps.py
 ```
 
-所有批量产物保存在 `img/random_experiments/`。地图按生成顺序分入 `experiment_0001/`、`experiment_0002/` 等目录；每个目录包含地图 JSON、三种策略的结果 JSON、三张 PNG、三张 GIF 和该地图的合并结果。文件名同时包含实验编号与策略，例如 `experiment_0001_cra-namo.png` 和 `experiment_0001_cra-namo.gif`。
+所有批量产物保存在 `img/random_experiments/`。地图按生成顺序分入 `experiment_0001/`、`experiment_0002/` 等目录；每个目录包含地图 JSON、三种策略的结果 JSON、三张 PNG、三张 GIF 和该地图的合并结果。文件名同时包含实验编号与策略，例如 `experiment_0001_llm-cost-risk.png` 和 `experiment_0001_llm-cost-risk.gif`。
 
 每个策略完成后会立即原子写入当前实验目录，并同步更新根目录下的 `results.json`、`results.csv` 和 `progress.json`；一张地图的全部策略完成后，会立即写入 `experiment_XXXX_results.json` 和当前 `coverage.json`。`progress.json` 包含已完成地图/运行数、当前 seed 与策略、运行时间和 ETA。开启 `random_map_resume` 后，重启会跳过已有且 PNG、GIF、结果 JSON 均完整的策略；单个策略超过 `random_map_timeout_seconds` 时，其子进程会被终止并记录为 `timeout`，同时生成对应的状态 PNG 和 GIF。
 

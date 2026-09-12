@@ -15,8 +15,6 @@ class StrategyFlags(NamedTuple):
 
 
 STRATEGIES: dict[str, StrategyFlags] = {
-    # Primary CRA-NAMO method: LLM estimates both manipulation cost and risk.
-    "cra-namo": StrategyFlags(True, True, False, False),
     "llm-cost-risk": StrategyFlags(True, True, False, False),
     "llm-cost": StrategyFlags(True, False, False, False),
     "llm-risk": StrategyFlags(False, True, False, False),
@@ -80,7 +78,7 @@ class Config:
     # Complete batch-experiment configuration.  The benchmark entry point reads
     # these values directly; no command-line switches are required.
     random_map_run_strategies: tuple[str, ...] = (
-        "no-llm", "shortest", "cra-namo")
+        "no-llm", "shortest", "llm-cost-risk")
     random_map_timeout_seconds: float = 300
     random_map_resume: bool = True
     random_map_seed_start: int = 0

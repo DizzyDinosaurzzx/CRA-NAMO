@@ -142,8 +142,9 @@ def _draw_difficulty_key(fig, ax, colours, low, high):
         return
     fw, fh = fig.get_figwidth(), fig.get_figheight()
     width = min(0.5 * fw, 3.4)
-    cax = fig.add_axes(((fw - width) / 2.0 / fw, (_LEGEND_H + 0.17) / fh,
-                        width / fw, 0.10 / fh))
+    cax = fig.add_axes(((fw - width) / 2.0 / fw,
+                        (_LEGEND_H + _CBAR_TICK_H) / fh,
+                        width / fw, _CBAR_BAR_H / fh))
     bar = fig.colorbar(
         plt.cm.ScalarMappable(norm=LogNorm(vmin=low, vmax=high),
                               cmap=_difficulty_cmap()),
@@ -152,10 +153,10 @@ def _draw_difficulty_key(fig, ax, colours, low, high):
     bar.set_ticks(ticks)
     bar.set_ticklabels([f"{t:,.0f}" for t in ticks])
     bar.ax.minorticks_off()
-    bar.ax.tick_params(labelsize=6, length=2, pad=1)
+    bar.ax.tick_params(labelsize=_CBAR_FS - 0.5, length=2, pad=1)
     bar.outline.set_linewidth(0.5)
     bar.ax.set_title("obstacle difficulty — push force [N], shown for the reader "
-                     "only", fontsize=6.5, pad=3)
+                     "only", fontsize=_CBAR_FS, pad=3)
 
 
 def _poly_path(poly) -> Path:
@@ -263,12 +264,20 @@ def _draw_static(ax, sim: OnlineNAMO, original_poses):
 _PLOT_BOX = (8.0, 7.0)     # max plot area (width, height), inches
 _MARGIN = 0.5              # left/right + bottom tick-label margin, inches
 _TOP_PAD = 0.12            # whitespace above title, inches
-_TITLE_LINE = 0.24         # height per title line, inches
+_TITLE_FS = 13             # title font size
+_LEGEND_FS = 11            # bottom legend font size
+_CBAR_FS = 9               # difficulty colourbar title and tick font size
+# The reserved bands below are derived from the font sizes, so enlarging a font
+# widens its band instead of letting the text run into its neighbour.
+_TITLE_LINE = 1.92 * _TITLE_FS / 72.0     # height per title line, inches
 _TITLE_LINES = 4           # height reserved above every animation frame
-_LEGEND_H = 0.5            # bottom legend strip height, inches
-_CBAR_H = 0.46             # difficulty colourbar strip, above the legend, inches
-_TITLE_FS = 9              # title font size
-_LEGEND_NCOL = 6
+_LEGEND_NCOL = 4           # columns before the legend wraps to another row
+_LEGEND_ROWS = 3           # legend rows the bottom strip must fit
+_LEGEND_H = _LEGEND_ROWS * 1.55 * _LEGEND_FS / 72.0 + 0.12  # legend strip, inches
+_CBAR_TICK_H = _CBAR_FS / 72.0 + 0.08     # tick labels below the bar, inches
+_CBAR_BAR_H = 0.10                        # the coloured bar itself, inches
+# difficulty colourbar strip, above the legend: ticks + bar + its own title
+_CBAR_H = _CBAR_TICK_H + _CBAR_BAR_H + _CBAR_FS / 72.0 + 0.10
 
 
 def _lay_out_title(groups, width_inch: float, max_lines: int = _TITLE_LINES) -> str:
@@ -322,7 +331,8 @@ def _finish_ax(ax, sim: OnlineNAMO, title: str):
     if handles:
         ax.figure.legend(handles, labels, loc="lower center",
                          bbox_to_anchor=(0.5, 0.008),
-                         ncol=min(len(handles), _LEGEND_NCOL), fontsize=8,
+                         ncol=min(len(handles), _LEGEND_NCOL),
+                         fontsize=_LEGEND_FS,
                          framealpha=0.9, borderaxespad=0.0)
 
 def _summary_title(sim: OnlineNAMO, res, benchmark_info=None) -> list:
